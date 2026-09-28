@@ -48,8 +48,10 @@ pub(crate) fn to_bytes(v: &[f32]) -> Vec<u8> {
 
 /// Deserializes a little-endian byte blob back into a vector (trailing partial bytes are ignored).
 pub(crate) fn from_bytes(b: &[u8]) -> Vec<f32> {
-    b.chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+    b.as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| f32::from_le_bytes(*c))
         .collect()
 }
 
@@ -122,6 +124,8 @@ mod tests {
         let v = vec![0.0_f32, 1.5, -2.25, 1e9, -1e-9];
         assert_eq!(from_bytes(&to_bytes(&v)), v);
         assert!(from_bytes(&[]).is_empty());
+        // Trailing partial bytes are ignored: 1.0f32 is 00 00 80 3f little-endian, then one stray byte.
+        assert_eq!(from_bytes(&[0, 0, 0x80, 0x3f, 7]), vec![1.0]);
     }
 
     #[test]

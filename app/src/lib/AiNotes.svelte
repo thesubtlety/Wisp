@@ -9,11 +9,7 @@
   // assist has its own Stop (halt the rolling) and Clear (empty the feed), separate from the session.
   import {
     cloudState,
-    runLlmTask,
-    runAssistStream,
     openEndpointsModal,
-    assistParams,
-    assistRealtimeParams,
     defaultParamValues,
     changedParamValues,
     loadParamValues,
@@ -21,9 +17,20 @@
     type ParamSpec,
     type ParamValue,
   } from "$lib/cloud.svelte";
+  import {
+    runLlmTask,
+    runAssistStream,
+    assistParams,
+    assistRealtimeParams,
+    startAssistRealtime,
+    stopAssistRealtime,
+    assistHintNow,
+    ASSIST_DELTA_EVENT,
+    ASSIST_TEXT_EVENT,
+    ASSIST_ERROR_EVENT,
+  } from "$lib/assist";
   import ParamsPanel from "$lib/ParamsPanel.svelte";
   import { i18n } from "$lib/i18n.svelte";
-  import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import { onMount } from "svelte";
 
@@ -527,12 +534,7 @@ in the meeting's language. Output only the summary.";
     const myToken = ++startToken;
     connecting = true;
     try {
-      await invoke("start_assist_realtime", {
-        provider: provider.id,
-        model: model.id,
-        instructions: prompt,
-        params: assistOverrides,
-      });
+      await startAssistRealtime(provider.id, model.id, prompt, assistOverrides);
       if (myToken !== startToken) {
         void stopRealtime(); // cancelled while the socket was opening → tear it back down
         return;
@@ -549,7 +551,7 @@ in the meeting's language. Output only the summary.";
   async function stopRealtime() {
     runningRealtime = false;
     try {
-      await invoke("stop_assist_realtime");
+      await stopAssistRealtime();
     } catch {
       // already torn down (e.g. the session ended) — nothing to do.
     }
@@ -566,7 +568,7 @@ in the meeting's language. Output only the summary.";
   // the "answer right now" button (e.g. "what should I ask next?"). Best-effort; ignore if not running.
   async function hintNow() {
     try {
-      await invoke("assist_hint_now");
+      await assistHintNow();
     } catch {
       // assist not running — nothing to pull.
     }
@@ -645,7 +647,7 @@ in the meeting's language. Output only the summary.";
     let offError: (() => void) | undefined;
 
     // A chunk of the in-progress reply — open a streaming entry on the first chunk, then append.
-    void listen<string>("assist://delta", (e) => {
+    void listen<string>(ASSIST_DELTA_EVENT, (e) => {
       const chunk = e.payload ?? "";
       if (!chunk) return;
       if (streamId === null) {
@@ -659,7 +661,7 @@ in the meeting's language. Output only the summary.";
 
     // The reply closed — finalise the streamed entry with the authoritative text, or (if nothing
     // streamed) append it whole.
-    void listen<string>("assist://text", (e) => {
+    void listen<string>(ASSIST_TEXT_EVENT, (e) => {
       const text = (e.payload ?? "").trim();
       const entry = streamId !== null ? feed.find((f) => f.id === streamId) : undefined;
       if (entry) {
@@ -671,7 +673,7 @@ in the meeting's language. Output only the summary.";
       streamId = null;
     }).then((off) => (offText = off));
 
-    void listen<string>("assist://error", (e) => {
+    void listen<string>(ASSIST_ERROR_EVENT, (e) => {
       error = String(e.payload ?? "assist error");
       streamId = null;
       runningRealtime = false;

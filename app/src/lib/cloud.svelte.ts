@@ -119,25 +119,6 @@ export async function removeCloudEndpoint(id: string): Promise<void> {
 }
 
 /**
- * Run a one-shot LLM task over `transcript` using the chat model of a provider (a custom endpoint —
- * the user's gateway, a local Ollama, or OpenAI). `systemPrompt` steers the task (summary, action
- * items, or a custom prompt). Returns the assistant's reply; throws (with the backend's message) on
- * a missing key or an HTTP error.
- */
-export async function runLlmTask(provider: string, model: string, systemPrompt: string, transcript: string, params: Record<string, ParamValue> = {}): Promise<string> {
-  return await invoke<string>("run_llm_task", { provider, model, systemPrompt, transcript, params });
-}
-
-/**
- * Streaming variant of {@link runLlmTask}: the reply streams back via `assist://delta` events (and
- * closes on `assist://text`), so the caller's feed fills token-by-token instead of waiting for the
- * whole reply. Resolves when the reply completes; throws (with the backend's message) on error.
- */
-export async function runAssistStream(provider: string, model: string, systemPrompt: string, transcript: string, params: Record<string, ParamValue> = {}): Promise<void> {
-  await invoke("run_assist_stream", { provider, model, systemPrompt, transcript, params });
-}
-
-/**
  * Open the one global "AI models & endpoints" manager from anywhere. It lists every model source —
  * built-in providers (set a key) and custom OpenAI-compatible endpoints (full config) — so keys and
  * endpoints are managed in a single generic place.
@@ -183,27 +164,6 @@ export async function batchParams(providerId: string, model: string): Promise<Pa
   if (!providerId || !model) return [];
   try {
     return await invoke<ParamSpec[]>("batch_params", { provider: providerId, model });
-  } catch {
-    return [];
-  }
-}
-
-/** The advanced parameter specs the AI assist exposes (temperature / top_p / max reply tokens). The
- *  same generic <ParamsPanel> renders them; empty on error so the panel just shows nothing. Vendor-
- *  agnostic — every assist provider speaks the same OpenAI-compatible chat tuning. */
-export async function assistParams(): Promise<ParamSpec[]> {
-  try {
-    return await invoke<ParamSpec[]>("assist_params");
-  } catch {
-    return [];
-  }
-}
-
-/** The advanced parameter specs the **realtime** assist exposes (turn-detection + noise reduction) —
- *  the realtime counterpart of {@link assistParams}, rendered by the same generic <ParamsPanel>. */
-export async function assistRealtimeParams(): Promise<ParamSpec[]> {
-  try {
-    return await invoke<ParamSpec[]>("assist_realtime_params");
   } catch {
     return [];
   }

@@ -10,6 +10,8 @@
   import Modal from "$lib/Modal.svelte";
   import ParamsPanel from "$lib/ParamsPanel.svelte";
   import AiNotes from "$lib/AiNotes.svelte";
+  import AssistLauncher from "$lib/AssistLauncher.svelte";
+  import AssistPanel, { savedAssistWidth } from "$lib/AssistPanel.svelte";
   import Settings from "$lib/Settings.svelte";
   import Library from "$lib/Library.svelte";
   import { i18n, LOCALES } from "$lib/i18n.svelte";
@@ -974,9 +976,8 @@
   let liveBodyEl = $state<HTMLElement | null>(null);
   let fileBodyEl = $state<HTMLElement | null>(null);
   let fileAssistOpen = $state(false);
-  const ASSIST_MIN = 320;
-  const TRANSCRIPT_MIN = 360;
-  let assistWidth = $state(Math.max(ASSIST_MIN, Number(localStorage.getItem("wisp.assistWidth")) || 440));
+  // One width for both assist panels (Live and File), starting from the last one dragged to.
+  let assistWidth = $state(savedAssistWidth());
   // The transcript handed to the AI assist (not the on-screen one) — formatted conversationally so the
   // model reasons about turns: mic = "Me", system = "Them", plus the live diarizer's speaker number on
   // the meeting side (where multiple remote participants matter; mic is always you).
@@ -996,26 +997,6 @@
       .map((s) => `[${fmtTime(s.startMs)}] ${assistWho(s)}: ${s.text}`)
       .join("\n"),
   );
-
-  // Drag the splitter to resize the assist panel: pulling left widens it. Clamped so neither side
-  // gets too thin; the chosen width persists. The whole pane grows with the window (.app widens).
-  function startAssistResize(e: MouseEvent) {
-    e.preventDefault();
-    const startX = e.clientX;
-    const startW = assistWidth;
-    const bodyEl = mode === "file" ? fileBodyEl : liveBodyEl;
-    const maxW = bodyEl ? Math.max(ASSIST_MIN, bodyEl.clientWidth - TRANSCRIPT_MIN) : 9999;
-    const onMove = (ev: MouseEvent) => {
-      assistWidth = Math.min(maxW, Math.max(ASSIST_MIN, startW - (ev.clientX - startX)));
-    };
-    const onUp = () => {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-      localStorage.setItem("wisp.assistWidth", String(Math.round(assistWidth)));
-    };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-  }
 
   $effect(() => {
     const provider = liveCloudProvider;
@@ -1989,14 +1970,12 @@
             <span class="pane-title">{i18n.t.common.transcript}</span>
             <span class="pane-actions">
               {#if running || liveSegments.length}
-                <button
-                  class="assist-launch"
-                  class:on={liveAssistOpen}
-                  onclick={() => (liveAssistOpen = !liveAssistOpen)}
+                <AssistLauncher
+                  on={liveAssistOpen}
+                  label="Assist"
                   title="AI Assist — live hints, notes & summary"
-                >
-                  <span class="spark">✦</span> Assist
-                </button>
+                  onclick={() => (liveAssistOpen = !liveAssistOpen)}
+                />
               {/if}
             </span>
           </div>
@@ -2055,20 +2034,14 @@
           {/if}
         </div>
         {#if liveAssistOpen && (running || segments.length)}
-          <aside class="assist-panel" style:width="{assistWidth}px">
-            <button
-              class="assist-resize"
-              aria-label={i18n.t.transcript.resizeAssist}
-              onmousedown={startAssistResize}
-            ></button>
-            <div class="assist-head">
-              <span class="assist-title">{i18n.t.transcript.assistTitle}</span>
-              <button class="assist-x" aria-label={i18n.t.common.close} onclick={() => (liveAssistOpen = false)}
-                >×</button
-              >
-            </div>
-            <div class="assist-body"><AiNotes transcript={liveTranscriptText} live sessionRunning={running} /></div>
-          </aside>
+          <AssistPanel
+            title={i18n.t.transcript.assistTitle}
+            bind:width={assistWidth}
+            container={liveBodyEl}
+            onclose={() => (liveAssistOpen = false)}
+          >
+            <AiNotes transcript={liveTranscriptText} live sessionRunning={running} />
+          </AssistPanel>
         {/if}
       </div>
 
@@ -2300,14 +2273,12 @@
               </button>
             {/if}
             {#if fileSegments.length && !fileTranscribing}
-              <button
-                class="assist-launch"
-                class:on={fileAssistOpen}
-                onclick={() => (fileAssistOpen = !fileAssistOpen)}
+              <AssistLauncher
+                on={fileAssistOpen}
+                label={i18n.t.fileResult.aiNotes}
                 title={i18n.t.fileResult.aiNotes}
-              >
-                <span class="spark">✦</span> {i18n.t.fileResult.aiNotes}
-              </button>
+                onclick={() => (fileAssistOpen = !fileAssistOpen)}
+              />
             {/if}
           </span>
         </div>
@@ -2342,20 +2313,14 @@
             </ul>
           </div>
           {#if fileAssistOpen && fileSegments.length && !fileTranscribing}
-            <aside class="assist-panel" style:width="{assistWidth}px">
-              <button
-                class="assist-resize"
-                aria-label={i18n.t.transcript.resizeAssist}
-                onmousedown={startAssistResize}
-              ></button>
-              <div class="assist-head">
-                <span class="assist-title">✦ {i18n.t.fileResult.aiNotes}</span>
-                <button class="assist-x" aria-label={i18n.t.common.close} onclick={() => (fileAssistOpen = false)}
-                  >×</button
-                >
-              </div>
-              <div class="assist-body"><AiNotes transcript={fileTranscriptText} /></div>
-            </aside>
+            <AssistPanel
+              title={`✦ ${i18n.t.fileResult.aiNotes}`}
+              bind:width={assistWidth}
+              container={fileBodyEl}
+              onclose={() => (fileAssistOpen = false)}
+            >
+              <AiNotes transcript={fileTranscriptText} />
+            </AssistPanel>
           {/if}
         </div>
         <div class="box-foot">
@@ -2913,76 +2878,6 @@
      the default .workspace rule. */
   .app.live .workspace {
     max-width: 100%;
-  }
-
-  /* The "smart" AI Assist launcher — a vibrant, gently shimmering gradient pill that appears top-right
-     once a live session starts, so it reads as intelligent and is reachable the moment you press Start. */
-  .assist-launch {
-    display: inline-flex;
-    align-items: center;
-    gap: 7px;
-    font-family: inherit;
-    font-size: 13px;
-    font-weight: 600;
-    color: #fff;
-    background: linear-gradient(120deg, #8b5cf6, #ec4899, #f97316, #ec4899, #8b5cf6);
-    background-size: 240% 100%;
-    border: none;
-    border-radius: 999px;
-    padding: 7px 16px;
-    cursor: pointer;
-    box-shadow: 0 4px 16px -3px rgba(168, 85, 247, 0.5);
-    animation: assist-shimmer 7s ease infinite;
-    transition:
-      transform 0.15s,
-      box-shadow 0.15s,
-      filter 0.15s;
-  }
-
-  @keyframes assist-shimmer {
-    0%,
-    100% {
-      background-position: 0% 50%;
-    }
-    50% {
-      background-position: 100% 50%;
-    }
-  }
-
-  .assist-launch:hover {
-    transform: translateY(-1px);
-    box-shadow: 0 7px 22px -3px rgba(168, 85, 247, 0.6);
-    filter: brightness(1.06);
-  }
-
-  .assist-launch.on {
-    box-shadow:
-      0 0 0 2px color-mix(in srgb, #a855f7 55%, transparent),
-      0 4px 16px -3px rgba(168, 85, 247, 0.5);
-  }
-
-  .assist-launch .spark {
-    font-size: 14px;
-    animation: spark-twinkle 2.4s ease-in-out infinite;
-  }
-
-  @keyframes spark-twinkle {
-    0%,
-    100% {
-      opacity: 1;
-      transform: scale(1);
-    }
-    50% {
-      opacity: 0.72;
-      transform: scale(0.9);
-    }
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    .assist-launch,
-    .assist-launch .spark {
-      animation: none;
-    }
   }
 
   /* The content box — fills all remaining height; only its feed scrolls. */
@@ -4307,69 +4202,6 @@
     justify-content: flex-end;
     gap: 8px;
     padding: 4px 14px 9px;
-  }
-
-  .assist-panel {
-    position: relative;
-    flex: none;
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-    border-left: 1px solid var(--border);
-    background: var(--surface);
-  }
-
-  /* Drag strip on the panel's left edge — pull left to widen, right to narrow. */
-  .assist-resize {
-    position: absolute;
-    top: 0;
-    bottom: 0;
-    left: -3px;
-    width: 7px;
-    padding: 0;
-    border: none;
-    background: transparent;
-    cursor: col-resize;
-    z-index: 5;
-  }
-
-  .assist-resize:hover {
-    background: color-mix(in srgb, var(--accent) 22%, transparent);
-  }
-
-  .assist-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 10px 14px;
-    border-bottom: 1px solid var(--border);
-  }
-
-  .assist-title {
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--text);
-  }
-
-  .assist-x {
-    font-size: 18px;
-    line-height: 1;
-    color: var(--muted);
-    background: transparent;
-    border: none;
-    cursor: pointer;
-    padding: 0 4px;
-  }
-
-  .assist-x:hover {
-    color: var(--text);
-  }
-
-  .assist-body {
-    flex: 1 1 auto;
-    min-height: 0;
-    display: flex;
-    flex-direction: column;
   }
 
   /* Inset to align with the key row and drop zone — the shared .params-trigger has no margin (which
