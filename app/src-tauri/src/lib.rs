@@ -160,11 +160,11 @@ struct AppState {
     system_muted: Arc<AtomicBool>,
     /// File where the active model id is persisted, so the choice survives a restart.
     active_model_path: PathBuf,
-    /// Per-provider cloud API keys, kept purely on-device (persisted to `cloud_keys_path`).
+    /// Per-provider cloud API keys, kept purely on-device (persisted to `key_store`).
     cloud_keys: Mutex<HashMap<String, String>>,
-    /// File the cloud API keys persist to — local app data only, never synced or sent anywhere
-    /// except as the auth header to the provider the key belongs to.
-    cloud_keys_path: PathBuf,
+    /// Where the cloud API keys persist: the login keychain on macOS, an owner-only file elsewhere.
+    /// Never synced or sent anywhere except as the auth to the provider the key belongs to.
+    key_store: Box<dyn wisp_secrets::SecretStore>,
     /// User-added custom cloud model ids (provider + wire id), so a just-released model is usable
     /// without an app update. Persisted to `cloud_custom_models_path`.
     cloud_custom_models: Mutex<Vec<CloudCustomModel>>,
@@ -1314,24 +1314,24 @@ fn mask_key(key: &str) -> Option<String> {
     Some(format!("{prefix}…{last4}"))
 }
 
-/// Loads the on-device cloud API keys (provider → key); an absent or unreadable file yields none.
-fn load_cloud_keys(path: &Path) -> HashMap<String, String> {
-    fs::read_to_string(path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+/// Narrows `path` to its owner (`mode` is 0o700 for a directory, 0o600 for a file). The app data
+/// holds every saved meeting transcript. Best-effort and a no-op off Unix.
+fn restrict_to_owner(path: &Path, mode: u32) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = fs::set_permissions(path, fs::Permissions::from_mode(mode)) {
+            eprintln!("wisp: could not restrict {}: {e}", path.display());
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (path, mode);
 }
 
-/// Persists `keys` to `path` (local app data only). Best-effort — a write failure is logged.
-fn save_cloud_keys(path: &Path, keys: &HashMap<String, String>) {
-    match serde_json::to_string_pretty(keys) {
-        Ok(json) => {
-            if let Err(e) = fs::write(path, json) {
-                eprintln!("wisp: could not persist cloud keys: {e}");
-            }
-        }
-        Err(e) => eprintln!("wisp: could not serialize cloud keys: {e}"),
-    }
+/// Persists `keys` to the key store. The error names where they couldn't be saved.
+fn save_cloud_keys(state: &AppState, keys: &HashMap<String, String>) -> Result<(), String> {
+    wisp_secrets::save_keys(state.key_store.as_ref(), keys)
+        .map_err(|e| format!("could not save API keys: {e}"))
 }
 
 /// The cloud providers and their models, each flagged with whether its API key is already saved on
@@ -1419,8 +1419,7 @@ fn set_cloud_key(state: State<'_, AppState>, provider: String, key: String) -> R
     } else {
         keys.insert(provider, key.trim().to_owned());
     }
-    save_cloud_keys(&state.cloud_keys_path, &keys);
-    Ok(())
+    save_cloud_keys(&state, &keys)
 }
 
 /// Whether an API key is saved for `provider`. Never returns the key itself.
@@ -1778,7 +1777,7 @@ fn remove_cloud_endpoint(state: State<'_, AppState>, id: String) -> Result<(), S
         .lock()
         .map_err(|_| "state lock poisoned".to_owned())?;
     if keys.remove(&id).is_some() {
-        save_cloud_keys(&state.cloud_keys_path, &keys);
+        save_cloud_keys(&state, &keys)?;
     }
     Ok(())
 }
@@ -3616,19 +3615,41 @@ impl From<MarkdownMetaInput> for MeetingMeta {
     }
 }
 
-/// Writes a transcript to `dest` in `format` (`txt`/`srt`/`vtt`/`md`). `source` selects which transcript
-/// — `"live"` (the meeting just captured) or `"file"` (the most recent file transcription, the default).
-/// `meta` carries the meeting metadata used by the Markdown format and is ignored by the others.
+/// Saves a transcript in `format` (`txt`/`srt`/`vtt`/`md`) to a file the user picks in a save dialog
+/// that suggests `default_name`. The backend shows the dialog itself, so the webview can't name the
+/// destination: a script running in it could otherwise write anywhere the user can.
+///
+/// `source` selects which transcript — `"live"` (the meeting just captured) or `"file"` (the most
+/// recent file transcription, the default). `meta` carries the meeting metadata used by the Markdown
+/// format and is ignored by the others. Returns `false` when the user cancels the dialog. Off the
+/// main thread: the dialog blocks until the user answers.
 #[tauri::command]
-fn export_transcript(
-    state: State<'_, AppState>,
+async fn export_transcript(
+    app: AppHandle,
     format: String,
-    dest: String,
+    default_name: String,
     source: Option<String>,
     meta: Option<MarkdownMetaInput>,
-) -> Result<(), String> {
-    let format =
-        ExportFormat::from_name(&format).ok_or_else(|| format!("unknown format: {format}"))?;
+) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        export_transcript_blocking(app, format, default_name, source, meta)
+    })
+    .await
+    .map_err(|e| format!("export task failed: {e}"))?
+}
+
+fn export_transcript_blocking(
+    app: AppHandle,
+    format_name: String,
+    default_name: String,
+    source: Option<String>,
+    meta: Option<MarkdownMetaInput>,
+) -> Result<bool, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let state = app.state::<AppState>();
+    let format = ExportFormat::from_name(&format_name)
+        .ok_or_else(|| format!("unknown format: {format_name}"))?;
 
     let buffer = match source.as_deref() {
         Some("live") => &state.live_segments,
@@ -3650,8 +3671,20 @@ fn export_transcript(
         ExportFormat::Markdown => format_markdown(&segments, &meta.unwrap_or_default().into()),
         other => format_transcript(&segments, other),
     };
-    fs::write(&dest, content).map_err(|e| format!("write {dest}: {e}"))?;
-    Ok(())
+
+    // `format_name` is one of the known formats (checked above), so it's a safe extension.
+    let Some(picked) = app
+        .dialog()
+        .file()
+        .set_file_name(format!("{default_name}.{format_name}"))
+        .add_filter(format_name.to_uppercase(), &[format_name.as_str()])
+        .blocking_save_file()
+    else {
+        return Ok(false);
+    };
+    let dest = picked.into_path().map_err(|e| e.to_string())?;
+    fs::write(&dest, content).map_err(|e| format!("write {}: {e}", dest.display()))?;
+    Ok(true)
 }
 
 /// One stored meeting with its segments, for the Library detail view.
@@ -4041,6 +4074,11 @@ fn apply_embedding_model(app: &AppHandle, id: Option<String>) -> Result<(), Stri
 /// clears the active embedder (search falls back to full-text) so nothing points at missing files.
 #[tauri::command]
 fn delete_embedding_model(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    // The id becomes a directory name that's recursively deleted, so it must be exactly one plain
+    // path component: no separators, no `..`, not absolute.
+    if !is_plain_file_name(&id) {
+        return Err(format!("invalid embedding model id: {id:?}"));
+    }
     let _ = fs::remove_dir_all(embed_model_dir(&state.embed_cache_dir, &id));
 
     let was_active = state
@@ -4063,6 +4101,16 @@ fn delete_embedding_model(state: State<'_, AppState>, id: String) -> Result<(), 
     }
 
     Ok(())
+}
+
+/// Whether `name` is a single ordinary path component (so joining it onto a directory stays inside
+/// that directory).
+fn is_plain_file_name(name: &str) -> bool {
+    let mut components = Path::new(name).components();
+    matches!(
+        (components.next(), components.next()),
+        (Some(std::path::Component::Normal(_)), None)
+    ) && !name.contains(['/', '\\'])
 }
 
 /// The active notes search mode — `"fulltext"`, `"semantic"`, or `"hybrid"`.
@@ -4111,8 +4159,14 @@ pub fn run() {
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             let active_model_path = data_dir.join("active-model");
+            // API keys live in the login keychain on macOS. The old plain-text cloud-keys.json is
+            // moved in on first run and deleted; elsewhere that path is the (owner-only) store.
             let cloud_keys_path = data_dir.join("cloud-keys.json");
-            let cloud_keys = load_cloud_keys(&cloud_keys_path);
+            let key_store = wisp_secrets::platform_store("com.wisp.desktop", &cloud_keys_path);
+            let cloud_keys = wisp_secrets::load_keys(
+                key_store.as_ref(),
+                &wisp_secrets::FileStore::new(&cloud_keys_path),
+            );
             let cloud_custom_models_path = data_dir.join("cloud-custom-models.json");
             let cloud_custom_models = load_cloud_custom_models(&cloud_custom_models_path);
             let cloud_custom_endpoints_path = data_dir.join("cloud-custom-endpoints.json");
@@ -4151,7 +4205,10 @@ pub fn run() {
                 .or_else(|| Some(recommended_default_model(&detect_machine(), &asr_catalog)));
 
             let _ = fs::create_dir_all(&data_dir);
-            let library = Library::open(data_dir.join("library.db"))?;
+            restrict_to_owner(&data_dir, 0o700);
+            let library_path = data_dir.join("library.db");
+            let library = Library::open(&library_path)?;
+            restrict_to_owner(&library_path, 0o600);
 
             // Notes semantic search: restore the chosen embedding model (loaded in the background so
             // startup never blocks on a model download) and the persisted search mode.
@@ -4211,7 +4268,7 @@ pub fn run() {
                 system_muted: Arc::new(AtomicBool::new(false)),
                 active_model_path,
                 cloud_keys: Mutex::new(cloud_keys),
-                cloud_keys_path,
+                key_store,
                 cloud_custom_models: Mutex::new(cloud_custom_models),
                 cloud_custom_models_path,
                 cloud_custom_endpoints: Mutex::new(cloud_custom_endpoints),
@@ -4320,6 +4377,16 @@ mod tests {
     }
 
     #[test]
+    fn embedding_model_ids_must_be_plain_names() {
+        for ok in ["e5-small", "bge-m3", "qwen3-0.6b"] {
+            assert!(is_plain_file_name(ok), "{ok}");
+        }
+        for bad in ["", ".", "..", "../x", "a/b", "/etc", "a\\b", "..\\x"] {
+            assert!(!is_plain_file_name(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
     fn only_downloaded_catalog_models_are_deletable() {
         // Deletable means files of ours are present on disk to reclaim. OS-provided models (no files)
         // and not-yet-downloaded ones have nothing to delete.
@@ -4383,43 +4450,6 @@ mod tests {
         }
         .to_provider();
         assert_eq!(cloud_live_protocol(&custom, "metis"), None);
-    }
-
-    #[test]
-    fn load_cloud_keys_is_empty_for_missing_or_garbage_files() {
-        let missing = temp_path("missing");
-        let _ = fs::remove_file(&missing);
-        assert!(
-            load_cloud_keys(&missing).is_empty(),
-            "absent file → no keys"
-        );
-
-        let garbage = temp_path("garbage");
-        fs::write(&garbage, b"not json at all").unwrap();
-        assert!(
-            load_cloud_keys(&garbage).is_empty(),
-            "unparsable file → no keys, no panic"
-        );
-        let _ = fs::remove_file(&garbage);
-    }
-
-    #[test]
-    fn save_then_load_round_trips_keys() {
-        let path = temp_path("roundtrip");
-        let _ = fs::remove_file(&path);
-
-        let mut keys = HashMap::new();
-        keys.insert("openai".to_owned(), "sk-test-123".to_owned());
-        keys.insert("groq".to_owned(), "gsk-test-456".to_owned());
-        save_cloud_keys(&path, &keys);
-
-        assert_eq!(
-            load_cloud_keys(&path),
-            keys,
-            "keys survive a save/load cycle"
-        );
-
-        let _ = fs::remove_file(&path);
     }
 
     #[test]

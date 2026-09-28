@@ -4,7 +4,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
-  import { open, save } from "@tauri-apps/plugin-dialog";
+  import { open } from "@tauri-apps/plugin-dialog";
   import { onDestroy, onMount } from "svelte";
   import { fly } from "svelte/transition";
   import Modal from "$lib/Modal.svelte";
@@ -1241,16 +1241,12 @@
     };
   }
 
-  // Saves `source` ("file" or "live") as `format`, prompting for a destination. Markdown also carries
-  // the meeting metadata; the subtitle/text formats ignore it.
+  // Saves `source` ("file" or "live") as `format`. The backend shows the save dialog (suggesting
+  // `base`), so only a path the user picked is ever written. Markdown also carries the meeting
+  // metadata; the subtitle/text formats ignore it.
   async function runExport(format: string, source: "file" | "live", base: string, title: string) {
     try {
-      const dest = await save({
-        defaultPath: `${base}.${format}`,
-        filters: [{ name: format.toUpperCase(), extensions: [format] }],
-      });
-      if (typeof dest !== "string") return;
-      const args: Record<string, unknown> = { format, dest, source };
+      const args: Record<string, unknown> = { format, defaultName: base, source };
       if (format === "md") args.meta = meetingMeta(title);
       await invoke("export_transcript", args);
     } catch (e) {

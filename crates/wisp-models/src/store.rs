@@ -181,7 +181,9 @@ impl FsModelStore {
                 on_progress(bytes.min(total), total);
             })?;
 
-        if let Err(e) = unzip_into(&zip_part, &dir) {
+        if let Err(e) =
+            verify_file(&zip_part, &asset.sha256).and_then(|()| unzip_into(&zip_part, &dir))
+        {
             let _ = fs::remove_file(&zip_part);
             return Err(e);
         }
@@ -558,6 +560,46 @@ mod tests {
     }
 
     #[test]
+    fn ensure_coreml_rejects_a_tampered_archive_without_unpacking_it() {
+        let model_url = "https://example/m.bin";
+        let model_bytes = b"model".to_vec();
+        let desc = single_file_descriptor("m", model_url, "ggml-test-q8_0.bin", &model_bytes);
+
+        let coreml_url = "https://example/ggml-test-encoder.mlmodelc.zip";
+        let genuine = make_zip(&[("ggml-test-encoder.mlmodelc/coremldata.bin", b"weights")]);
+        let served = make_zip(&[("ggml-test-encoder.mlmodelc/coremldata.bin", b"evil")]);
+        let asset = CoremlAsset {
+            url: coreml_url.into(),
+            dir_name: "ggml-test-encoder.mlmodelc".into(),
+            size_bytes: served.len() as u64,
+            sha256: sha256_hex(&genuine),
+        };
+
+        let mut files = HashMap::new();
+        files.insert(model_url.to_string(), model_bytes);
+        files.insert(coreml_url.to_string(), served);
+        let (downloader, _calls) = FakeDownloader::new(files);
+        let root = tempfile::tempdir().unwrap();
+        let store = FsModelStore::new(root.path(), vec![desc], Box::new(downloader));
+        let id = ModelId("m".into());
+        store.ensure(&id).unwrap();
+
+        let err = store
+            .ensure_coreml_with_progress(&id, &asset, &mut |_, _| {})
+            .unwrap_err();
+        assert!(err.to_string().contains("checksum mismatch"), "{err}");
+        let dir = store.local_path(&id).unwrap();
+        assert!(
+            !dir.join("ggml-test-encoder.mlmodelc").exists(),
+            "nothing unpacked"
+        );
+        assert!(
+            !dir.join("ggml-test-encoder.mlmodelc.zip.part").exists(),
+            "part file removed"
+        );
+    }
+
+    #[test]
     fn ensure_coreml_downloads_unpacks_next_to_the_model_and_is_idempotent() {
         let model_url = "https://example/m.bin";
         let model_bytes = b"model".to_vec();
@@ -570,6 +612,7 @@ mod tests {
             url: coreml_url.into(),
             dir_name: "ggml-test-encoder.mlmodelc".into(),
             size_bytes: zip_bytes.len() as u64,
+            sha256: sha256_hex(&zip_bytes),
         };
 
         let mut files = HashMap::new();

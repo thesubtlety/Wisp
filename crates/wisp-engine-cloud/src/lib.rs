@@ -133,7 +133,7 @@ pub struct CloudEngine {
     /// Auth header name + value for header-authed protocols (`Authorization`, `Bearer …`).
     auth_header: String,
     auth_value: String,
-    /// The raw key, for query-param-authed protocols (Gemini's `?key=`).
+    /// The raw key, for protocols that take it in their own header (Gemini's `x-goog-api-key`).
     api_key: String,
     /// Wire model id, e.g. `gpt-4o-transcribe` / `gemini-3.5-flash` / `qwen3-asr-flash`.
     model: String,
@@ -253,20 +253,21 @@ impl CloudEngine {
         parse_openai_transcription(&self.post_multipart_raw(wav)?)
     }
 
-    /// Gemini `generateContent`: JSON with inline base64 audio; the key rides in the query string.
+    /// Gemini `generateContent`: JSON with inline base64 audio. The key goes in the
+    /// `x-goog-api-key` header, never the URL: a transport error prints the URL, and that message
+    /// reaches the UI.
     fn post_gemini(&self, wav: &[u8]) -> Result<String> {
-        let url = format!(
-            "{}/models/{}:generateContent?key={}",
-            self.base_url, self.model, self.api_key
-        );
         let gemini_body = build_gemini_body(wav, &self.language, &self.params);
-        let sent = send_with_retry(|| {
-            ureq::post(&url)
-                .set("Content-Type", "application/json")
-                .timeout(Duration::from_secs(300))
-                .send_string(&gemini_body)
-        });
+        let sent = send_with_retry(|| self.gemini_request().send_string(&gemini_body));
         parse_gemini(&body_or_error(sent)?)
+    }
+
+    /// The `generateContent` request, ready to send: the key in its header, the URL clean.
+    fn gemini_request(&self) -> ureq::Request {
+        ureq::post(&gemini_endpoint(&self.base_url, &self.model))
+            .set("x-goog-api-key", &self.api_key)
+            .set("Content-Type", "application/json")
+            .timeout(Duration::from_secs(300))
     }
 
     /// OpenAI-compatible `/chat/completions` with the audio as an `input_audio` content part.
@@ -658,6 +659,11 @@ fn transcribe_prompt(language: &str, prompt: &str) -> String {
     out
 }
 
+/// The Gemini `generateContent` URL for `model`. It carries no credentials.
+fn gemini_endpoint(base_url: &str, model: &str) -> String {
+    format!("{base_url}/models/{model}:generateContent")
+}
+
 /// Gemini `generateContent` request body: one user turn with the prompt and inline base64 audio.
 fn build_gemini_body(wav: &[u8], language: &str, params: &ParamValues) -> String {
     let mut body = serde_json::json!({
@@ -1041,6 +1047,46 @@ fn to_result(text: &str, audio: &[f32], sample_rate: u32) -> TranscriptionResult
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gemini_sends_the_key_in_a_header_not_the_url() {
+        let provider = CloudProvider {
+            id: "google".to_owned(),
+            display_name: "Google".to_owned(),
+            protocol: CloudProtocol::Gemini,
+            base_url: "https://generativelanguage.googleapis.com/v1beta".to_owned(),
+            keys_url: String::new(),
+            auth: CloudAuth::bearer(),
+            streaming: None,
+            models: vec![CloudModel {
+                id: "gemini-test".to_owned(),
+                display_name: "Gemini test".to_owned(),
+                streaming: false,
+                batch: true,
+                languages: vec![],
+                description: String::new(),
+                recommended: true,
+                diarizes: false,
+            }],
+        };
+        let engine = CloudEngine::new(
+            &provider,
+            "gemini-test",
+            "SECRET-KEY-123",
+            "",
+            ParamValues::new(),
+        )
+        .unwrap();
+
+        let request = engine.gemini_request();
+        assert_eq!(
+            request.url(),
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-test:generateContent"
+        );
+        assert!(!request.url().contains("SECRET"), "key leaked into the URL");
+        assert_eq!(request.header("x-goog-api-key"), Some("SECRET-KEY-123"));
+    }
+
     use wisp_core::cloud::{CloudAuth, CloudModel, CloudProtocol, CloudProvider};
     use wisp_core::params::{ParamKind, ParamValue};
 

@@ -13,12 +13,15 @@ use wisp_core::error::{Result, WispError};
 pub const DEFAULT_HF_MIRROR: &str = "https://hf-mirror.com";
 
 /// How Hugging Face downloads choose between the official endpoint and the configured mirror.
+///
+/// The default is the official endpoint only: a third-party mirror is something the user opts into.
+/// Every catalog file is SHA-256 pinned either way.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum DownloadSource {
     /// Try the endpoint that last succeeded first, failing over automatically.
-    #[default]
     Auto,
     /// Use the official endpoint only.
+    #[default]
     Official,
     /// Try the configured mirror first, then fall back to the official endpoint.
     MirrorFirst,
@@ -52,7 +55,7 @@ pub struct DownloadConfig {
 impl Default for DownloadConfig {
     fn default() -> Self {
         Self {
-            source: DownloadSource::Auto,
+            source: DownloadSource::Official,
             mirror_url: DEFAULT_HF_MIRROR.to_owned(),
             proxy_mode: ProxyMode::System,
             proxy_url: String::new(),
@@ -381,8 +384,19 @@ mod tests {
     }
 
     #[test]
-    fn automatic_source_falls_back_between_official_and_mirror() {
+    fn default_source_is_the_official_endpoint_only() {
         let downloader = HttpDownloader::with_config(DownloadConfig::default()).unwrap();
+        let official = "https://huggingface.co/org/model/resolve/main/model.onnx";
+        assert_eq!(downloader.candidate_urls(official), vec![official]);
+    }
+
+    #[test]
+    fn automatic_source_falls_back_between_official_and_mirror() {
+        let config = DownloadConfig {
+            source: DownloadSource::Auto,
+            ..DownloadConfig::default()
+        };
+        let downloader = HttpDownloader::with_config(config).unwrap();
         let official = "https://huggingface.co/org/model/resolve/main/model.onnx";
         let mirror = "https://hf-mirror.com/org/model/resolve/main/model.onnx";
         assert_eq!(downloader.candidate_urls(official), vec![official, mirror]);

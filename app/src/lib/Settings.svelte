@@ -79,7 +79,7 @@
     proxyUrl: string;
   };
   let downloads = $state<DownloadSettings>({
-    source: "auto",
+    source: "official",
     mirrorUrl: "https://hf-mirror.com",
     proxyMode: "system",
     proxyUrl: "",

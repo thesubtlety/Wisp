@@ -66,6 +66,8 @@ wisp-audio = { path = "../../crates/wisp-audio", features = ["mic", "file"] }
 wisp-models = { path = "../../crates/wisp-models" }
 # SQLite-backed meeting knowledge base (persistence + full-text search).
 wisp-library = { path = "../../crates/wisp-library" }
+# Cloud API keys: the login keychain on macOS, an owner-only file elsewhere.
+wisp-secrets = { path = "../../crates/wisp-secrets" }
 # Local ONNX text-embedding backend (fastembed) for semantic/hybrid note search. Pulls onnxruntime
 # via `ort` — coexists in the binary with sherpa's onnxruntime.
 wisp-embed = { path = "../../crates/wisp-embed" }
