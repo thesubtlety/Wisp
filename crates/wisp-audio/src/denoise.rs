@@ -50,8 +50,10 @@ impl Denoiser for RnnoiseDenoiser {
 
         let mut cleaned = vec![0.0f32; scaled.len()];
         for (input, output) in scaled
-            .chunks_exact(RNNOISE_FRAME)
-            .zip(cleaned.chunks_exact_mut(RNNOISE_FRAME))
+            .as_chunks::<RNNOISE_FRAME>()
+            .0
+            .iter()
+            .zip(cleaned.as_chunks_mut::<RNNOISE_FRAME>().0.iter_mut())
         {
             self.state.process_frame(output, input);
         }
