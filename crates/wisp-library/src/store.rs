@@ -13,7 +13,7 @@ use crate::retention::RetentionPolicy;
 use crate::Result;
 
 /// On-disk schema version, bumped on schema changes (drives migration via `PRAGMA user_version`).
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 /// Characters of transcript kept as a list preview.
 const PREVIEW_CHARS: usize = 160;
@@ -29,8 +29,14 @@ const CHUNK_CHARS: usize = 512;
 /// Reciprocal Rank Fusion damping constant for hybrid search (the conventional default).
 const RRF_K: f64 = 60.0;
 
-/// A chunk ready to store: its text plus its embedding serialized to little-endian bytes.
-type EmbeddedChunk = (String, Vec<u8>);
+/// A transcript chunk ready to store: its text, its embedding serialized to little-endian bytes, and
+/// the positions of its first and last segment.
+pub(crate) struct EmbeddedChunk {
+    text: String,
+    vector: Vec<u8>,
+    seg_start: usize,
+    seg_end: usize,
+}
 
 /// Initial schema. `segment_fts` is an external-content FTS5 index (it stores no copy of the text,
 /// keeping the database small); the triggers keep it in sync with `segment`. The `trigram` tokenizer
@@ -145,6 +151,15 @@ CREATE TRIGGER source_chunk_ad AFTER DELETE ON source_chunk BEGIN
 END;
 ";
 
+/// Schema v4 — addressable chunks. A transcript chunk records the segments it spans and a source
+/// chunk the line it starts on, so a retrieval hit can point back at the exact transcript line or
+/// place in the file. Existing transcript chunks are back-filled from their segments on upgrade.
+pub(crate) const SCHEMA_V4: &str = "\
+ALTER TABLE chunk ADD COLUMN seg_start INTEGER;
+ALTER TABLE chunk ADD COLUMN seg_end INTEGER;
+ALTER TABLE source_chunk ADD COLUMN line_start INTEGER;
+";
+
 /// A handle to the meeting knowledge base. Open once and reuse across queries. With no embedder it
 /// is full-text only; configure one via [`Library::set_embedder`] to enable semantic and hybrid
 /// search.
@@ -207,17 +222,27 @@ impl Library {
         let version: i64 = self
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version < 1 {
-            self.conn.execute_batch(SCHEMA_V1)?;
+        // Each step commits with its version, so a failed step leaves the database at the previous
+        // version rather than half-migrated (a re-run ALTER TABLE would fail on the duplicate column).
+        let steps: [(i64, &str); 4] = [
+            (1, SCHEMA_V1),
+            (2, SCHEMA_V2),
+            (3, SCHEMA_V3),
+            (4, SCHEMA_V4),
+        ];
+        for (step, sql) in steps {
+            if version >= step {
+                continue;
+            }
+            let tx = self.conn.transaction()?;
+            tx.execute_batch(sql)?;
+            if step == 4 {
+                backfill_chunk_spans(&tx)?;
+            }
+            tx.pragma_update(None, "user_version", step)?;
+            tx.commit()?;
         }
-        if version < 2 {
-            self.conn.execute_batch(SCHEMA_V2)?;
-        }
-        if version < 3 {
-            self.conn.execute_batch(SCHEMA_V3)?;
-        }
-        self.conn
-            .pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        debug_assert_eq!(steps.len() as i64, SCHEMA_VERSION);
         Ok(())
     }
 
@@ -295,7 +320,8 @@ impl Library {
     /// A personal library is small, so it re-embeds the whole corpus in a single pass.
     pub fn reindex_all(&mut self) -> Result<usize> {
         if self.embedder.is_none() {
-            self.conn.execute("DELETE FROM chunk", [])?;
+            self.conn
+                .execute_batch("DELETE FROM chunk; UPDATE source_chunk SET embedding = NULL;")?;
             return Ok(0);
         }
 
@@ -313,6 +339,19 @@ impl Library {
             }
         }
 
+        // Project sources are re-embedded chunk by chunk; their text and boundaries stay as stored.
+        let source_chunks: Vec<(i64, String)> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT id, text FROM source_chunk ORDER BY id")?;
+            let rows = stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+        let source_texts: Vec<&str> = source_chunks.iter().map(|(_, t)| t.as_str()).collect();
+        let source_vectors = self.embed_exact(&source_texts)?.unwrap_or_default();
+
         // Clear the old chunks and insert the new ones in one transaction, so a failure (or a crash)
         // never leaves the corpus de-indexed. The DELETE used to run + commit before embedding, so a
         // mid-embed error wiped the whole index for good.
@@ -320,6 +359,12 @@ impl Library {
         tx.execute("DELETE FROM chunk", [])?;
         for (id, chunks) in &indexed {
             insert_chunks(&tx, id, chunks)?;
+        }
+        for ((id, _), vector) in source_chunks.iter().zip(&source_vectors) {
+            tx.execute(
+                "UPDATE source_chunk SET embedding = ?2 WHERE id = ?1",
+                rusqlite::params![id, vector],
+            )?;
         }
         tx.commit()?;
 
@@ -362,21 +407,39 @@ impl Library {
             return Ok(None);
         };
 
-        let chunks = embed::chunk_texts(texts, CHUNK_CHARS);
+        let chunks = embed::chunk_spans(texts, CHUNK_CHARS);
         if chunks.is_empty() {
             return Ok(Some(Vec::new()));
         }
 
-        let refs: Vec<&str> = chunks.iter().map(String::as_str).collect();
+        let refs: Vec<&str> = chunks.iter().map(|c| c.text.as_str()).collect();
         let vectors = embedder.embed_passages(&refs)?;
 
         Ok(Some(
             chunks
                 .into_iter()
                 .zip(vectors)
-                .map(|(text, vector)| (text, embed::to_bytes(&vector)))
+                .map(|(c, vector)| EmbeddedChunk {
+                    text: c.text,
+                    vector: embed::to_bytes(&vector),
+                    seg_start: c.first,
+                    seg_end: c.last,
+                })
                 .collect(),
         ))
+    }
+
+    /// Embeds each of `texts` as-is (no re-chunking) and serializes the vectors, in order. `None`
+    /// with no embedder. For project source chunks, whose boundaries are already decided.
+    pub(crate) fn embed_exact(&self, texts: &[&str]) -> Result<Option<Vec<Vec<u8>>>> {
+        let Some(embedder) = &self.embedder else {
+            return Ok(None);
+        };
+        if texts.is_empty() {
+            return Ok(Some(Vec::new()));
+        }
+        let vectors = embedder.embed_passages(texts)?;
+        Ok(Some(vectors.iter().map(|v| embed::to_bytes(v)).collect()))
     }
 
     /// Every meeting, newest first, each with a short transcript preview — for the Library list.
@@ -648,6 +711,51 @@ impl Library {
 /// Chunk size (characters) for project sources, shared with meeting transcripts.
 pub(crate) const SOURCE_CHUNK_CHARS: usize = CHUNK_CHARS;
 
+/// Fills in the segment span of transcript chunks stored before v4. Chunking is deterministic, so
+/// re-chunking a meeting's segments reproduces its chunks; a meeting whose chunks don't line up
+/// (a different chunk size back then) is left without spans until the next reindex.
+fn backfill_chunk_spans(tx: &rusqlite::Transaction) -> Result<()> {
+    let ids: Vec<String> = {
+        let mut stmt = tx.prepare("SELECT DISTINCT meeting_id FROM chunk")?;
+        let ids = stmt
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        ids
+    };
+    for id in ids {
+        let texts: Vec<String> = {
+            let mut stmt =
+                tx.prepare("SELECT text FROM segment WHERE meeting_id = ?1 ORDER BY idx")?;
+            let t = stmt
+                .query_map([&id], |r| r.get(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            t
+        };
+        let stored: Vec<(i64, String)> = {
+            let mut stmt =
+                tx.prepare("SELECT idx, text FROM chunk WHERE meeting_id = ?1 ORDER BY idx")?;
+            let c = stmt
+                .query_map([&id], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            c
+        };
+        let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+        let spans = embed::chunk_spans(&refs, CHUNK_CHARS);
+        let lined_up = spans.len() == stored.len()
+            && spans.iter().zip(&stored).all(|(a, (_, b))| a.text == *b);
+        if !lined_up {
+            continue;
+        }
+        for (span, (idx, _)) in spans.iter().zip(&stored) {
+            tx.execute(
+                "UPDATE chunk SET seg_start = ?3, seg_end = ?4 WHERE meeting_id = ?1 AND idx = ?2",
+                rusqlite::params![id, idx, span.first as i64, span.last as i64],
+            )?;
+        }
+    }
+    Ok(())
+}
+
 /// Maps an [`AudioSourceKind`] to the stored source label.
 fn source_label(source: AudioSourceKind) -> &'static str {
     match source {
@@ -690,10 +798,19 @@ fn insert_chunks(
     meeting_id: &str,
     chunks: &[EmbeddedChunk],
 ) -> rusqlite::Result<()> {
-    let mut stmt =
-        tx.prepare("INSERT INTO chunk (meeting_id, idx, text, embedding) VALUES (?1, ?2, ?3, ?4)")?;
-    for (idx, (text, embedding)) in chunks.iter().enumerate() {
-        stmt.execute(rusqlite::params![meeting_id, idx as i64, text, embedding])?;
+    let mut stmt = tx.prepare(
+        "INSERT INTO chunk (meeting_id, idx, text, embedding, seg_start, seg_end)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+    )?;
+    for (idx, c) in chunks.iter().enumerate() {
+        stmt.execute(rusqlite::params![
+            meeting_id,
+            idx as i64,
+            c.text,
+            c.vector,
+            c.seg_start as i64,
+            c.seg_end as i64,
+        ])?;
     }
     Ok(())
 }
@@ -724,7 +841,7 @@ fn best_per_meeting(hits: Vec<SearchHit>, limit: usize) -> Vec<SearchHit> {
 }
 
 /// Truncates `s` to at most `max` characters (not bytes), appending `…` when shortened.
-fn truncate_chars(s: &str, max: usize) -> String {
+pub(crate) fn truncate_chars(s: &str, max: usize) -> String {
     let trimmed = s.trim();
     if trimmed.chars().count() <= max {
         return trimmed.to_owned();

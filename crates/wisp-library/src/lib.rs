@@ -6,18 +6,23 @@
 //! shell-agnostic — the desktop app is one caller, a CLI or sync agent could be another.
 //!
 //! Full-text search is always on; semantic and hybrid search are optional, enabled by configuring
-//! an [`Embedder`]. RAG builds on this later.
+//! an [`Embedder`]. [`Library::retrieve`] returns small, addressable snippets from a project's
+//! sources and meetings for reasoning.
 
 mod embed;
 mod record;
 mod retention;
+mod retrieve;
 mod store;
 
 pub use embed::Embedder;
 pub use record::{Note, NoteSummary, Project, SearchHit, Segment, Source};
 pub use retention::{
-    PruneReport, RetentionPolicy, SourceInput, SourceKind, DEFAULT_TEMP_SOURCE_DAYS,
+    PruneReport, RetentionPolicy, SourceInput, SourceKind, Upsert, DEFAULT_TEMP_SOURCE_DAYS,
     DEFAULT_TRANSCRIPT_DAYS,
+};
+pub use retrieve::{
+    meeting_ref, source_ref, RetrievalQuery, Snippet, SnippetOrigin, SNIPPET_CHARS,
 };
 pub use store::Library;
 

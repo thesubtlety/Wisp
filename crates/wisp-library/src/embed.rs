@@ -59,27 +59,147 @@ pub(crate) fn from_bytes(b: &[u8]) -> Vec<f32> {
 /// an individual segment — so each chunk is a coherent unit to embed. A single segment longer than
 /// `max_chars` becomes its own (oversized) chunk; blank segments are skipped. Empty input yields no
 /// chunks.
+#[cfg(test)]
 pub(crate) fn chunk_texts(texts: &[&str], max_chars: usize) -> Vec<String> {
-    let mut chunks = Vec::new();
-    let mut cur = String::new();
+    chunk_spans(texts, max_chars)
+        .into_iter()
+        .map(|c| c.text)
+        .collect()
+}
 
-    for t in texts {
+/// A chunk of consecutive segments: its text and the positions (in the input) of its first and last
+/// segment, so a hit can point back at a transcript line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SpanChunk {
+    pub text: String,
+    pub first: usize,
+    pub last: usize,
+}
+
+/// Groups segment texts into chunks the same way, keeping each chunk's first and last input position.
+pub(crate) fn chunk_spans(texts: &[&str], max_chars: usize) -> Vec<SpanChunk> {
+    let mut chunks = Vec::new();
+    let mut cur: Option<SpanChunk> = None;
+
+    for (i, t) in texts.iter().enumerate() {
         let t = t.trim();
         if t.is_empty() {
             continue;
         }
-        if !cur.is_empty() && cur.chars().count() + 1 + t.chars().count() > max_chars {
-            chunks.push(std::mem::take(&mut cur));
+        if let Some(c) = &cur {
+            if c.text.chars().count() + 1 + t.chars().count() > max_chars {
+                chunks.extend(cur.take());
+            }
         }
-        if !cur.is_empty() {
-            cur.push(' ');
+        match &mut cur {
+            Some(c) => {
+                c.text.push(' ');
+                c.text.push_str(t);
+                c.last = i;
+            }
+            None => {
+                cur = Some(SpanChunk {
+                    text: t.to_owned(),
+                    first: i,
+                    last: i,
+                })
+            }
         }
-        cur.push_str(t);
     }
-    if !cur.is_empty() {
-        chunks.push(cur);
+    chunks.extend(cur);
+    chunks
+}
+
+/// A chunk of a document and the 1-based line it starts on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DocChunk {
+    pub text: String,
+    pub line_start: usize,
+}
+
+/// Splits a document into chunks of at most `max_chars` characters. Paragraphs (runs of non-blank
+/// lines) are packed together while they fit; a paragraph longer than `max_chars` is cut at a
+/// sentence end or a space in the second half of the window, or hard-cut when there is neither.
+/// Every chunk records the line it starts on, so a hit can point back into the file.
+pub(crate) fn chunk_document(text: &str, max_chars: usize) -> Vec<DocChunk> {
+    let max_chars = max_chars.max(1);
+    // Paragraphs with their first line number.
+    let mut paragraphs: Vec<(usize, String)> = Vec::new();
+    let mut cur: Option<(usize, String)> = None;
+    for (n, line) in text.lines().enumerate() {
+        let line = line.trim_end();
+        if line.trim().is_empty() {
+            paragraphs.extend(cur.take());
+            continue;
+        }
+        match &mut cur {
+            Some((_, p)) => {
+                p.push('\n');
+                p.push_str(line);
+            }
+            None => cur = Some((n + 1, line.to_owned())),
+        }
+    }
+    paragraphs.extend(cur);
+
+    // Pieces no longer than `max_chars`.
+    let mut pieces: Vec<DocChunk> = Vec::new();
+    for (line, para) in paragraphs {
+        split_long(&para, line, max_chars, &mut pieces);
+    }
+
+    // Pack pieces into chunks.
+    let mut chunks: Vec<DocChunk> = Vec::new();
+    for piece in pieces {
+        if let Some(last) = chunks.last_mut() {
+            if last.text.chars().count() + 2 + piece.text.chars().count() <= max_chars {
+                last.text.push_str("\n\n");
+                last.text.push_str(&piece.text);
+                continue;
+            }
+        }
+        chunks.push(piece);
     }
     chunks
+}
+
+/// Cuts `para` (starting on line `line`) into pieces of at most `max` characters.
+fn split_long(para: &str, line: usize, max: usize, out: &mut Vec<DocChunk>) {
+    let chars: Vec<char> = para.chars().collect();
+    let mut start = 0;
+    let mut line = line;
+    while start < chars.len() {
+        let mut end = (start + max).min(chars.len());
+        if end < chars.len() {
+            let window = &chars[start..end];
+            let half = window.len() / 2;
+            let cut = (half..window.len())
+                .rev()
+                .find(|&i| matches!(window[i], '.' | '!' | '?' | '\n'))
+                .map(|i| i + 1)
+                .or_else(|| {
+                    (half..window.len())
+                        .rev()
+                        .find(|&i| window[i].is_whitespace())
+                });
+            if let Some(cut) = cut {
+                end = start + cut.max(1);
+            }
+        }
+        let piece: String = chars[start..end].iter().collect();
+        let trimmed = piece.trim();
+        if !trimmed.is_empty() {
+            let leading_newlines = piece[..piece.len() - piece.trim_start().len()]
+                .matches('\n')
+                .count();
+            out.push(DocChunk {
+                text: trimmed.to_owned(),
+                line_start: line + leading_newlines,
+            });
+        }
+        line += piece.matches('\n').count();
+        start = end;
+    }
 }
 
 /// Reciprocal Rank Fusion. Each ranking lists ids in descending relevance; an id's fused score is
@@ -149,6 +269,83 @@ mod tests {
         // Budget counts characters, not bytes, so multi-byte segments group correctly.
         let chunks = chunk_texts(&["预算讨论", "排期计划"], 5);
         assert_eq!(chunks, vec!["预算讨论".to_owned(), "排期计划".to_owned()]);
+    }
+
+    #[test]
+    fn chunk_spans_keep_first_and_last_positions() {
+        let spans = chunk_spans(&["aaaa", "", "bbbb", "cccc"], 9);
+        assert_eq!(
+            spans,
+            vec![
+                SpanChunk {
+                    text: "aaaa bbbb".into(),
+                    first: 0,
+                    last: 2
+                },
+                SpanChunk {
+                    text: "cccc".into(),
+                    first: 3,
+                    last: 3
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn chunk_document_packs_paragraphs_and_records_lines() {
+        let doc = "Title\n\nFirst para line one\nline two\n\n\nSecond para";
+        let chunks = chunk_document(doc, 1000);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].line_start, 1);
+        assert_eq!(
+            chunks[0].text,
+            "Title\n\nFirst para line one\nline two\n\nSecond para"
+        );
+
+        let chunks = chunk_document(doc, 30);
+        let lines: Vec<usize> = chunks.iter().map(|c| c.line_start).collect();
+        assert_eq!(lines, [1, 3, 7]);
+        assert!(chunks.iter().all(|c| c.text.chars().count() <= 30));
+    }
+
+    #[test]
+    fn chunk_document_cuts_long_paragraphs_at_sentences_then_spaces() {
+        let para = "One two three. Four five six. Seven eight nine.";
+        let chunks = chunk_document(para, 20);
+        assert_eq!(chunks[0].text, "One two three.");
+        assert!(chunks.iter().all(|c| c.text.chars().count() <= 20));
+        let joined: Vec<&str> = chunks.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(joined.join(" "), para);
+
+        // No spaces at all: hard cut, still bounded, nothing lost.
+        let blob = "x".repeat(45);
+        let chunks = chunk_document(&blob, 20);
+        assert_eq!(chunks.iter().map(|c| c.text.len()).sum::<usize>(), 45);
+        assert!(chunks.iter().all(|c| c.text.len() <= 20));
+    }
+
+    #[test]
+    fn chunk_document_tracks_lines_inside_a_long_paragraph() {
+        let para = "alpha beta gamma\ndelta epsilon zeta\neta theta iota";
+        let chunks = chunk_document(para, 19);
+        let lines: Vec<usize> = chunks.iter().map(|c| c.line_start).collect();
+        assert_eq!(lines, [1, 2, 3]);
+    }
+
+    #[test]
+    fn chunk_document_of_blank_text_is_empty() {
+        assert!(chunk_document("", 100).is_empty());
+        assert!(chunk_document("  \n\n \t\n", 100).is_empty());
+    }
+
+    #[test]
+    fn chunk_document_is_char_safe() {
+        let chunks = chunk_document(&"预算讨论".repeat(10), 7);
+        assert!(chunks.iter().all(|c| c.text.chars().count() <= 7));
+        assert_eq!(
+            chunks.iter().map(|c| c.text.chars().count()).sum::<usize>(),
+            40
+        );
     }
 
     #[test]
