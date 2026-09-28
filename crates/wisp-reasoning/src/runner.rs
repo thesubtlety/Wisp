@@ -7,12 +7,17 @@ use std::time::{Duration, Instant};
 
 use crate::backend::{CancelToken, ReasoningError};
 
-/// Variables that would move a subscription-mode run onto API billing.
-/// Claude Code prefers `ANTHROPIC_API_KEY` over the logged-in subscription.
+/// Variables removed from a subscription-mode child. The keys would move the run onto API billing
+/// (Claude Code prefers `ANTHROPIC_API_KEY` over the logged-in subscription). The rest would send
+/// the prompt, which holds meeting text, somewhere other than the provider you logged in to.
 pub const SUBSCRIPTION_STRIPPED_ENV: &[&str] = &[
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
     "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
     "CODEX_API_KEY",
 ];
 
@@ -308,6 +313,24 @@ mod tests {
             .parse()
             .unwrap();
         assert!(wait_gone(pid), "leftover sleep {pid} was not killed");
+    }
+
+    #[test]
+    fn subscription_list_is_pinned() {
+        // Pinned by literal: dropping one silently reopens a billing or data-routing path.
+        assert_eq!(
+            SUBSCRIPTION_STRIPPED_ENV,
+            [
+                "ANTHROPIC_API_KEY",
+                "ANTHROPIC_AUTH_TOKEN",
+                "ANTHROPIC_BASE_URL",
+                "CLAUDE_CODE_USE_BEDROCK",
+                "CLAUDE_CODE_USE_VERTEX",
+                "OPENAI_API_KEY",
+                "OPENAI_BASE_URL",
+                "CODEX_API_KEY",
+            ]
+        );
     }
 
     #[test]
