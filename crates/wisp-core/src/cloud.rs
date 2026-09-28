@@ -15,8 +15,8 @@ pub enum CloudProtocol {
     /// OpenAI `/v1/audio/transcriptions` — and every OpenAI-compatible endpoint (e.g. Groq),
     /// reached by overriding `base_url`.
     OpenAi,
-    /// Google Gemini `models/{model}:generateContent` with inline base64 audio; the key is a `?key=`
-    /// query parameter and the transcript comes back as the candidate's text.
+    /// Google Gemini `models/{model}:generateContent` with inline base64 audio; the key goes in the
+    /// `x-goog-api-key` header and the transcript comes back as the candidate's text.
     Gemini,
     /// OpenAI-compatible `/chat/completions` carrying the audio as an `input_audio` content part
     /// (e.g. Alibaba DashScope's Qwen audio models). Bearer-authed; transcript is the message content.

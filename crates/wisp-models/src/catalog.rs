@@ -1,43 +1,44 @@
 //! The built-in model catalog Wisp offers out of the box.
 //!
-//! Checksums are currently unpinned (empty) — downloads are size-known and the store warns when
-//! fetching an unpinned file. Pinning real SHA-256 values is a follow-up.
+//! Every file is pinned twice: its Hugging Face URL names a commit rather than `main`, and its
+//! SHA-256 is checked after download. A mirror, a proxy, or an upstream change can't swap a model
+//! file without the download failing.
 
 use wisp_core::model::{ModelDescriptor, ModelFamily, ModelFile, ModelId, Quant};
 
 /// Hugging Face mirror hosting individual SenseVoice files (no auth needed).
 const SENSE_VOICE_BASE: &str =
-    "https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main";
+    "https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/2365baeacb507f821a0c8120fcee3d484dba7a07";
 
 /// Hugging Face repos hosting the sherpa-onnx Whisper ONNX exports (no auth needed).
 const WHISPER_LARGE_V3_BASE: &str =
-    "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-large-v3/resolve/main";
+    "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-large-v3/resolve/2a6507094dd6020d939d78e3f1834a1d06267fca";
 const WHISPER_MEDIUM_BASE: &str =
-    "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-medium/resolve/main";
+    "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-medium/resolve/8c31d28503847560985df21f90e14f0c736e075e";
 
 /// Hugging Face repo hosting the streaming (online) Zipformer transducer, bilingual zh+en (no auth).
 const STREAMING_ZIPFORMER_BASE: &str =
-    "https://huggingface.co/csukuangfj/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20/resolve/main";
+    "https://huggingface.co/csukuangfj/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20/resolve/98590b7ed6443e77b714204da2757d75e1a642f4";
 
 /// Hugging Face repo hosting the sherpa-onnx FunASR Paraformer (offline, zh+en) ONNX export (no auth).
 const PARAFORMER_ZH_BASE: &str =
-    "https://huggingface.co/csukuangfj/sherpa-onnx-paraformer-zh-2024-03-09/resolve/main";
+    "https://huggingface.co/csukuangfj/sherpa-onnx-paraformer-zh-2024-03-09/resolve/906992d326ebf0c5171cde675aa0902be9e5bc6c";
 
 /// Hugging Face repo hosting the sherpa-onnx NVIDIA NeMo Parakeet TDT (offline, English) export (no auth).
 const PARAKEET_BASE: &str =
-    "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8/resolve/main";
+    "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8/resolve/1ab9323565ddb038682214b292f588070a538ce2";
 
 /// Hugging Face repo hosting the whisper.cpp GGUF models (no auth needed). Also hosts the optional
 /// Core ML encoder archives (see [`crate::coreml`]).
 pub(crate) const WHISPER_CPP_BASE: &str =
-    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main";
+    "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1";
 
 /// Hugging Face repos hosting the sherpa-onnx diarization models (no auth needed): a pyannote
 /// speaker-segmentation model plus interchangeable speaker-embedding models.
 const PYANNOTE_SEG_BASE: &str =
-    "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/main";
+    "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/9403a6902bb58e3d5ae8c7e77c3422de279db2e0";
 const SPEAKER_EMB_BASE: &str =
-    "https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/main";
+    "https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/0743f301363dec56491a490f6d6cbc9d67f9a3bf";
 
 /// GitHub release hosting the sherpa-onnx speech-enhancement (denoiser) models (no auth needed).
 const GTCRN_BASE: &str =
@@ -77,13 +78,13 @@ fn paraformer_zh() -> ModelDescriptor {
             ModelFile {
                 name: "model.int8.onnx".to_owned(),
                 url: format!("{PARAFORMER_ZH_BASE}/model.int8.onnx"),
-                sha256: String::new(),
+                sha256: "90bc03034ae1bef9575f8cc798cd1519c8be8aa9e8b458a033e32017ff4d584c".to_owned(),
                 size_bytes: 227_330_205,
             },
             ModelFile {
                 name: "tokens.txt".to_owned(),
                 url: format!("{PARAFORMER_ZH_BASE}/tokens.txt"),
-                sha256: String::new(),
+                sha256: "6c0e3b35cece259829e6cb5b8d90d13db88f61ea3a2953d11898e4b2bfd7a2e2".to_owned(),
                 size_bytes: 75_354,
             },
         ],
@@ -108,25 +109,25 @@ fn parakeet_en() -> ModelDescriptor {
             ModelFile {
                 name: "encoder.int8.onnx".to_owned(),
                 url: format!("{PARAKEET_BASE}/encoder.int8.onnx"),
-                sha256: String::new(),
+                sha256: "a32b12d17bbbc309d0686fbbcc2987b5e9b8333a7da83fa6b089f0a2acd651ab".to_owned(),
                 size_bytes: 652_184_296,
             },
             ModelFile {
                 name: "decoder.int8.onnx".to_owned(),
                 url: format!("{PARAKEET_BASE}/decoder.int8.onnx"),
-                sha256: String::new(),
+                sha256: "b6bb64963457237b900e496ee9994b59294526439fbcc1fecf705b31a15c6b4e".to_owned(),
                 size_bytes: 7_257_753,
             },
             ModelFile {
                 name: "joiner.int8.onnx".to_owned(),
                 url: format!("{PARAKEET_BASE}/joiner.int8.onnx"),
-                sha256: String::new(),
+                sha256: "7946164367946e7f9f29a122407c3252b680dbae9a51343eb2488d057c3c43d2".to_owned(),
                 size_bytes: 1_739_080,
             },
             ModelFile {
                 name: "tokens.txt".to_owned(),
                 url: format!("{PARAKEET_BASE}/tokens.txt"),
-                sha256: String::new(),
+                sha256: "ec182b70dd42113aff6c5372c75cac58c952443eb22322f57bbd7f53977d497d".to_owned(),
                 size_bytes: 9_384,
             },
         ],
@@ -148,7 +149,7 @@ fn whisper_tiny() -> ModelDescriptor {
         files: vec![ModelFile {
             name: "ggml-tiny-q5_1.bin".to_owned(),
             url: format!("{WHISPER_CPP_BASE}/ggml-tiny-q5_1.bin"),
-            sha256: String::new(),
+            sha256: "818710568da3ca15689e31a743197b520007872ff9576237bda97bd1b469c3d7".to_owned(),
             size_bytes: 32_152_673,
         }],
         languages: whisper_languages(),
@@ -169,7 +170,7 @@ fn whisper_base() -> ModelDescriptor {
         files: vec![ModelFile {
             name: "ggml-base-q5_1.bin".to_owned(),
             url: format!("{WHISPER_CPP_BASE}/ggml-base-q5_1.bin"),
-            sha256: String::new(),
+            sha256: "422f1ae452ade6f30a004d7e5c6a43195e4433bc370bf23fac9cc591f01a8898".to_owned(),
             size_bytes: 59_707_625,
         }],
         languages: whisper_languages(),
@@ -190,7 +191,7 @@ fn whisper_small() -> ModelDescriptor {
         files: vec![ModelFile {
             name: "ggml-small-q5_1.bin".to_owned(),
             url: format!("{WHISPER_CPP_BASE}/ggml-small-q5_1.bin"),
-            sha256: String::new(),
+            sha256: "ae85e4a935d7a567bd102fe55afc16bb595bdb618e11b2fc7591bc08120411bb".to_owned(),
             size_bytes: 190_085_487,
         }],
         languages: whisper_languages(),
@@ -211,7 +212,7 @@ fn whisper_medium_gpu() -> ModelDescriptor {
         files: vec![ModelFile {
             name: "ggml-medium-q5_0.bin".to_owned(),
             url: format!("{WHISPER_CPP_BASE}/ggml-medium-q5_0.bin"),
-            sha256: String::new(),
+            sha256: "19fea4b380c3a618ec4723c3eef2eb785ffba0d0538cf43f8f235e7b3b34220f".to_owned(),
             size_bytes: 539_212_467,
         }],
         languages: whisper_languages(),
@@ -264,7 +265,7 @@ fn whisper_turbo_q5() -> ModelDescriptor {
         files: vec![ModelFile {
             name: "ggml-large-v3-turbo-q5_0.bin".to_owned(),
             url: format!("{WHISPER_CPP_BASE}/ggml-large-v3-turbo-q5_0.bin"),
-            sha256: String::new(),
+            sha256: "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2".to_owned(),
             size_bytes: 574_041_195,
         }],
         languages: whisper_languages(),
@@ -285,7 +286,7 @@ fn whisper_turbo_q8() -> ModelDescriptor {
         files: vec![ModelFile {
             name: "ggml-large-v3-turbo-q8_0.bin".to_owned(),
             url: format!("{WHISPER_CPP_BASE}/ggml-large-v3-turbo-q8_0.bin"),
-            sha256: String::new(),
+            sha256: "317eb69c11673c9de1e1f0d459b253999804ec71ac4c23c17ecf5fbe24e259a1".to_owned(),
             size_bytes: 874_188_075,
         }],
         languages: whisper_languages(),
@@ -306,7 +307,7 @@ fn whisper_large_v3_gpu() -> ModelDescriptor {
         files: vec![ModelFile {
             name: "ggml-large-v3-q5_0.bin".to_owned(),
             url: format!("{WHISPER_CPP_BASE}/ggml-large-v3-q5_0.bin"),
-            sha256: String::new(),
+            sha256: "d75795ecff3f83b5faa89d1900604ad8c780abd5739fae406de19f23ecd98ad1".to_owned(),
             size_bytes: 1_081_140_203,
         }],
         languages: whisper_languages(),
@@ -328,8 +329,8 @@ fn whisper_turbo_full() -> ModelDescriptor {
             name: "ggml-large-v3-turbo.bin".to_owned(),
             // Declared size is a safe under-estimate (the store rejects a download shorter than this).
             url: format!("{WHISPER_CPP_BASE}/ggml-large-v3-turbo.bin"),
-            sha256: String::new(),
-            size_bytes: 1_550_000_000,
+            sha256: "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69".to_owned(),
+            size_bytes: 1_624_555_275,
         }],
         languages: whisper_languages(),
         description:
@@ -350,7 +351,7 @@ fn sense_voice_tokens() -> ModelFile {
     ModelFile {
         name: "tokens.txt".to_owned(),
         url: format!("{SENSE_VOICE_BASE}/tokens.txt"),
-        sha256: String::new(),
+        sha256: "f449eb28dc567533d7fa59be34e2abca8784f771850c78a47fb731a31429a1dc".to_owned(),
         size_bytes: 315_894,
     }
 }
@@ -365,7 +366,8 @@ fn sense_voice_int8() -> ModelDescriptor {
             ModelFile {
                 name: "model.int8.onnx".to_owned(),
                 url: format!("{SENSE_VOICE_BASE}/model.int8.onnx"),
-                sha256: String::new(),
+                sha256: "c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51"
+                    .to_owned(),
                 size_bytes: 239_233_841,
             },
             sense_voice_tokens(),
@@ -388,7 +390,8 @@ fn sense_voice_fp32() -> ModelDescriptor {
             ModelFile {
                 name: "model.onnx".to_owned(),
                 url: format!("{SENSE_VOICE_BASE}/model.onnx"),
-                sha256: String::new(),
+                sha256: "977016bd9c79f9eb343430b5cc305e07ab64d5212dff41b0dcfa1694bee9a8cb"
+                    .to_owned(),
                 size_bytes: 937_617_178,
             },
             sense_voice_tokens(),
@@ -411,19 +414,22 @@ fn whisper_large_v3() -> ModelDescriptor {
             ModelFile {
                 name: "large-v3-encoder.int8.onnx".to_owned(),
                 url: format!("{WHISPER_LARGE_V3_BASE}/large-v3-encoder.int8.onnx"),
-                sha256: String::new(),
+                sha256: "d531cf17248acc43e8c09b472a0877055e770877857a5332fc1304b36534ec85"
+                    .to_owned(),
                 size_bytes: 766_671_985,
             },
             ModelFile {
                 name: "large-v3-decoder.int8.onnx".to_owned(),
                 url: format!("{WHISPER_LARGE_V3_BASE}/large-v3-decoder.int8.onnx"),
-                sha256: String::new(),
+                sha256: "ebc6bfd88e162a46cb3edee8a7e727e1dcbc65cabecb19e2573695e4d495e1af"
+                    .to_owned(),
                 size_bytes: 1_008_265_203,
             },
             ModelFile {
                 name: "large-v3-tokens.txt".to_owned(),
                 url: format!("{WHISPER_LARGE_V3_BASE}/large-v3-tokens.txt"),
-                sha256: String::new(),
+                sha256: "b34b360dbb493e781e479794586d661700670d65564001f23024971d1f2fa126"
+                    .to_owned(),
                 size_bytes: 816_730,
             },
         ],
@@ -450,19 +456,22 @@ fn whisper_medium() -> ModelDescriptor {
             ModelFile {
                 name: "medium-encoder.int8.onnx".to_owned(),
                 url: format!("{WHISPER_MEDIUM_BASE}/medium-encoder.int8.onnx"),
-                sha256: String::new(),
+                sha256: "1c54582b4d829de0089f6cb63bbbdb3bf7555398bacaf855fbecf1a84dfd193e"
+                    .to_owned(),
                 size_bytes: 374_196_283,
             },
             ModelFile {
                 name: "medium-decoder.int8.onnx".to_owned(),
                 url: format!("{WHISPER_MEDIUM_BASE}/medium-decoder.int8.onnx"),
-                sha256: String::new(),
+                sha256: "595d00a338a365a7bfa0ca7f296cabc639583bef770ab6130df90f49a6412747"
+                    .to_owned(),
                 size_bytes: 571_059_257,
             },
             ModelFile {
                 name: "medium-tokens.txt".to_owned(),
                 url: format!("{WHISPER_MEDIUM_BASE}/medium-tokens.txt"),
-                sha256: String::new(),
+                sha256: "b34b360dbb493e781e479794586d661700670d65564001f23024971d1f2fa126"
+                    .to_owned(),
                 size_bytes: 816_730,
             },
         ],
@@ -491,25 +500,29 @@ fn streaming_zipformer_zh_en() -> ModelDescriptor {
             ModelFile {
                 name: "encoder-epoch-99-avg-1.int8.onnx".to_owned(),
                 url: format!("{STREAMING_ZIPFORMER_BASE}/encoder-epoch-99-avg-1.int8.onnx"),
-                sha256: String::new(),
+                sha256: "8fa764187a261844f859d7143ebaa563af5d10adfece4c18a8f414c88cba2a9b"
+                    .to_owned(),
                 size_bytes: 181_895_032,
             },
             ModelFile {
                 name: "decoder-epoch-99-avg-1.int8.onnx".to_owned(),
                 url: format!("{STREAMING_ZIPFORMER_BASE}/decoder-epoch-99-avg-1.int8.onnx"),
-                sha256: String::new(),
+                sha256: "1a70c593d71e53f023f5f55b0b4cfff5055abb786ee3992e5f63dc2e273cc4fa"
+                    .to_owned(),
                 size_bytes: 13_091_040,
             },
             ModelFile {
                 name: "joiner-epoch-99-avg-1.int8.onnx".to_owned(),
                 url: format!("{STREAMING_ZIPFORMER_BASE}/joiner-epoch-99-avg-1.int8.onnx"),
-                sha256: String::new(),
+                sha256: "1ed689c5ed19dbaa725d9d191bb4822b5f4855a39e1ffd28cbc1f340d25b2ee0"
+                    .to_owned(),
                 size_bytes: 3_228_404,
             },
             ModelFile {
                 name: "tokens.txt".to_owned(),
                 url: format!("{STREAMING_ZIPFORMER_BASE}/tokens.txt"),
-                sha256: String::new(),
+                sha256: "a8e0e4ec53810e433789b54a5c0134a7eaa2ffca595a6334d54c00da858841d3"
+                    .to_owned(),
                 size_bytes: 56_317,
             },
         ],
@@ -535,7 +548,7 @@ fn pyannote_segmentation() -> ModelFile {
     ModelFile {
         name: "segmentation.onnx".to_owned(),
         url: format!("{PYANNOTE_SEG_BASE}/model.onnx"),
-        sha256: String::new(),
+        sha256: "220ad67ca923bef2fa91f2390c786097bf305bceb5e261d4af67b38e938e1079".to_owned(),
         size_bytes: 5_992_913,
     }
 }
@@ -553,7 +566,8 @@ fn diarization_standard() -> ModelDescriptor {
                 url: format!(
                     "{SPEAKER_EMB_BASE}/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx"
                 ),
-                sha256: String::new(),
+                sha256: "f682b514c05d947ee3fa91cd6ec6c5c7543479a128373fa29b1faedccd21fd11"
+                    .to_owned(),
                 size_bytes: 28_281_138,
             },
         ],
@@ -578,7 +592,8 @@ fn diarization_accurate() -> ModelDescriptor {
                 url: format!(
                     "{SPEAKER_EMB_BASE}/3dspeaker_speech_eres2net_large_sv_zh-cn_3dspeaker_16k.onnx"
                 ),
-                sha256: String::new(),
+                sha256: "19547e85b6c14ec44b8add4e7cb9ce353c7e995d4f1c9ffd408176ac3a2d6895"
+                    .to_owned(),
                 size_bytes: 116_058_710,
             },
         ],
@@ -606,7 +621,7 @@ fn denoise_gtcrn() -> ModelDescriptor {
         files: vec![ModelFile {
             name: "gtcrn_simple.onnx".to_owned(),
             url: format!("{GTCRN_BASE}/gtcrn_simple.onnx"),
-            sha256: String::new(),
+            sha256: "e77603ac0c23dac3227dd2d7135b3a585cbee2679048aecfa886657d3ae1b534".to_owned(),
             size_bytes: 535_638,
         }],
         languages: Vec::new(),
@@ -621,6 +636,29 @@ fn denoise_gtcrn() -> ModelDescriptor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_file_is_pinned_by_commit_and_sha256() {
+        for d in [builtin_catalog(), diarization_models(), denoise_models()].concat() {
+            for f in &d.files {
+                assert!(
+                    f.sha256.len() == 64 && f.sha256.bytes().all(|b| b.is_ascii_hexdigit()),
+                    "{}/{}: unpinned or malformed sha256 {:?}",
+                    d.id.as_str(),
+                    f.name,
+                    f.sha256
+                );
+                if let Some(rest) = f.url.strip_prefix("https://huggingface.co/") {
+                    let rev = rest.split('/').nth(3).unwrap_or("");
+                    assert!(
+                        rev.len() == 40 && rev.bytes().all(|b| b.is_ascii_hexdigit()),
+                        "{}: Hugging Face URL must name a commit, not {rev:?}",
+                        f.url
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn catalog_has_distinct_ids_and_files() {
