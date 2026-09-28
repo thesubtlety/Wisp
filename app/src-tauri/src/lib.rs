@@ -1328,6 +1328,23 @@ fn restrict_to_owner(path: &Path, mode: u32) {
     let _ = (path, mode);
 }
 
+/// How often retention runs while the app is open (it also runs at every start).
+const PRUNE_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+
+/// Deletes whatever retention says has expired, logging what went. Never fails the caller.
+fn prune_library(library: &mut Library, managed_dir: &Path) {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64);
+    match library.prune(now_ms, managed_dir) {
+        Ok(report) if report != wisp_library::PruneReport::default() => {
+            eprintln!("wisp: retention pruned {report:?}");
+        }
+        Ok(_) => {}
+        Err(e) => eprintln!("wisp: retention prune failed: {e}"),
+    }
+}
+
 /// Persists `keys` to the key store. The error names where they couldn't be saved.
 fn save_cloud_keys(state: &AppState, keys: &HashMap<String, String>) -> Result<(), String> {
     wisp_secrets::save_keys(state.key_store.as_ref(), keys)
@@ -4207,8 +4224,15 @@ pub fn run() {
             let _ = fs::create_dir_all(&data_dir);
             restrict_to_owner(&data_dir, 0o700);
             let library_path = data_dir.join("library.db");
-            let library = Library::open(&library_path)?;
+            let mut library = Library::open(&library_path)?;
             restrict_to_owner(&library_path, 0o600);
+            // Retention: delete expired transcripts and temporary sources now, then every few hours
+            // (the thread is spawned after `manage` below). App-owned copies live in this directory,
+            // and prune only ever deletes files inside it.
+            let managed_dir = data_dir.join("managed-sources");
+            let _ = fs::create_dir_all(&managed_dir);
+            restrict_to_owner(&managed_dir, 0o700);
+            prune_library(&mut library, &managed_dir);
 
             // Notes semantic search: restore the chosen embedding model (loaded in the background so
             // startup never blocks on a model download) and the persisted search mode.
@@ -4279,6 +4303,16 @@ pub fn run() {
 
             // Restore the persisted embedding model in the background — loading may download and be
             // slow. Spawned after `manage` so the `state()` call inside `load_embedder` resolves.
+            {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || loop {
+                    std::thread::sleep(PRUNE_INTERVAL);
+                    if let Ok(mut library) = handle.state::<AppState>().library.lock() {
+                        prune_library(&mut library, &managed_dir);
+                    }
+                });
+            }
+
             if let Some(id) = restore_embed {
                 let handle = app.handle().clone();
                 std::thread::spawn(move || {
