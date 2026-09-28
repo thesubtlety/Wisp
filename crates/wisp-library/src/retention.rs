@@ -126,6 +126,56 @@ impl Library {
         self.retention
     }
 
+    /// Adopts `policy` for existing data too: every transcript not yet pruned gets its expiry
+    /// recomputed from the meeting's start (or cleared, to keep it), and every pasted or managed
+    /// source from when it was added. Files indexed in place never expire. Nothing is deleted
+    /// here; the next [`Library::prune`] does that. Returns (meetings, sources) updated.
+    pub fn restamp_expiries(&mut self, policy: RetentionPolicy) -> Result<(usize, usize)> {
+        self.retention = policy;
+        let transcript_ms = policy.transcript_days.map(|d| i64::from(d) * DAY_MS);
+        let source_ms = policy.temp_source_days.map(|d| i64::from(d) * DAY_MS);
+        let tx = self.conn.transaction()?;
+        let meetings = tx.execute(
+            "UPDATE meeting SET transcript_expires_at_ms =
+                 CASE WHEN ?1 IS NULL THEN NULL ELSE started_at_ms + ?1 END
+             WHERE transcript_pruned_at_ms IS NULL",
+            [transcript_ms],
+        )?;
+        let sources = tx.execute(
+            "UPDATE source SET expires_at_ms =
+                 CASE WHEN ?1 IS NULL THEN NULL ELSE added_at_ms + ?1 END
+             WHERE kind IN ('pasted', 'managed')",
+            [source_ms],
+        )?;
+        tx.commit()?;
+        Ok((meetings, sources))
+    }
+
+    /// How many transcripts and temporary sources `policy` would have expired by `now_ms`: what a
+    /// prune right after adopting it would delete. For confirming before shortening retention.
+    pub fn preview_policy(&self, policy: RetentionPolicy, now_ms: i64) -> Result<(usize, usize)> {
+        let transcripts = match policy.transcript_days {
+            None => 0,
+            Some(d) => self.conn.query_row(
+                "SELECT count(*) FROM meeting
+                 WHERE transcript_pruned_at_ms IS NULL AND segment_count > 0
+                   AND started_at_ms + ?1 <= ?2",
+                rusqlite::params![i64::from(d) * DAY_MS, now_ms],
+                |r| r.get::<_, i64>(0),
+            )? as usize,
+        };
+        let sources = match policy.temp_source_days {
+            None => 0,
+            Some(d) => self.conn.query_row(
+                "SELECT count(*) FROM source
+                 WHERE kind IN ('pasted', 'managed') AND added_at_ms + ?1 <= ?2",
+                rusqlite::params![i64::from(d) * DAY_MS, now_ms],
+                |r| r.get::<_, i64>(0),
+            )? as usize,
+        };
+        Ok((transcripts, sources))
+    }
+
     /// Creates a project. `id` is caller-generated; names are unique.
     pub fn create_project(&self, id: &str, name: &str, created_at_ms: i64) -> Result<Project> {
         let name = name.trim();
@@ -746,6 +796,238 @@ mod tests {
         assert!(lib.list_projects().unwrap().is_empty());
         assert_eq!(count(&lib, "SELECT count(*) FROM source_chunk"), 0);
         assert!(!managed.exists());
+    }
+
+    /// Row counts in every table that holds meeting- or project-derived data.
+    fn footprint(lib: &Library, meeting: &str, project: &str) -> Vec<(&'static str, i64)> {
+        let q =
+            |sql: &str, arg: &str| -> i64 { lib.conn.query_row(sql, [arg], |r| r.get(0)).unwrap() };
+        vec![
+            ("meeting", q("SELECT count(*) FROM meeting WHERE id = ?1", meeting)),
+            ("segment", q("SELECT count(*) FROM segment WHERE meeting_id = ?1", meeting)),
+            ("chunk", q("SELECT count(*) FROM chunk WHERE meeting_id = ?1", meeting)),
+            ("state_op", q("SELECT count(*) FROM state_op WHERE meeting_id = ?1", meeting)),
+            ("candidate_log", q("SELECT count(*) FROM candidate_log WHERE meeting_id = ?1", meeting)),
+            ("source", q("SELECT count(*) FROM source WHERE project_id = ?1", project)),
+            ("source_chunk", q("SELECT count(*) FROM source_chunk c JOIN source s ON s.id = c.source_id WHERE s.project_id = ?1", project)),
+            ("project_memory", q("SELECT count(*) FROM project_memory WHERE project_id = ?1", project)),
+        ]
+    }
+
+    /// A project with one meeting carrying every kind of derived data, and a managed file.
+    fn full_project(lib: &mut Library, root: &Path) -> PathBuf {
+        lib.create_project("p", "Acme", T0).unwrap();
+        lib.set_meeting_project("m1", Some("p")).unwrap();
+        lib.save_state_ops(
+            "m1",
+            &[crate::StoredOp {
+                seq: 0,
+                at_ms: T0,
+                op: "{}".into(),
+            }],
+        )
+        .unwrap();
+        lib.save_candidate_log(
+            "m1",
+            &[crate::StoredLogEntry {
+                seq: 0,
+                at_ms: T0,
+                entry: "{}".into(),
+            }],
+        )
+        .unwrap();
+        lib.add_memory(
+            "p",
+            &crate::MemoryInput {
+                kind: "fact".into(),
+                text: "Azure only".into(),
+                status: "stated".into(),
+                confidence: 1.0,
+                provenance: vec![],
+                meeting_id: Some("m1".into()),
+            },
+            T0,
+        )
+        .unwrap();
+        let copy = root.join("spec.md");
+        std::fs::write(&copy, "azure spec").unwrap();
+        lib.add_source(
+            "p",
+            &SourceInput {
+                kind: SourceKind::Managed,
+                label: "spec.md".into(),
+                text: "azure spec".into(),
+                origin_path: None,
+                managed_path: Some(copy.clone()),
+                added_at_ms: T0,
+            },
+        )
+        .unwrap();
+        copy
+    }
+
+    #[test]
+    fn deleting_a_project_leaves_nothing_behind() {
+        let mut lib = library_with_meeting();
+        let root = tempfile::tempdir().unwrap();
+        let copy = full_project(&mut lib, root.path());
+        assert!(
+            footprint(&lib, "m1", "p").iter().all(|(_, n)| *n > 0),
+            "{:?}",
+            footprint(&lib, "m1", "p")
+        );
+
+        let report = lib.delete_project("p", root.path()).unwrap();
+        assert_eq!(
+            (
+                report.meetings_deleted,
+                report.sources_expired,
+                report.files_deleted
+            ),
+            (1, 1, 1)
+        );
+        let left: Vec<_> = footprint(&lib, "m1", "p")
+            .into_iter()
+            .filter(|(_, n)| *n != 0)
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
+        assert!(!copy.exists());
+        assert!(lib.search("azure", 10).unwrap().is_empty());
+        assert!(lib.search_semantic("azure", 10).unwrap().is_empty());
+        let fts_rows: i64 = lib
+            .conn
+            .query_row(
+                "SELECT count(*) FROM source_chunk_fts WHERE source_chunk_fts MATCH 'azure'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(fts_rows, 0);
+    }
+
+    #[test]
+    fn deleting_a_meeting_removes_all_of_it_but_not_its_project() {
+        let mut lib = library_with_meeting();
+        let root = tempfile::tempdir().unwrap();
+        full_project(&mut lib, root.path());
+        assert!(lib.delete_note("m1").unwrap());
+        let fp = footprint(&lib, "m1", "p");
+        for table in ["meeting", "segment", "chunk", "state_op", "candidate_log"] {
+            assert_eq!(
+                fp.iter().find(|(t, _)| *t == table).unwrap().1,
+                0,
+                "{table}"
+            );
+        }
+        assert!(lib.search("ninety", 10).unwrap().is_empty());
+        assert_eq!(
+            lib.list_memory("p").unwrap().len(),
+            1,
+            "accepted project knowledge stays"
+        );
+        assert_eq!(lib.list_sources("p").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_first_start_after_months_away_prunes_everything_due_in_one_pass() {
+        let mut lib = library_with_meeting();
+        lib.create_project("p", "Acme", T0).unwrap();
+        lib.add_source(
+            "p",
+            &SourceInput {
+                kind: SourceKind::Pasted,
+                label: "notes".into(),
+                text: "azure".into(),
+                origin_path: None,
+                managed_path: None,
+                added_at_ms: T0,
+            },
+        )
+        .unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let months_later = T0 + 400 * DAY_MS;
+        let report = lib.prune(months_later, root.path()).unwrap();
+        assert_eq!((report.transcripts_expired, report.sources_expired), (1, 1));
+        assert_eq!(
+            lib.prune(months_later, root.path()).unwrap(),
+            PruneReport::default()
+        );
+    }
+
+    #[test]
+    fn a_new_policy_applies_to_existing_data_and_can_be_previewed() {
+        let mut lib = library_with_meeting();
+        lib.create_project("p", "Acme", T0).unwrap();
+        let pasted = SourceInput {
+            kind: SourceKind::Pasted,
+            label: "notes".into(),
+            text: "azure".into(),
+            origin_path: None,
+            managed_path: None,
+            added_at_ms: T0,
+        };
+        lib.add_source("p", &pasted).unwrap();
+        lib.add_source(
+            "p",
+            &SourceInput {
+                kind: SourceKind::File,
+                origin_path: Some(PathBuf::from("/docs/a.md")),
+                ..pasted.clone()
+            },
+        )
+        .unwrap();
+        let week = RetentionPolicy {
+            transcript_days: Some(7),
+            temp_source_days: Some(7),
+        };
+        assert_eq!(lib.preview_policy(week, T0 + 8 * DAY_MS).unwrap(), (1, 1));
+        assert_eq!(lib.preview_policy(week, T0 + 6 * DAY_MS).unwrap(), (0, 0));
+        assert_eq!(
+            lib.preview_policy(
+                RetentionPolicy {
+                    transcript_days: None,
+                    temp_source_days: None
+                },
+                i64::MAX
+            )
+            .unwrap(),
+            (0, 0)
+        );
+
+        assert_eq!(
+            lib.restamp_expiries(week).unwrap(),
+            (1, 1),
+            "the in-place file is not restamped"
+        );
+        assert_eq!(lib.retention(), week);
+        let (note, _) = lib.get_note("m1").unwrap().unwrap();
+        assert_eq!(note.transcript_expires_at_ms, Some(T0 + 7 * DAY_MS));
+        let root = tempfile::tempdir().unwrap();
+        assert_eq!(
+            lib.prune(T0 + 8 * DAY_MS, root.path())
+                .unwrap()
+                .transcripts_expired,
+            1
+        );
+
+        // Keep forever clears expiries; a pruned transcript stays pruned.
+        let keep = RetentionPolicy {
+            transcript_days: None,
+            temp_source_days: None,
+        };
+        assert_eq!(lib.restamp_expiries(keep).unwrap(), (0, 0));
+        assert!(lib
+            .list_sources("p")
+            .unwrap()
+            .iter()
+            .all(|s| s.expires_at_ms.is_none()));
+        assert!(lib
+            .get_note("m1")
+            .unwrap()
+            .unwrap()
+            .0
+            .transcript_pruned_at_ms
+            .is_some());
     }
 
     #[test]

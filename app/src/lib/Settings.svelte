@@ -141,12 +141,87 @@
     }
   }
 
+  // Retention: how long transcripts and temporary sources are kept. A shorter policy is previewed
+  // and confirmed before it is applied, since applying prunes what it makes due.
+  type Retention = { transcriptDays: number | null; tempSourceDays: number | null };
+  type PruneResult = { transcripts: number; sources: number; meetings: number; files: number; filesRefused: number };
+  const TRANSCRIPT_DAYS = [30, 90, 180, 365];
+  const SOURCE_DAYS = [7, 14, 30, 90];
+  let retention = $state<Retention>({ transcriptDays: 90, tempSourceDays: 30 });
+  let pendingRetention = $state<Retention | null>(null);
+  let pendingPreview = $state<{ transcripts: number; sources: number } | null>(null);
+  let pruneResult = $state<PruneResult | null>(null);
+  let retentionError = $state("");
+  let projects = $state<{ id: string; name: string }[]>([]);
+  let confirmProject = $state("");
+
+  async function loadRetention() {
+    try {
+      retention = await invoke<Retention>("get_retention");
+      projects = await invoke<{ id: string; name: string }[]>("list_projects");
+    } catch (e) {
+      retentionError = String(e);
+    }
+  }
+
+  const daysValue = (v: number | null) => (v === null ? "keep" : String(v));
+  const parseDays = (v: string) => (v === "keep" ? null : Number(v));
+
+  async function proposeRetention(next: Retention) {
+    retentionError = "";
+    pruneResult = null;
+    try {
+      const preview = await invoke<{ transcripts: number; sources: number }>("preview_retention", { policy: next });
+      if (preview.transcripts || preview.sources) {
+        pendingRetention = next;
+        pendingPreview = preview;
+      } else {
+        await applyRetention(next);
+      }
+    } catch (e) {
+      retentionError = String(e);
+    }
+  }
+
+  async function applyRetention(next: Retention) {
+    try {
+      pruneResult = await invoke<PruneResult>("set_retention", { policy: next });
+      retention = next;
+    } catch (e) {
+      retentionError = String(e);
+    } finally {
+      pendingRetention = null;
+      pendingPreview = null;
+    }
+  }
+
+  async function pruneNow() {
+    retentionError = "";
+    try {
+      pruneResult = await invoke<PruneResult>("prune_now");
+    } catch (e) {
+      retentionError = String(e);
+    }
+  }
+
+  async function deleteProject(id: string) {
+    try {
+      pruneResult = await invoke<PruneResult>("delete_project_completely", { projectId: id });
+      projects = projects.filter((p) => p.id !== id);
+    } catch (e) {
+      retentionError = String(e);
+    } finally {
+      confirmProject = "";
+    }
+  }
+
   // Refresh dictation status + the storage paths whenever the dialog opens.
   $effect(() => {
     if (open) {
       loadDictation();
       loadDownloadSettings();
       loadPaths();
+      loadRetention();
     }
   });
 </script>
@@ -332,6 +407,81 @@
             </div>
             <p class="set-intro">{i18n.t.settings.meetingIntelNote}</p>
 
+            <h4 class="set-sub">{i18n.t.settings.retention}</h4>
+            <p class="set-intro">{i18n.t.settings.retentionIntro}</p>
+            <label class="set-row">
+              <span class="set-label">{i18n.t.settings.retentionTranscripts}</span>
+              <select
+                class="set-input set-select retention-transcripts"
+                value={daysValue(retention.transcriptDays)}
+                onchange={(e) => {
+                  const next = { ...retention, transcriptDays: parseDays(e.currentTarget.value) };
+                  // Show the policy in effect until the change is confirmed and applied.
+                  e.currentTarget.value = daysValue(retention.transcriptDays);
+                  proposeRetention(next);
+                }}
+              >
+                {#each TRANSCRIPT_DAYS as d (d)}<option value={String(d)}>{i18n.t.settings.days(d)}</option>{/each}
+                <option value="keep">{i18n.t.settings.keep}</option>
+              </select>
+            </label>
+            <label class="set-row">
+              <span class="set-label">{i18n.t.settings.retentionSources}</span>
+              <select
+                class="set-input set-select retention-sources"
+                value={daysValue(retention.tempSourceDays)}
+                onchange={(e) => {
+                  const next = { ...retention, tempSourceDays: parseDays(e.currentTarget.value) };
+                  e.currentTarget.value = daysValue(retention.tempSourceDays);
+                  proposeRetention(next);
+                }}
+              >
+                {#each SOURCE_DAYS as d (d)}<option value={String(d)}>{i18n.t.settings.days(d)}</option>{/each}
+                <option value="keep">{i18n.t.settings.keep}</option>
+              </select>
+            </label>
+            <div class="set-row">
+              <span class="set-label">{i18n.t.settings.retentionKept}</span>
+              <span class="set-value">{i18n.t.settings.keep}</span>
+            </div>
+            {#if pendingRetention && pendingPreview}
+              <div class="set-confirm">
+                <p>{i18n.t.settings.retentionConfirm(pendingPreview.transcripts, pendingPreview.sources)}</p>
+                <button class="set-btn primary danger" onclick={() => applyRetention(pendingRetention!)}>
+                  {i18n.t.settings.applyAndDelete}
+                </button>
+                <button class="set-btn" onclick={() => ((pendingRetention = null), (pendingPreview = null))}>
+                  {i18n.t.settings.cancel}
+                </button>
+              </div>
+            {/if}
+            <div class="set-row">
+              <span class="set-label">{i18n.t.settings.pruneNowLabel}</span>
+              <button class="set-btn prune-now" onclick={pruneNow}>{i18n.t.settings.pruneNow}</button>
+            </div>
+            {#if pruneResult}
+              <p class="set-intro prune-result">{i18n.t.settings.pruned(pruneResult)}</p>
+            {/if}
+
+            {#if projects.length}
+              <h4 class="set-sub">{i18n.t.settings.projects}</h4>
+              {#each projects as p (p.id)}
+                <div class="set-row project-row">
+                  <span class="set-label">{p.name}</span>
+                  {#if confirmProject === p.id}
+                    <span class="set-confirm-inline">
+                      <span>{i18n.t.settings.deleteProjectConfirm}</span>
+                      <button class="set-btn primary danger" onclick={() => deleteProject(p.id)}>{i18n.t.settings.delete}</button>
+                      <button class="set-btn" onclick={() => (confirmProject = "")}>{i18n.t.settings.cancel}</button>
+                    </span>
+                  {:else}
+                    <button class="set-btn" onclick={() => (confirmProject = p.id)}>{i18n.t.settings.deleteCompletely}</button>
+                  {/if}
+                </div>
+              {/each}
+            {/if}
+            {#if retentionError}<p class="set-error">{retentionError}</p>{/if}
+
             {#if storageError}<p class="set-error">{storageError}</p>{/if}
             {#if paths}
               {#each [{ label: i18n.t.settings.storageModels, path: paths.models, reveal: false }, { label: i18n.t.settings.storageNotes, path: paths.database, reveal: true }, { label: i18n.t.settings.storageData, path: paths.data, reveal: false }] as loc (loc.path)}
@@ -483,6 +633,49 @@
     margin: 0;
     font-size: 13px;
     color: var(--muted);
+  }
+
+  .set-sub {
+    margin: 18px 0 4px;
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--muted);
+  }
+
+  .set-value {
+    font-size: 12.5px;
+    color: var(--muted);
+  }
+
+  .set-confirm {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    margin: 6px 0;
+    border: 1px solid var(--danger, #c0392b);
+    border-radius: 8px;
+  }
+
+  .set-confirm p {
+    margin: 0;
+    flex-basis: 100%;
+    font-size: 12.5px;
+  }
+
+  .set-confirm-inline {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+  }
+
+  .set-btn.danger {
+    color: var(--danger, #c0392b);
+    border-color: var(--danger, #c0392b);
   }
 
   .set-row {

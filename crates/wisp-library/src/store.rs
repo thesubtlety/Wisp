@@ -751,6 +751,11 @@ impl Library {
         let affected = self
             .conn
             .execute("DELETE FROM meeting WHERE id = ?1", [id])?;
+        if affected > 0 {
+            // Rewrite the full-text index so the deleted transcript leaves its structures now.
+            self.conn
+                .execute_batch("INSERT INTO segment_fts (segment_fts) VALUES ('optimize');")?;
+        }
         Ok(affected > 0)
     }
 

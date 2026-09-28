@@ -61,6 +61,7 @@ mod assist;
 mod dictation;
 mod intel;
 mod permissions;
+mod retention;
 
 use assist::{normalize_assist, AssistParams};
 
@@ -145,6 +146,10 @@ struct AppState {
     /// Committed finals from the current/most-recent live session (both mic and system streams),
     /// retained so the meeting can be exported after it ends. Cleared when a new session starts.
     live_segments: Mutex<Vec<TranscriptSegment>>,
+    /// App-owned copies of imported files; retention only ever deletes files inside it.
+    managed_dir: PathBuf,
+    /// Where the retention policy persists.
+    retention_path: PathBuf,
     /// The on-disk meeting knowledge base (SQLite). Finished meetings are saved, listed, and searched
     /// here; a single connection behind a mutex (a personal library has no concurrency needs).
     library: Mutex<Library>,
@@ -4275,6 +4280,9 @@ pub fn run() {
             let managed_dir = data_dir.join("managed-sources");
             let _ = fs::create_dir_all(&managed_dir);
             restrict_to_owner(&managed_dir, 0o700);
+            // The user's policy applies before the first prune, however long the app was closed.
+            let retention_path = data_dir.join("retention.json");
+            library.set_retention(retention::load_policy(&retention_path));
             prune_library(&mut library, &managed_dir);
 
             // Notes semantic search: restore the chosen embedding model (loaded in the background so
@@ -4326,6 +4334,8 @@ pub fn run() {
                 file_cancel: Arc::new(AtomicBool::new(false)),
                 file_busy: Arc::new(AtomicBool::new(false)),
                 live_segments: Mutex::new(Vec::new()),
+                managed_dir: managed_dir.clone(),
+                retention_path,
                 library: Mutex::new(library),
                 embed_model: Mutex::new(embed_model),
                 embed_model_path,
@@ -4427,6 +4437,11 @@ pub fn run() {
             intel::delete_project_memory,
             intel::intel_learning_propose,
             intel::intel_learning_save,
+            retention::get_retention,
+            retention::preview_retention,
+            retention::set_retention,
+            retention::prune_now,
+            retention::delete_project_completely,
             assist::realtime::stop_assist_realtime,
             assist::realtime::assist_hint_now,
             transcribe_file,

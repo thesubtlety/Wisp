@@ -334,6 +334,25 @@ export const en = {
     storage: "Storage",
     storageIntro:
       "Where Wisp keeps your models, notes library, and app data on this device. Click Open to reveal a location in your file manager.",
+    retention: "Retention",
+    retentionIntro: "How long raw material is kept. Summaries, meeting state and accepted project knowledge are kept. Changes apply to existing data too.",
+    retentionTranscripts: "Transcripts",
+    retentionSources: "Imported copies & pasted text",
+    retentionKept: "Summaries & project knowledge",
+    days: (n: number): string => `${n} days`,
+    keep: "Keep",
+    retentionConfirm: (t: number, s: number): string =>
+      `This deletes ${t} transcript${t === 1 ? "" : "s"} and ${s} imported item${s === 1 ? "" : "s"} now. It can't be undone.`,
+    applyAndDelete: "Apply and delete",
+    cancel: "Cancel",
+    pruneNowLabel: "Delete what has expired",
+    pruneNow: "Prune now",
+    pruned: (r: { transcripts: number; sources: number; meetings: number; files: number }): string =>
+      `Deleted ${r.transcripts} transcript${r.transcripts === 1 ? "" : "s"}, ${r.sources} source${r.sources === 1 ? "" : "s"}, ${r.meetings} meeting${r.meetings === 1 ? "" : "s"} and ${r.files} file${r.files === 1 ? "" : "s"}.`,
+    projects: "Projects",
+    deleteCompletely: "Delete completely",
+    deleteProjectConfirm: "Its meetings, documents, imported copies and knowledge go too.",
+    delete: "Delete",
     autoSaveNotes: "Auto-save notes to library",
     meetingIntel: "Meeting intelligence",
     meetingIntelNote:
