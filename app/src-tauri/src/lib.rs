@@ -59,6 +59,7 @@ use wisp_screencapture::ScreenCaptureSource;
 
 mod assist;
 mod dictation;
+mod intel;
 mod permissions;
 
 use assist::{normalize_assist, AssistParams};
@@ -130,6 +131,9 @@ struct AppState {
     /// The realtime AI assist's live resources — its audio taps and mix, its worker, and the
     /// finals channel the live sink feeds. Empty between live sessions.
     assist: assist::AssistState,
+    /// Live meeting intelligence: the runtime fed by the live sink, and the last meeting's state
+    /// waiting for `save_note`. Idle unless a session starts with intelligence on.
+    intel: intel::IntelState,
     /// Segments from the most recent file transcription, kept for export.
     file_segments: Mutex<Vec<TranscriptSegment>>,
     /// Set by `cancel_file_transcription` to stop the running file transcription at the next window
@@ -856,6 +860,7 @@ fn build_live_sink(
                 if matches!(segment.status, SegmentStatus::Final) {
                     assist::route_assist_final(&emitter, &segment);
                     retain_live_segment(&emitter, &segment);
+                    intel::route_final(&emitter, &segment);
                 }
             }
         }
@@ -2786,6 +2791,10 @@ struct LiveOptions {
     /// (no extra tee pump threads): the live audio path is then byte-for-byte the original.
     #[serde(default)]
     assist: bool,
+    /// Whether to run live meeting intelligence (observer passes through the user's Codex or Claude
+    /// CLI). Off unless the user turned it on.
+    #[serde(default)]
+    intel: bool,
 }
 
 /// Resolves the engine a live session will run from `options` + app state: an on-device model, or a
@@ -2902,6 +2911,14 @@ fn start_session_blocking(app: AppHandle, options: LiveOptions) -> Result<Option
     if let Ok(mut retained) = state.live_segments.lock() {
         retained.clear();
     }
+    // Intelligence starts before capture so it sees every final the transcript retains, from the
+    // first; that keeps its line numbers aligned with the saved transcript.
+    intel::reset(&state);
+    if options.intel {
+        intel::start(&app);
+    }
+    // A start that fails from here on drops the runtime it just made.
+    let mut intel_guard = intel::StartGuard::new(&state);
     // Every stream starts unmuted; the Live bar's You/Them chips flip these mid-session.
     state.mic_muted.store(false, Ordering::Relaxed);
     state.system_muted.store(false, Ordering::Relaxed);
@@ -3118,6 +3135,7 @@ fn start_session_blocking(app: AppHandle, options: LiveOptions) -> Result<Option
     // backs up transcription; the mix is built lazily here and consumed by `start_assist_realtime`.
     assist::store_assist_mix(&state.assist, assist_taps)?;
 
+    intel_guard.disarm();
     Ok(degraded_notice)
 }
 
@@ -3153,7 +3171,7 @@ fn stop_session_blocking(app: AppHandle) -> Result<(), String> {
     // Join the capture/assist threads off the command, bounded. If a native teardown wedges, detach
     // it (it self-cleans when the OS resource unblocks) rather than hang Stop — state is already
     // clear, so the app stays fully usable and a new Start works immediately.
-    match run_within(STOP_TEARDOWN_TIMEOUT, move || teardown_session(teardown)) {
+    let result = match run_within(STOP_TEARDOWN_TIMEOUT, move || teardown_session(teardown)) {
         Some(result) => result,
         None => {
             eprintln!(
@@ -3161,7 +3179,10 @@ fn stop_session_blocking(app: AppHandle) -> Result<(), String> {
             );
             Ok(())
         }
-    }
+    };
+    // After capture, so the runtime has had every final; cancels a pass in flight.
+    intel::stop(&state);
+    result
 }
 
 /// Lifts the running session's resources out of [`AppState`], leaving it empty — fast and
@@ -3722,14 +3743,18 @@ fn save_note(
     started_at_ms: i64,
     source: Option<String>,
 ) -> Result<(), String> {
-    let buffer = match source.as_deref() {
-        Some("file") => &state.file_segments,
-        _ => &state.live_segments,
+    let live = !matches!(source.as_deref(), Some("file"));
+    let buffer = if live {
+        &state.live_segments
+    } else {
+        &state.file_segments
     };
-    let mut segments = buffer
+    // Arrival order, which the intelligence log's line numbers follow.
+    let retained = buffer
         .lock()
         .map_err(|_| "state lock poisoned".to_owned())?
         .clone();
+    let mut segments = retained.clone();
     segments.sort_by_key(|s| s.start);
 
     let mut library = state
@@ -3738,7 +3763,14 @@ fn save_note(
         .map_err(|_| "library lock poisoned".to_owned())?;
     library
         .save_note(&id, &meta.into(), started_at_ms, &segments)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    if live {
+        // The meeting itself is saved; a failure here only loses the derived state.
+        if let Err(e) = intel::persist(&state, &mut library, &id, &retained) {
+            eprintln!("wisp: saving meeting intelligence failed: {e}");
+        }
+    }
+    Ok(())
 }
 
 /// Every stored meeting, newest first, for the Library list.
@@ -4278,6 +4310,7 @@ pub fn run() {
                 live_accurate: Mutex::new(false),
                 tee: Mutex::new(None),
                 assist: assist::AssistState::default(),
+                intel: intel::IntelState::default(),
                 file_segments: Mutex::new(Vec::new()),
                 file_cancel: Arc::new(AtomicBool::new(false)),
                 file_busy: Arc::new(AtomicBool::new(false)),
@@ -4366,6 +4399,8 @@ pub fn run() {
             start_session,
             stop_session,
             assist::realtime::start_assist_realtime,
+            intel::intel_analyze_now,
+            intel::intel_saved_items,
             assist::realtime::stop_assist_realtime,
             assist::realtime::assist_hint_now,
             transcribe_file,

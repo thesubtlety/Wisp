@@ -763,6 +763,12 @@
   $effect(() => {
     localStorage.setItem("wisp.autoSaveMeetings", String(autoSave));
   });
+  // Live meeting intelligence runs observer passes through the user's own Codex or Claude CLI, so
+  // it stays off until they turn it on. Applies from the next session.
+  let intelEnabled = $state(localStorage.getItem("wisp.intel") === "true");
+  $effect(() => {
+    localStorage.setItem("wisp.intel", String(intelEnabled));
+  });
   let meetingId = $state("");
   let meetingStartedAt = $state(0);
 
@@ -807,6 +813,7 @@
           // is never drained unless the assist runs, so the realtime assist can be started at any point
           // during a live session — no need to have "armed" it before Start.
           assist: true,
+          intel: intelEnabled,
         },
       });
       liveNotice = notice ?? "";
@@ -1571,7 +1578,7 @@
     </button>
   </nav>
 
-  <Settings bind:open={cloudState.endpointsOpen} bind:autoSave />
+  <Settings bind:open={cloudState.endpointsOpen} bind:autoSave bind:intel={intelEnabled} />
 
   <div class="workspace" class:is-hidden={mode === "library"}>
 

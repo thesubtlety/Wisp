@@ -64,7 +64,7 @@ impl ClaudeCodeBackend {
 
     pub fn command(&self, ws: &Workspace, req: &ReasoningRequest) -> CommandSpec {
         let c = &self.config;
-        let mut spec = CommandSpec::new(&c.program)
+        let mut spec = crate::locate::cli_spec(&c.program)
             .args(["-p", "--output-format", "json"])
             .arg("--max-turns")
             .arg(c.max_turns.to_string())

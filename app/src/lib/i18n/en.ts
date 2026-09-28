@@ -335,6 +335,9 @@ export const en = {
     storageIntro:
       "Where Wisp keeps your models, notes library, and app data on this device. Click Open to reveal a location in your file manager.",
     autoSaveNotes: "Auto-save notes to library",
+    meetingIntel: "Meeting intelligence",
+    meetingIntelNote:
+      "During a live meeting, sends final transcript lines to your own Codex or Claude CLI (your subscription) and keeps a structured list of requirements, decisions and commitments. Saved with the note. Starts with the next session.",
     storageModels: "Models",
     storageNotes: "Notes",
     storageData: "App data",

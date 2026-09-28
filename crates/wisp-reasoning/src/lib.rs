@@ -9,13 +9,15 @@
 //! environment variables so a stray key can't move the run onto API billing.
 //! [`ClaudeCodeBackend`] does the same with `claude -p`: no tools, bounded turns, user settings
 //! ignored. [`FallbackBackend`] tries backends in order (Codex first, then Claude, say).
-//! [`ScriptedBackend`] is a deterministic stand-in for tests.
+//! [`ScriptedBackend`] is a deterministic stand-in for tests. The CLIs are found on PATH widened to
+//! the usual install locations, since a Finder-launched app inherits almost none.
 
 mod backend;
 mod claude;
 mod codex;
 mod fallback;
 mod json;
+mod locate;
 mod runner;
 mod schema;
 mod scripted;
@@ -29,6 +31,7 @@ pub use claude::{ClaudeCodeBackend, ClaudeConfig};
 pub use codex::{CodexCliBackend, CodexConfig};
 pub use fallback::FallbackBackend;
 pub use json::extract_json_object;
+pub use locate::{find_program, search_dirs};
 pub use runner::{run_command, CommandSpec, RunOutput, SUBSCRIPTION_STRIPPED_ENV};
 pub use schema::validate;
 pub use scripted::ScriptedBackend;

@@ -112,10 +112,12 @@ dependencies = [
  "wisp-engine-cloud",
  "wisp-engine-sherpa",
  "wisp-engine-whisper-cpp",
+ "wisp-intel",
  "wisp-library",
  "wisp-loopback",
  "wisp-models",
  "wisp-pipeline",
+ "wisp-reasoning",
  "wisp-screencapture",
  "wisp-secrets",
  "wisp-textinject",
@@ -6812,6 +6814,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "wisp-intel"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "wisp-library",
+ "wisp-reasoning",
+]
+
+[[package]]
 name = "wisp-library"
 version = "0.0.0"
 dependencies = [
@@ -6846,6 +6859,17 @@ version = "0.0.0"
 dependencies = [
  "wisp-audio",
  "wisp-core",
+]
+
+[[package]]
+name = "wisp-reasoning"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

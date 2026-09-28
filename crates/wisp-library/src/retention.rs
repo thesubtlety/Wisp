@@ -314,6 +314,10 @@ impl Library {
             [project_id],
             |r| r.get::<_, i64>(0),
         )?;
+        tx.execute(
+            "DELETE FROM state_op WHERE meeting_id IN (SELECT id FROM meeting WHERE project_id = ?1)",
+            [project_id],
+        )?;
         let meetings = tx.execute("DELETE FROM meeting WHERE project_id = ?1", [project_id])?;
         tx.execute("DELETE FROM project WHERE id = ?1", [project_id])?;
         tx.commit()?;
