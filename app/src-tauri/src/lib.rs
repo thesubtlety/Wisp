@@ -62,6 +62,7 @@ mod context;
 mod dictation;
 mod intel;
 mod permissions;
+mod reasoning;
 mod retention;
 
 use assist::{normalize_assist, AssistParams};
@@ -151,6 +152,8 @@ struct AppState {
     managed_dir: PathBuf,
     /// Where the retention policy persists.
     retention_path: PathBuf,
+    /// Which reasoning backend meeting intelligence uses.
+    reasoning: reasoning::ReasoningState,
     /// The on-disk meeting knowledge base (SQLite). Finished meetings are saved, listed, and searched
     /// here; a single connection behind a mutex (a personal library has no concurrency needs).
     library: Mutex<Library>,
@@ -1511,6 +1514,20 @@ struct CustomCloudEndpoint {
     /// AI notes/assist tuning (defaults when absent, so older saved files load unchanged).
     #[serde(default)]
     assist: AssistParams,
+}
+
+/// Every custom endpoint.
+fn custom_endpoints(state: &AppState) -> Vec<CustomCloudEndpoint> {
+    state
+        .cloud_custom_endpoints
+        .lock()
+        .map(|e| e.clone())
+        .unwrap_or_default()
+}
+
+/// One custom endpoint by id.
+fn custom_endpoint(state: &AppState, id: &str) -> Option<CustomCloudEndpoint> {
+    custom_endpoints(state).into_iter().find(|e| e.id == id)
 }
 
 /// The payload the add/update endpoint commands accept — the editable fields of a custom endpoint,
@@ -4345,6 +4362,7 @@ pub fn run() {
                 live_segments: Mutex::new(Vec::new()),
                 managed_dir: managed_dir.clone(),
                 retention_path,
+                reasoning: reasoning::ReasoningState::load(data_dir.join("reasoning.json")),
                 library: Mutex::new(library),
                 embed_model: Mutex::new(embed_model),
                 embed_model_path,
@@ -4438,6 +4456,9 @@ pub fn run() {
             context::list_context,
             context::describe_context,
             context::remove_context,
+            reasoning::get_reasoning_settings,
+            reasoning::set_reasoning_settings,
+            reasoning::check_reasoning,
             intel::intel_export_save,
             intel::intel_ask,
             intel::intel_ask_cancel,

@@ -155,6 +155,60 @@
   let projects = $state<{ id: string; name: string }[]>([]);
   let confirmProject = $state("");
 
+  // Which reasoning backend meeting intelligence uses; the local model is a custom endpoint.
+  type ReasoningMode = "auto" | "codex" | "claude" | "local";
+  type ReasoningSettings = {
+    mode: ReasoningMode;
+    localEndpoint: string | null;
+    localModel: string | null;
+    localForLive: boolean;
+  };
+  type EndpointChoice = { id: string; name: string; model: string; local: boolean };
+  const REASONING_MODES: ReasoningMode[] = ["auto", "codex", "claude", "local"];
+  let reasoning = $state<ReasoningSettings>({ mode: "auto", localEndpoint: null, localModel: null, localForLive: true });
+  let reasoningEndpoints = $state<EndpointChoice[]>([]);
+  let reasoningError = $state("");
+  let reasoningHealth = $state<{ which: string; ready: boolean; detail: string }[]>([]);
+  const localEndpoint = $derived(reasoningEndpoints.find((e) => e.id === reasoning.localEndpoint));
+
+  async function loadReasoning() {
+    try {
+      const dto = await invoke<{ settings: ReasoningSettings; endpoints: EndpointChoice[] }>("get_reasoning_settings");
+      reasoning = dto.settings;
+      reasoningEndpoints = dto.endpoints;
+    } catch (e) {
+      reasoningError = String(e);
+    }
+  }
+
+  async function saveReasoning(next: ReasoningSettings) {
+    reasoningError = "";
+    reasoningHealth = [];
+    try {
+      await invoke("set_reasoning_settings", { settings: next });
+      reasoning = next;
+    } catch (e) {
+      reasoningError = String(e);
+    }
+  }
+
+  /** Checks the backends the current choice can use, without a model call. */
+  async function checkReasoning() {
+    const which =
+      reasoning.mode === "auto"
+        ? ["codex", "claude", ...(reasoning.localEndpoint ? ["local"] : [])]
+        : [reasoning.mode];
+    reasoningHealth = [];
+    for (const w of which) {
+      try {
+        const h = await invoke<{ ready: boolean; detail: string }>("check_reasoning", { which: w });
+        reasoningHealth = [...reasoningHealth, { which: w, ...h }];
+      } catch (e) {
+        reasoningHealth = [...reasoningHealth, { which: w, ready: false, detail: String(e) }];
+      }
+    }
+  }
+
   async function loadRetention() {
     try {
       retention = await invoke<Retention>("get_retention");
@@ -222,6 +276,7 @@
       loadDownloadSettings();
       loadPaths();
       loadRetention();
+      loadReasoning();
     }
   });
 </script>
@@ -406,6 +461,72 @@
               </button>
             </div>
             <p class="set-intro">{i18n.t.settings.meetingIntelNote}</p>
+
+            <label class="set-row">
+              <span class="set-label">{i18n.t.settings.reasoning}</span>
+              <select
+                class="set-input set-select reasoning-mode"
+                value={reasoning.mode}
+                onchange={(e) => saveReasoning({ ...reasoning, mode: e.currentTarget.value as ReasoningMode })}
+              >
+                {#each REASONING_MODES as m (m)}<option value={m}>{i18n.t.settings.reasoningModes[m]}</option>{/each}
+              </select>
+            </label>
+            <label class="set-row">
+              <span class="set-label">{i18n.t.settings.localModel}</span>
+              <select
+                class="set-input set-select local-endpoint"
+                value={reasoning.localEndpoint ?? ""}
+                onchange={(e) =>
+                  saveReasoning({ ...reasoning, localEndpoint: e.currentTarget.value || null, localModel: null })}
+              >
+                <option value="">{i18n.t.settings.localNone}</option>
+                {#each reasoningEndpoints as ep (ep.id)}
+                  <option value={ep.id}>{ep.name}{ep.local ? "" : ` (${i18n.t.settings.notOnThisMachine})`}</option>
+                {/each}
+              </select>
+            </label>
+            {#if localEndpoint}
+              <label class="set-row">
+                <span class="set-label">{i18n.t.settings.localModelName}</span>
+                <input
+                  class="set-input local-model"
+                  placeholder={localEndpoint.model}
+                  value={reasoning.localModel ?? ""}
+                  onchange={(e) => saveReasoning({ ...reasoning, localModel: e.currentTarget.value.trim() || null })}
+                />
+              </label>
+              {#if reasoning.mode === "auto"}
+                <div class="set-row">
+                  <span class="set-label">{i18n.t.settings.localForLive}</span>
+                  <button
+                    class="set-btn local-for-live"
+                    class:on={reasoning.localForLive}
+                    onclick={() => saveReasoning({ ...reasoning, localForLive: !reasoning.localForLive })}
+                  >
+                    {reasoning.localForLive ? i18n.t.settings.on : i18n.t.settings.off}
+                  </button>
+                </div>
+              {/if}
+              {#if !localEndpoint.local}
+                <p class="set-intro remote-warning">{i18n.t.settings.remoteEndpointWarning}</p>
+              {/if}
+            {:else if !reasoningEndpoints.length}
+              <p class="set-intro">{i18n.t.settings.localHint}</p>
+            {/if}
+            <p class="set-intro">{i18n.t.settings.reasoningNote}</p>
+            <div class="set-row">
+              <span class="set-label">{i18n.t.settings.checkReasoningLabel}</span>
+              <button class="set-btn check-reasoning" onclick={checkReasoning}>{i18n.t.settings.checkReasoning}</button>
+            </div>
+            {#each reasoningHealth as h (h.which)}
+              <p class="set-intro health" class:set-error={!h.ready}>
+                {h.which === "local" ? i18n.t.settings.localModel : i18n.t.settings.reasoningModes[h.which as ReasoningMode]}:
+                {h.ready ? "✓" : "✗"}
+                {h.detail}
+              </p>
+            {/each}
+            {#if reasoningError}<p class="set-intro set-error">{reasoningError}</p>{/if}
 
             <h4 class="set-sub">{i18n.t.settings.retention}</h4>
             <p class="set-intro">{i18n.t.settings.retentionIntro}</p>

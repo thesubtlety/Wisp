@@ -15,7 +15,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use wisp_intel::screenshot::PLACEHOLDER;
 use wisp_intel::{describe_screenshot, ScreenshotInput};
 use wisp_library::{source_ref, Snippet, SnippetOrigin, SourceInput, SourceKind};
-use wisp_reasoning::{CancelToken, FallbackBackend, ReasoningBackend, MAX_IMAGE_BYTES};
+use wisp_reasoning::{CancelToken, MAX_IMAGE_BYTES};
 
 use crate::AppState;
 
@@ -308,10 +308,10 @@ fn describe(app: &AppHandle, source_id: i64) {
         return;
     };
     let recent = crate::intel::recent_lines(&state);
-    let backend = FallbackBackend::codex_then_claude();
+    let backend = crate::reasoning::backend(&state);
     let result = if backend.capabilities().vision {
         describe_screenshot(
-            &backend,
+            backend.as_ref(),
             &CancelToken::new(),
             &ScreenshotInput {
                 image: &shot.path,

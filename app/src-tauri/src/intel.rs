@@ -7,7 +7,7 @@
 //! `save_note` stores them with [`persist`], remapped to the saved transcript's segment ids. With
 //! auto-save off nothing is stored, the same as the transcript.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
@@ -23,7 +23,7 @@ use wisp_intel::{context_packet, meeting_record, memory_ref, state_json, ExportM
 use wisp_intel::{propose_learning, LearningInput, Proposal};
 use wisp_library::{meeting_ref, Library, RetrievalQuery, Snippet, StoredLogEntry, StoredOp};
 use wisp_library::{MemoryEntry, Project};
-use wisp_reasoning::{CancelToken, FallbackBackend, ReasoningBackend};
+use wisp_reasoning::CancelToken;
 
 use crate::AppState;
 
@@ -196,7 +196,7 @@ pub(crate) fn start(app: &AppHandle, project_id: Option<String>, meeting_label: 
         slot.clone_from(&project_id);
     }
     let runtime = IntelRuntime::spawn(
-        Arc::new(FallbackBackend::codex_then_claude()),
+        crate::reasoning::backend(&state),
         Box::new(LibraryRetriever {
             app: app.clone(),
             project_id,
@@ -511,7 +511,7 @@ pub(crate) async fn intel_ask(
             project_id,
         }
         .retrieve(&question);
-        let backend = FallbackBackend::codex_then_claude();
+        let backend = crate::reasoning::backend(&state);
         // Screenshots are shown only when retrieval picked them for this question.
         let images = if backend.capabilities().vision {
             state.intel.context.images()
@@ -519,7 +519,7 @@ pub(crate) async fn intel_ask(
             Vec::new()
         };
         let result = ask(
-            &backend,
+            backend.as_ref(),
             &cancel,
             &AskInput {
                 question: &question,
@@ -624,9 +624,9 @@ pub(crate) async fn intel_review_start(app: AppHandle, id: String) -> Result<Rev
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let (meeting, lines) = saved_meeting(&state, &id)?;
-        let backend = FallbackBackend::codex_then_claude();
+        let backend = crate::reasoning::backend(&state);
         let (followups, source, note) = match generate_followups(
-            &backend,
+            backend.as_ref(),
             &CancelToken::new(),
             &meeting,
             &lines,
@@ -674,7 +674,7 @@ pub(crate) async fn intel_review_reply(app: AppHandle, reply: String) -> Result<
             Some(edits) => (edits, "local"),
             None => (
                 interpret_reply(
-                    &FallbackBackend::codex_then_claude(),
+                    crate::reasoning::backend(&state).as_ref(),
                     &CancelToken::new(),
                     &followups,
                     &reply,
@@ -909,7 +909,7 @@ pub(crate) async fn intel_learning_propose(
             .map(|f| f.clone())
             .unwrap_or_default();
         propose_learning(
-            &FallbackBackend::codex_then_claude(),
+            crate::reasoning::backend(&state).as_ref(),
             &CancelToken::new(),
             &LearningInput {
                 state: &meeting,
