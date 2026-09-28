@@ -4422,6 +4422,8 @@ pub fn run() {
             assist::realtime::start_assist_realtime,
             intel::intel_analyze_now,
             intel::intel_saved_items,
+            intel::intel_export,
+            intel::intel_export_save,
             intel::intel_ask,
             intel::intel_ask_cancel,
             intel::intel_dismiss_card,

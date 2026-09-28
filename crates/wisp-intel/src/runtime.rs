@@ -179,8 +179,23 @@ enum Msg {
 pub struct IntelRuntime {
     tx: Sender<Msg>,
     cancel: CancelToken,
-    snapshot: Arc<Mutex<MeetingState>>,
+    snapshot: Arc<Mutex<Snapshot>>,
     worker: Option<JoinHandle<Finished>>,
+}
+
+/// What readers outside the worker see: the state and its log after the last completed pass.
+struct Snapshot {
+    state: MeetingState,
+    log: Vec<AppliedOp>,
+}
+
+impl Default for Snapshot {
+    fn default() -> Self {
+        Self {
+            state: MeetingState::new(LIVE_MEETING_ID),
+            log: Vec::new(),
+        }
+    }
 }
 
 type OnUpdate = Box<dyn Fn(IntelUpdate) + Send>;
@@ -199,7 +214,7 @@ impl IntelRuntime {
         let (tx, rx) = mpsc::channel();
         let cancel = CancelToken::new();
         let worker_cancel = cancel.clone();
-        let snapshot = Arc::new(Mutex::new(MeetingState::new(LIVE_MEETING_ID)));
+        let snapshot = Arc::new(Mutex::new(Snapshot::default()));
         let worker_snapshot = snapshot.clone();
         let config_interventions = config.interventions.clone();
         let worker = std::thread::Builder::new()
@@ -273,8 +288,16 @@ impl IntelRuntime {
     pub fn snapshot(&self) -> MeetingState {
         self.snapshot
             .lock()
-            .map(|s| s.clone())
+            .map(|s| s.state.clone())
             .unwrap_or_else(|_| MeetingState::new(LIVE_MEETING_ID))
+    }
+
+    /// The state and the log that rebuilds it, as of the last completed pass.
+    pub fn snapshot_with_log(&self) -> (MeetingState, Vec<AppliedOp>) {
+        self.snapshot
+            .lock()
+            .map(|s| (s.state.clone(), s.log.clone()))
+            .unwrap_or_else(|_| (MeetingState::new(LIVE_MEETING_ID), Vec::new()))
     }
 
     /// Cancels any pass in flight, stops the worker, and returns the state and its log.
@@ -316,7 +339,7 @@ struct Worker {
     /// Failed passes in a row.
     failures: u32,
     /// Shared copy of `state`, refreshed after each pass.
-    snapshot: Arc<Mutex<MeetingState>>,
+    snapshot: Arc<Mutex<Snapshot>>,
     filter: InterventionFilter,
     /// Set once the user presses Wrapping Up.
     endgame: Option<EndgameTrigger>,
@@ -504,7 +527,8 @@ impl Worker {
                 self.failures = 0;
                 self.log.extend(out.report.applied.iter().cloned());
                 if let Ok(mut shared) = self.snapshot.lock() {
-                    *shared = self.state.clone();
+                    shared.state = self.state.clone();
+                    shared.log = self.log.clone();
                 }
                 let mut cards = Vec::new();
                 for candidate in out.candidates {
@@ -702,7 +726,7 @@ mod tests {
             last_pass: None,
             pending_since: None,
             failures: 0,
-            snapshot: Arc::new(Mutex::new(MeetingState::new(LIVE_MEETING_ID))),
+            snapshot: Arc::new(Mutex::new(Snapshot::default())),
             filter: InterventionFilter::default(),
             endgame: None,
             wrap_suggested: false,
@@ -735,6 +759,12 @@ mod tests {
         rt.push_final("Them", 1000, "   ");
         rt.push_final("You", 2000, "And what about single sign-on?");
         wait_for(&seen, 2);
+        let (snap, log) = rt.snapshot_with_log();
+        assert_eq!(
+            MeetingState::replay(LIVE_MEETING_ID, &log).unwrap().items,
+            snap.items,
+            "the snapshot's log rebuilds its state"
+        );
         assert_eq!(
             rt.snapshot().items.len(),
             2,

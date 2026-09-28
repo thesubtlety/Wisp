@@ -11,6 +11,7 @@
 //! - [`analyze`] — "Analyze Now": one observer pass through a
 //!   [`wisp_reasoning::ReasoningBackend`].
 //! - [`ask`] — questions about the meeting, answered with checked citations.
+//! - [`export`] — the meeting record, the AI context packet and the state as JSON.
 //! - [`endgame`] — wrap-up signals and the gap audit run when the meeting is closing.
 //! - [`intervene`] — proposed interventions and the conservative local filter that decides
 //!   which reach the user, with a log for tuning.
@@ -25,6 +26,7 @@ pub mod analyze;
 pub mod ask;
 pub mod endgame;
 pub mod evidence;
+pub mod export;
 pub mod intervene;
 pub mod learning;
 pub mod model;
@@ -43,6 +45,7 @@ pub use endgame::{
     GapCategory,
 };
 pub use evidence::{memory_ref, EvidenceDetail, EvidencePacket, TranscriptLine};
+pub use export::{context_packet, meeting_record, state_json, ExportMeta};
 pub use intervene::{
     validate_candidate, Candidate, CandidateKind, Card, Decision, InterventionFilter,
     InterventionPolicy, LogEntry, RawCandidate, Suppressed,

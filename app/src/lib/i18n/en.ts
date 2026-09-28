@@ -520,6 +520,12 @@ export const en = {
     analyzeNow: "Analyze now",
     analyzing: "Analyzing…",
     stateEmpty: "Nothing yet. Items appear here as the meeting is analyzed.",
+    copyPacket: "Copy AI context packet",
+    exportRecord: "Export record",
+    exportJson: "Export JSON",
+    packetCopied: "Copied. Paste it into any AI chat to continue.",
+    exportSaved: "Saved.",
+    exportFailed: (msg: string) => `Export failed: ${msg}`,
     notRunning: "Intelligence isn't running. Turn it on in Settings › Storage; it starts with the next session.",
     lastPass: (applied: number, rejected: number): string =>
       `Last pass: ${applied} change${applied === 1 ? "" : "s"}${rejected ? `, ${rejected} rejected` : ""}.`,

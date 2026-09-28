@@ -19,6 +19,7 @@ use wisp_intel::{
     EndgameTrigger, Finished, FollowUp, FollowUpClass, Gap, IntelRuntime, IntelUpdate, LogEntry,
     MeetingState, Retriever, ReviewEdit, RuntimeConfig, StateItem, TranscriptLine, LIVE_MEETING_ID,
 };
+use wisp_intel::{context_packet, meeting_record, memory_ref, state_json, ExportMeta};
 use wisp_intel::{propose_learning, LearningInput, Proposal};
 use wisp_library::{meeting_ref, Library, RetrievalQuery, Snippet, StoredLogEntry, StoredOp};
 use wisp_library::{MemoryEntry, Project};
@@ -942,6 +943,233 @@ fn save_learning(
     Ok(stored)
 }
 
+/// Everything an export is made from.
+struct ExportSource {
+    meeting_id: String,
+    meta: ExportMeta,
+    state: MeetingState,
+    log: Vec<AppliedOp>,
+    lines: Vec<TranscriptLine>,
+    memory: Vec<MemoryEntry>,
+}
+
+/// Longest evidence quote in an export, in characters.
+const QUOTE_CHARS: usize = 400;
+
+fn clip(text: &str) -> String {
+    let text = text.trim();
+    match text.char_indices().nth(QUOTE_CHARS) {
+        Some((cut, _)) => format!("{}…", &text[..cut]),
+        None => text.to_owned(),
+    }
+}
+
+impl ExportSource {
+    /// Quotes a canonical ref: this meeting's lines and project memory from what is loaded, other
+    /// refs through `lookup` (the library). `None` once the text is gone.
+    fn quote(&self, r: &str, lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
+        let own = format!("M{}:T", self.meeting_id);
+        if let Some(idx) = r.strip_prefix(&own).and_then(|n| n.parse::<i64>().ok()) {
+            return self.lines.iter().find(|l| l.idx == idx).map(|l| {
+                let s = l.start_ms.max(0) / 1000;
+                format!(
+                    "{:02}:{:02} {}: {}",
+                    s / 60,
+                    s % 60,
+                    l.speaker,
+                    clip(&l.text)
+                )
+            });
+        }
+        if let Some(entry) = self.memory.iter().find(|m| memory_ref(m.id) == r) {
+            return Some(format!("Project knowledge: {}", clip(&entry.text)));
+        }
+        lookup(r).map(|t| clip(&t))
+    }
+
+    /// `kind` is `record` (Markdown), `packet` (the AI context packet) or `json`.
+    fn render(
+        &self,
+        kind: &str,
+        lookup: impl Fn(&str) -> Option<String>,
+    ) -> Result<String, String> {
+        match kind {
+            "record" => Ok(meeting_record(&self.meta, &self.state)),
+            "packet" => Ok(context_packet(
+                &self.meta,
+                &self.state,
+                &self.memory,
+                &|r: &str| self.quote(r, &lookup),
+            )),
+            "json" => serde_json::to_string_pretty(&state_json(&self.meta, &self.state, &self.log))
+                .map_err(|e| e.to_string()),
+            other => Err(format!("unknown export kind: {other}")),
+        }
+    }
+}
+
+fn project_name(library: &Library, id: Option<&str>) -> Option<String> {
+    let id = id?;
+    let name = library
+        .list_projects()
+        .ok()?
+        .into_iter()
+        .find(|p| p.id == id)
+        .map(|p| p.name);
+    Some(name.unwrap_or_else(|| id.to_owned()))
+}
+
+/// The live (or just-stopped, not yet saved) meeting when `id` is `None`, else the saved meeting.
+fn export_source(
+    state: &AppState,
+    id: Option<&str>,
+    title: Option<String>,
+    when: Option<String>,
+) -> Result<ExportSource, String> {
+    let title = title.filter(|t| !t.trim().is_empty());
+    let when = when.unwrap_or_default();
+    let Some(id) = id else {
+        let running = state
+            .intel
+            .runtime
+            .lock()
+            .ok()
+            .and_then(|r| r.as_ref().map(|r| r.snapshot_with_log()));
+        let (meeting, log) = match running {
+            Some(pair) => pair,
+            None => state
+                .intel
+                .finished
+                .lock()
+                .ok()
+                .and_then(|f| f.as_ref().map(|f| (f.state.clone(), f.log.clone())))
+                .ok_or("no meeting intelligence to export")?,
+        };
+        let lines = live_lines(
+            &state
+                .live_segments
+                .lock()
+                .map_err(|_| "state lock poisoned".to_owned())?,
+        );
+        let project = state.intel.project.lock().ok().and_then(|p| p.clone());
+        let memory = project_memory(state, project.as_deref());
+        let project = state
+            .library
+            .lock()
+            .ok()
+            .and_then(|l| project_name(&l, project.as_deref()));
+        return Ok(ExportSource {
+            meeting_id: LIVE_MEETING_ID.to_owned(),
+            meta: ExportMeta {
+                title: title.unwrap_or_else(|| "Current meeting".to_owned()),
+                when,
+                project,
+                focus: None,
+                summary: None,
+            },
+            state: meeting,
+            log,
+            lines,
+            memory,
+        });
+    };
+    let (note, log, lines, project) = {
+        let library = state
+            .library
+            .lock()
+            .map_err(|_| "library lock poisoned".to_owned())?;
+        let (note, segments) = library
+            .get_note(id)
+            .map_err(|e| e.to_string())?
+            .ok_or("no such meeting")?;
+        let log = stored_log(&library, id)?;
+        let lines = segments.iter().map(TranscriptLine::from_segment).collect();
+        let project = project_name(&library, note.project_id.as_deref());
+        (note, log, lines, project)
+    };
+    let meeting = MeetingState::replay(id, &log).map_err(|e| e.to_string())?;
+    let memory = project_memory(state, note.project_id.as_deref());
+    Ok(ExportSource {
+        meeting_id: id.to_owned(),
+        meta: ExportMeta {
+            title: title.unwrap_or(note.title),
+            when,
+            project,
+            focus: None,
+            summary: note.summary,
+        },
+        state: meeting,
+        log,
+        lines,
+        memory,
+    })
+}
+
+fn render_export(
+    state: &AppState,
+    id: Option<&str>,
+    kind: &str,
+    title: Option<String>,
+    when: Option<String>,
+) -> Result<String, String> {
+    let source = export_source(state, id, title, when)?;
+    source.render(kind, |r| {
+        state
+            .library
+            .lock()
+            .ok()?
+            .snippet_for_ref(r)
+            .ok()
+            .flatten()
+            .map(|s| s.text)
+    })
+}
+
+/// A meeting's state as a document: `kind` is `record`, `packet` or `json`. `id` `None` means the
+/// live (or just-stopped) meeting. `when` is the display date, formatted by the webview.
+#[tauri::command]
+pub(crate) fn intel_export(
+    state: State<'_, AppState>,
+    id: Option<String>,
+    kind: String,
+    title: Option<String>,
+    when: Option<String>,
+) -> Result<String, String> {
+    render_export(&state, id.as_deref(), &kind, title, when)
+}
+
+/// Saves [`intel_export`]'s document to a file the user picks. The backend builds the content and
+/// shows the dialog, so the webview never names a destination. Returns `false` on cancel.
+#[tauri::command]
+pub(crate) async fn intel_export_save(
+    app: AppHandle,
+    id: Option<String>,
+    kind: String,
+    title: Option<String>,
+    when: Option<String>,
+    default_name: String,
+) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use tauri_plugin_dialog::DialogExt;
+        let content = render_export(&app.state::<AppState>(), id.as_deref(), &kind, title, when)?;
+        let ext = if kind == "json" { "json" } else { "md" };
+        let Some(picked) = app
+            .dialog()
+            .file()
+            .set_file_name(format!("{default_name}.{ext}"))
+            .add_filter(ext.to_uppercase(), &[ext])
+            .blocking_save_file()
+        else {
+            return Ok(false);
+        };
+        let dest = picked.into_path().map_err(|e| e.to_string())?;
+        std::fs::write(&dest, content).map_err(|e| format!("write {}: {e}", dest.display()))?;
+        Ok(true)
+    })
+    .await
+    .map_err(|e| format!("export task failed: {e}"))?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1076,6 +1304,77 @@ mod tests {
         assert_eq!(speaker_label(&s), "Them");
         s.speaker = Some(SpeakerId(1));
         assert_eq!(speaker_label(&s), "Speaker 2");
+    }
+
+    #[test]
+    fn exports_quote_own_lines_and_memory_and_ask_the_library_for_the_rest() {
+        let log = vec![AppliedOp {
+            seq: 0,
+            at_ms: 0,
+            op: ResolvedOp::Add {
+                id: "R1".into(),
+                kind: ItemKind::Requirement,
+                text: "Must run in Azure".into(),
+                status: EpistemicStatus::Stated,
+                confidence: 0.9,
+                source_refs: vec![
+                    "Mlive:T0".into(),
+                    "P7".into(),
+                    "S3:C1".into(),
+                    "S9:C9".into(),
+                ],
+                related_items: vec![],
+                owner: None,
+                due: None,
+            },
+        }];
+        let source = ExportSource {
+            meeting_id: LIVE_MEETING_ID.to_owned(),
+            meta: ExportMeta {
+                title: "Kickoff".into(),
+                ..ExportMeta::default()
+            },
+            state: MeetingState::replay(LIVE_MEETING_ID, &log).unwrap(),
+            log,
+            lines: live_lines(&[seg(AudioSourceKind::System, 65_000, "It has to be Azure.")]),
+            memory: vec![MemoryEntry {
+                id: 7,
+                project_id: "p".into(),
+                kind: "constraint".into(),
+                text: "Customer is on Azure".into(),
+                status: "stated".into(),
+                confidence: 1.0,
+                provenance: vec![],
+                meeting_id: None,
+                created_at_ms: 0,
+                updated_at_ms: 0,
+            }],
+        };
+        let lookup = |r: &str| (r == "S3:C1").then(|| "Tenant: contoso".to_owned());
+        let packet = source.render("packet", lookup).unwrap();
+        assert!(
+            packet.contains("01:05 Them: It has to be Azure."),
+            "{packet}"
+        );
+        assert!(packet.contains("Project knowledge: Customer is on Azure"));
+        assert!(packet.contains("Tenant: contoso"));
+        assert!(
+            packet.contains("1 source(s) no longer available"),
+            "S9:C9 is gone"
+        );
+
+        assert!(source
+            .render("record", lookup)
+            .unwrap()
+            .contains("Must run in Azure"));
+        let json: serde_json::Value =
+            serde_json::from_str(&source.render("json", lookup).unwrap()).unwrap();
+        assert_eq!(json["log"].as_array().unwrap().len(), 1);
+        assert!(source.render("pdf", lookup).is_err());
+        assert_eq!(
+            clip(&"x".repeat(QUOTE_CHARS + 5)).chars().count(),
+            QUOTE_CHARS + 1
+        );
     }
 
     #[test]

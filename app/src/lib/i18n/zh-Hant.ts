@@ -472,6 +472,12 @@ export const zhHant: Messages = {
     analyzeNow: "立即分析",
     analyzing: "分析中…",
     stateEmpty: "尚無內容。會議被分析後，條目會出現在這裡。",
+    copyPacket: "複製 AI 脈絡包",
+    exportRecord: "匯出會議記錄",
+    exportJson: "匯出 JSON",
+    packetCopied: "已複製。貼到任何 AI 對話中即可繼續。",
+    exportSaved: "已儲存。",
+    exportFailed: (msg: string) => `匯出失敗：${msg}`,
     notRunning: "會議智慧未執行。請在 設定 › 儲存空間 中開啟，下次工作階段開始生效。",
     lastPass: (applied: number, rejected: number): string =>
       `上次分析：${applied} 項變更${rejected ? `，${rejected} 項被拒絕` : ""}。`,

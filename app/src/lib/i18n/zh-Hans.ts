@@ -472,6 +472,12 @@ export const zhHans: Messages = {
     analyzeNow: "立即分析",
     analyzing: "分析中…",
     stateEmpty: "暂无内容。会议被分析后，条目会出现在这里。",
+    copyPacket: "复制 AI 上下文包",
+    exportRecord: "导出会议记录",
+    exportJson: "导出 JSON",
+    packetCopied: "已复制。粘贴到任意 AI 对话中即可继续。",
+    exportSaved: "已保存。",
+    exportFailed: (msg: string) => `导出失败：${msg}`,
     notRunning: "会议智能未运行。请在 设置 › 存储空间 中开启，下次会话开始生效。",
     lastPass: (applied: number, rejected: number): string =>
       `上次分析：${applied} 项更改${rejected ? `，${rejected} 项被拒绝` : ""}。`,

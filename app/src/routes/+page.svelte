@@ -852,6 +852,7 @@
       // A new live session is a new library entry; stamp its id + start now (a re-save replaces it).
       meetingId = crypto.randomUUID();
       meetingStartedAt = Date.now();
+      intel.startedAt = meetingStartedAt;
       // Both streams start unmuted; the live You/Them chips flip these mid-session.
       liveMicMuted = false;
       liveSystemMuted = false;

@@ -18,6 +18,9 @@
     saveLearning,
     loadMemory,
     deleteMemory,
+    copyExport,
+    saveExport,
+    type ExportKind,
     CLASS_ORDER,
     KIND_ORDER,
     GAP_ORDER,
@@ -88,6 +91,10 @@
       // clipboard unavailable; nothing to do
     }
   }
+
+  const liveTitle = (when: string) => i18n.t.library.newNoteTitle(when);
+  const doCopy = (kind: ExportKind) => copyExport(kind, running, liveTitle);
+  const doSave = (kind: ExportKind) => saveExport(kind, running, liveTitle);
 
   async function analyze() {
     notRunning = !(await analyzeNow());
@@ -373,6 +380,20 @@
         {intel.analyzing ? i18n.t.intel.analyzing : i18n.t.intel.analyzeNow}
       </button>
     </div>
+    {#if groups.length}
+      <div class="export-row">
+        <button class="btn" onclick={() => doCopy("packet")}>{i18n.t.intel.copyPacket}</button>
+        <button class="btn" onclick={() => doSave("record")}>{i18n.t.intel.exportRecord}</button>
+        <button class="btn" onclick={() => doSave("json")}>{i18n.t.intel.exportJson}</button>
+        {#if intel.exportNote === "copied"}
+          <span class="status">{i18n.t.intel.packetCopied}</span>
+        {:else if intel.exportNote === "saved"}
+          <span class="status">{i18n.t.intel.exportSaved}</span>
+        {:else if intel.exportNote.startsWith("error:")}
+          <span class="status error">{i18n.t.intel.exportFailed(intel.exportNote.slice(6))}</span>
+        {/if}
+      </div>
+    {/if}
     <div class="feed">
       {#if !groups.length}
         <p class="hint">{i18n.t.intel.stateEmpty}</p>
@@ -816,6 +837,15 @@
     border: 1px solid var(--border);
     border-radius: 8px;
     padding: 7px 9px;
+  }
+
+  .export-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--border);
   }
 
   .state-head {
