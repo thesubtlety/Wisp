@@ -9,10 +9,11 @@ use wisp_core::transcript::{AudioSourceKind, SegmentStatus, TranscriptSegment};
 
 use crate::embed::{self, Embedder};
 use crate::record::{Note, NoteSummary, SearchHit, Segment};
+use crate::retention::RetentionPolicy;
 use crate::Result;
 
 /// On-disk schema version, bumped on schema changes (drives migration via `PRAGMA user_version`).
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 /// Characters of transcript kept as a list preview.
 const PREVIEW_CHARS: usize = 160;
@@ -34,7 +35,7 @@ type EmbeddedChunk = (String, Vec<u8>);
 /// Initial schema. `segment_fts` is an external-content FTS5 index (it stores no copy of the text,
 /// keeping the database small); the triggers keep it in sync with `segment`. The `trigram` tokenizer
 /// gives substring matching that also works for CJK, where word boundaries aren't whitespace.
-const SCHEMA_V1: &str = "\
+pub(crate) const SCHEMA_V1: &str = "\
 CREATE TABLE meeting (
     id            TEXT PRIMARY KEY,
     title         TEXT NOT NULL,
@@ -77,7 +78,7 @@ END;
 /// is stored as a little-endian f32 BLOB. Written only when an [`Embedder`] is configured; the
 /// cascade from `meeting` clears a note's chunks on delete or re-save. Added as a separate migration
 /// so existing v1 databases gain the table without losing data.
-const SCHEMA_V2: &str = "\
+pub(crate) const SCHEMA_V2: &str = "\
 CREATE TABLE chunk (
     id         INTEGER PRIMARY KEY,
     meeting_id TEXT NOT NULL REFERENCES meeting (id) ON DELETE CASCADE,
@@ -88,12 +89,69 @@ CREATE TABLE chunk (
 CREATE INDEX chunk_meeting ON chunk (meeting_id);
 ";
 
+/// Schema v3 — projects, project sources, and retention. A meeting may belong to a project and
+/// carries its own transcript expiry; when that passes, [`Library::prune`] deletes the transcript
+/// (segments, their search index, and their vectors) but keeps the meeting row and its summary.
+/// Sources are project documents: a file indexed where it lives (never touched), pasted text, or an
+/// app-managed copy that expires. Their chunks and vectors go with them. Existing meetings get no
+/// expiry, so upgrading never deletes anything by itself.
+pub(crate) const SCHEMA_V3: &str = "\
+CREATE TABLE project (
+    id            TEXT PRIMARY KEY,
+    name          TEXT NOT NULL UNIQUE,
+    created_at_ms INTEGER NOT NULL
+);
+
+ALTER TABLE meeting ADD COLUMN project_id TEXT REFERENCES project (id) ON DELETE SET NULL;
+ALTER TABLE meeting ADD COLUMN transcript_expires_at_ms INTEGER;
+ALTER TABLE meeting ADD COLUMN transcript_pruned_at_ms INTEGER;
+CREATE INDEX meeting_project ON meeting (project_id);
+CREATE INDEX meeting_transcript_expiry ON meeting (transcript_expires_at_ms);
+
+CREATE TABLE source (
+    id            INTEGER PRIMARY KEY,
+    project_id    TEXT NOT NULL REFERENCES project (id) ON DELETE CASCADE,
+    kind          TEXT NOT NULL,
+    label         TEXT NOT NULL,
+    origin_path   TEXT,
+    managed_path  TEXT,
+    sha256        TEXT NOT NULL,
+    added_at_ms   INTEGER NOT NULL,
+    expires_at_ms INTEGER
+);
+CREATE INDEX source_project ON source (project_id);
+CREATE INDEX source_expiry ON source (expires_at_ms);
+
+CREATE TABLE source_chunk (
+    id        INTEGER PRIMARY KEY,
+    source_id INTEGER NOT NULL REFERENCES source (id) ON DELETE CASCADE,
+    idx       INTEGER NOT NULL,
+    text      TEXT NOT NULL,
+    embedding BLOB
+);
+CREATE INDEX source_chunk_source ON source_chunk (source_id);
+
+CREATE VIRTUAL TABLE source_chunk_fts USING fts5 (
+    text,
+    content = 'source_chunk',
+    content_rowid = 'id',
+    tokenize = 'trigram'
+);
+CREATE TRIGGER source_chunk_ai AFTER INSERT ON source_chunk BEGIN
+    INSERT INTO source_chunk_fts (rowid, text) VALUES (new.id, new.text);
+END;
+CREATE TRIGGER source_chunk_ad AFTER DELETE ON source_chunk BEGIN
+    INSERT INTO source_chunk_fts (source_chunk_fts, rowid, text) VALUES ('delete', old.id, old.text);
+END;
+";
+
 /// A handle to the meeting knowledge base. Open once and reuse across queries. With no embedder it
 /// is full-text only; configure one via [`Library::set_embedder`] to enable semantic and hybrid
 /// search.
 pub struct Library {
-    conn: Connection,
-    embedder: Option<Box<dyn Embedder>>,
+    pub(crate) conn: Connection,
+    pub(crate) embedder: Option<Box<dyn Embedder>>,
+    pub(crate) retention: RetentionPolicy,
 }
 
 impl Library {
@@ -134,10 +192,12 @@ impl Library {
     }
 
     fn init(conn: Connection) -> Result<Self> {
-        conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+        // secure_delete zeroes freed pages, so a pruned transcript doesn't linger in the file.
+        conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON;")?;
         let mut lib = Self {
             conn,
             embedder: None,
+            retention: RetentionPolicy::default(),
         };
         lib.migrate()?;
         Ok(lib)
@@ -153,6 +213,9 @@ impl Library {
         if version < 2 {
             self.conn.execute_batch(SCHEMA_V2)?;
         }
+        if version < 3 {
+            self.conn.execute_batch(SCHEMA_V3)?;
+        }
         self.conn
             .pragma_update(None, "user_version", SCHEMA_VERSION)?;
         Ok(())
@@ -161,8 +224,9 @@ impl Library {
     /// Persists a finished meeting — its metadata and finalized transcript segments — and indexes it
     /// for full-text search, in one transaction. `id` is caller-generated (the crate stays clock- and
     /// randomness-free) and `started_at_ms` is the session start in epoch milliseconds. Saving an
-    /// existing `id` replaces it. Partial and blank segments are skipped; the duration is the latest
-    /// segment end.
+    /// existing `id` replaces it, keeping its project. Partial and blank segments are skipped; the
+    /// duration is the latest segment end. The transcript expires `transcript_days` after
+    /// `started_at_ms`, per the library's [`RetentionPolicy`].
     pub fn save_note(
         &mut self,
         id: &str,
@@ -188,12 +252,21 @@ impl Library {
         // Embed before opening the transaction — inference touches no DB and may be slow.
         let chunks = self.embed_chunks(&finals)?;
 
+        let expires_at_ms = self.retention.transcript_expiry(started_at_ms);
+
         let tx = self.conn.transaction()?;
+        let project_id: Option<String> = tx
+            .query_row("SELECT project_id FROM meeting WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .optional()?
+            .flatten();
         tx.execute("DELETE FROM meeting WHERE id = ?1", [id])?;
         tx.execute(
             "INSERT INTO meeting
-                 (id, title, started_at_ms, duration_ms, language, engine, summary, segment_count)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                 (id, title, started_at_ms, duration_ms, language, engine, summary, segment_count,
+                  project_id, transcript_expires_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             rusqlite::params![
                 id,
                 title,
@@ -203,6 +276,8 @@ impl Library {
                 meta.engine,
                 meta.summary,
                 finals.len() as i64,
+                project_id,
+                expires_at_ms,
             ],
         )?;
         insert_segments(&tx, id, &finals)?;
@@ -282,7 +357,7 @@ impl Library {
     /// Chunks `texts`, embeds each chunk, and serializes the vectors — the shared core of
     /// [`Self::save_note`] and [`Self::reindex_all`]. `None` in full-text-only mode (no embedder);
     /// `Some(_)` otherwise, empty when `texts` hold no content.
-    fn embed_texts(&self, texts: &[&str]) -> Result<Option<Vec<EmbeddedChunk>>> {
+    pub(crate) fn embed_texts(&self, texts: &[&str]) -> Result<Option<Vec<EmbeddedChunk>>> {
         let Some(embedder) = &self.embedder else {
             return Ok(None);
         };
@@ -335,7 +410,8 @@ impl Library {
         let meeting = self
             .conn
             .query_row(
-                "SELECT id, title, started_at_ms, duration_ms, language, engine, summary, segment_count
+                "SELECT id, title, started_at_ms, duration_ms, language, engine, summary, segment_count,
+                        project_id, transcript_expires_at_ms, transcript_pruned_at_ms
                  FROM meeting WHERE id = ?1",
                 [id],
                 |r| {
@@ -348,6 +424,9 @@ impl Library {
                         engine: r.get(5)?,
                         summary: r.get(6)?,
                         segment_count: r.get(7)?,
+                        project_id: r.get(8)?,
+                        transcript_expires_at_ms: r.get(9)?,
+                        transcript_pruned_at_ms: r.get(10)?,
                     })
                 },
             )
@@ -565,6 +644,9 @@ impl Library {
             .query_row("SELECT count(*) FROM meeting", [], |r| r.get(0))?)
     }
 }
+
+/// Chunk size (characters) for project sources, shared with meeting transcripts.
+pub(crate) const SOURCE_CHUNK_CHARS: usize = CHUNK_CHARS;
 
 /// Maps an [`AudioSourceKind`] to the stored source label.
 fn source_label(source: AudioSourceKind) -> &'static str {
@@ -1168,7 +1250,7 @@ mod tests {
             )
             .unwrap();
         }
-        let lib = Library::open(&path).unwrap(); // second open: user_version is 2, schema skipped
+        let lib = Library::open(&path).unwrap(); // second open: already at the current user_version, schema skipped
         assert_eq!(lib.count().unwrap(), 1);
     }
 

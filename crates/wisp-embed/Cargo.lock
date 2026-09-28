@@ -1648,6 +1648,7 @@ version = "0.0.0"
 dependencies = [
  "rusqlite",
  "serde",
+ "sha2",
  "thiserror",
  "wisp-core",
 ]

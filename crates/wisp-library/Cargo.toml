@@ -13,6 +13,8 @@ wisp-core = { path = "../wisp-core" }
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 thiserror.workspace = true
+# Content hashes for project sources: after retention deletes a source, its label and hash remain.
+sha2 = "0.10"
 
 [dev-dependencies]
 tempfile = "3"

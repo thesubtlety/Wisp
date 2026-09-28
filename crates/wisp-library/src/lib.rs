@@ -10,10 +10,15 @@
 
 mod embed;
 mod record;
+mod retention;
 mod store;
 
 pub use embed::Embedder;
-pub use record::{Note, NoteSummary, SearchHit, Segment};
+pub use record::{Note, NoteSummary, Project, SearchHit, Segment, Source};
+pub use retention::{
+    PruneReport, RetentionPolicy, SourceInput, SourceKind, DEFAULT_TEMP_SOURCE_DAYS,
+    DEFAULT_TRANSCRIPT_DAYS,
+};
 pub use store::Library;
 
 /// An error from the meeting library.
