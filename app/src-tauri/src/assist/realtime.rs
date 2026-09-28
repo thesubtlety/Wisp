@@ -107,8 +107,8 @@ impl AudioSource for MixSource {
 /// `start_session` wires its sources, then handed to [`store_assist_mix`].
 #[derive(Default)]
 pub(crate) struct AssistTaps {
-    branches: Vec<FrameReceiver>,
     tees: Vec<Tee>,
+    branches: Vec<FrameReceiver>,
 }
 
 impl AssistTaps {
@@ -138,7 +138,7 @@ impl AssistTaps {
 /// that keep the taps alive) on [`AssistState`] for the realtime assist to pick up. With no
 /// branches (no source started) it clears any stale mix instead.
 pub(crate) fn store_assist_mix(state: &AssistState, taps: AssistTaps) -> Result<(), String> {
-    let AssistTaps { mut branches, tees } = taps;
+    let AssistTaps { tees, mut branches } = taps;
 
     let mix: Option<Box<dyn AudioSource>> = if branches.is_empty() {
         None
@@ -181,8 +181,8 @@ pub(crate) fn store_assist_mix(state: &AssistState, taps: AssistTaps) -> Result<
 /// for the Stop path to join off the command.
 pub(crate) struct AssistTeardown {
     worker: Option<AssistWorker>,
-    tees: Vec<Tee>,
     audio: Option<Box<dyn AudioSource>>,
+    tees: Vec<Tee>,
 }
 
 impl AssistTeardown {
@@ -190,8 +190,8 @@ impl AssistTeardown {
     pub(crate) fn shutdown(self) {
         let AssistTeardown {
             worker,
-            tees,
             audio,
+            tees,
         } = self;
 
         // Close the assist taps + drop any parked mix BEFORE joining the worker: it blocks on its
@@ -230,8 +230,8 @@ pub(crate) fn take_assist_teardown(state: &AssistState) -> Result<AssistTeardown
 
     Ok(AssistTeardown {
         worker,
-        tees,
         audio,
+        tees,
     })
 }
 

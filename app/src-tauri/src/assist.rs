@@ -1,7 +1,8 @@
 //! The AI assist, kept apart from the app root. The **chat** assist ([`chat`]) runs a prompt over a
 //! transcript the UI hands it — once, or streamed into the feed, map-reduced when the transcript
 //! would overflow the model's context. The **realtime** assist ([`realtime`]) listens to the live
-//! meeting audio through an OpenAI realtime model. Both reply over the `assist://` events below.
+//! meeting audio through an OpenAI realtime model. Streamed and realtime replies arrive over the
+//! `assist://` events below; a one-shot chat task returns its reply as the command's result.
 //!
 //! The rest of the app reaches the assist through the Tauri commands registered in `run()` and a
 //! few live-session hooks: [`AssistTaps`] taps each processed stream, [`store_assist_mix`] parks

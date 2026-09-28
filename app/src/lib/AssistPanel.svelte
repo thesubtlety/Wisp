@@ -2,7 +2,7 @@
   const ASSIST_MIN = 320;
   const TRANSCRIPT_MIN = 360;
 
-  /** The width a new assist panel starts at: the last one dragged to (persisted), at least the minimum. */
+  /** The panel width to start this page load with: the last one dragged to (persisted), at least the minimum. */
   export function savedAssistWidth(): number {
     return Math.max(ASSIST_MIN, Number(localStorage.getItem("wisp.assistWidth")) || 440);
   }
