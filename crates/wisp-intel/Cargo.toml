@@ -1,0 +1,21 @@
+[package]
+name = "wisp-intel"
+version = "0.0.0"
+description = "Meeting intelligence for Wisp: structured meeting state, provenance, and a deterministic reducer"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+wisp-library = { path = "../wisp-library" }
+wisp-reasoning = { path = "../wisp-reasoning" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror.workspace = true
+
+[dev-dependencies]
+wisp-ingest = { path = "../wisp-ingest" }
+
+[lints]
+workspace = true

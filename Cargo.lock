@@ -2518,6 +2518,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "wisp-intel"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "wisp-ingest",
+ "wisp-library",
+ "wisp-reasoning",
+]
+
+[[package]]
 name = "wisp-library"
 version = "0.0.0"
 dependencies = [
