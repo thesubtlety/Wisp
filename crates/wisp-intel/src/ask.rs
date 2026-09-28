@@ -58,6 +58,8 @@ pub struct AskInput<'a> {
     pub transcript: &'a [TranscriptLine],
     pub state: &'a MeetingState,
     pub retrieved: &'a [Snippet],
+    /// The project's accepted knowledge.
+    pub memory: &'a [wisp_library::MemoryEntry],
     pub timeout: Duration,
 }
 
@@ -188,7 +190,11 @@ pub fn prepare_ask(input: &AskInput) -> (ReasoningRequest, EvidencePacket) {
         &matched,
     );
     let latest = render_lines(&mut packet, meeting_id, "Latest in this meeting", recent);
-    let project = render_snippets(&mut packet, input.retrieved);
+    let project = format!(
+        "{}{}",
+        crate::evidence::render_memory(&mut packet, input.memory),
+        render_snippets(&mut packet, input.retrieved)
+    );
 
     let mut context = String::new();
     context.push_str(&render_items_for(input.state, &packet));
@@ -439,6 +445,7 @@ mod tests {
             transcript: t,
             state: s,
             retrieved: r,
+            memory: &[],
             timeout: Duration::from_secs(30),
         }
     }

@@ -2795,6 +2795,10 @@ struct LiveOptions {
     /// CLI). Off unless the user turned it on.
     #[serde(default)]
     intel: bool,
+    /// The project this meeting belongs to: it scopes retrieval and brings the project's accepted
+    /// knowledge into the intelligence passes.
+    #[serde(default)]
+    project_id: Option<String>,
 }
 
 /// Resolves the engine a live session will run from `options` + app state: an on-device model, or a
@@ -2915,7 +2919,7 @@ fn start_session_blocking(app: AppHandle, options: LiveOptions) -> Result<Option
     // first; that keeps its line numbers aligned with the saved transcript.
     intel::reset(&state);
     if options.intel {
-        intel::start(&app);
+        intel::start(&app, options.project_id.clone());
     }
     // A start that fails from here on drops the runtime it just made.
     let mut intel_guard = intel::StartGuard::new(&state);
@@ -3742,6 +3746,7 @@ fn save_note(
     meta: MarkdownMetaInput,
     started_at_ms: i64,
     source: Option<String>,
+    project_id: Option<String>,
 ) -> Result<(), String> {
     let live = !matches!(source.as_deref(), Some("file"));
     let buffer = if live {
@@ -3764,6 +3769,12 @@ fn save_note(
     library
         .save_note(&id, &meta.into(), started_at_ms, &segments)
         .map_err(|e| e.to_string())?;
+    if let Some(project) = project_id.as_deref().filter(|p| !p.is_empty()) {
+        // A project deleted meanwhile must not cost the meeting itself.
+        if let Err(e) = library.set_meeting_project(&id, Some(project)) {
+            eprintln!("wisp: filing the meeting under its project failed: {e}");
+        }
+    }
     if live {
         // The meeting itself is saved; a failure here only loses the derived state.
         if let Err(e) = intel::persist(&state, &mut library, &id, &retained) {
@@ -4410,6 +4421,12 @@ pub fn run() {
             intel::intel_review_reply,
             intel::intel_review_set,
             intel::intel_review_apply,
+            intel::list_projects,
+            intel::create_project,
+            intel::list_project_memory,
+            intel::delete_project_memory,
+            intel::intel_learning_propose,
+            intel::intel_learning_save,
             assist::realtime::stop_assist_realtime,
             assist::realtime::assist_hint_now,
             transcribe_file,

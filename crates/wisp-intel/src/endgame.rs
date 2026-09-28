@@ -257,6 +257,8 @@ pub struct AuditInput<'a> {
     pub transcript: &'a [TranscriptLine],
     pub state: &'a MeetingState,
     pub retrieved: &'a [Snippet],
+    /// The project's accepted knowledge.
+    pub memory: &'a [wisp_library::MemoryEntry],
     pub focus: Option<&'a str>,
     pub timeout: Duration,
 }
@@ -286,7 +288,11 @@ pub fn prepare_audit(input: &AuditInput) -> (ReasoningRequest, EvidencePacket) {
         },
         &input.transcript[start..],
     );
-    let project = render_snippets(&mut packet, input.retrieved);
+    let project = format!(
+        "{}{}",
+        crate::evidence::render_memory(&mut packet, input.memory),
+        render_snippets(&mut packet, input.retrieved)
+    );
 
     let mut context = String::new();
     if let Some(focus) = input.focus.map(str::trim).filter(|f| !f.is_empty()) {
@@ -417,6 +423,7 @@ mod tests {
             transcript: t,
             state: s,
             retrieved: &[],
+            memory: &[],
             focus: Some("Scope the migration"),
             timeout: Duration::from_secs(60),
         }

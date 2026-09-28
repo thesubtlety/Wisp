@@ -133,6 +133,8 @@ pub struct RuntimeConfig {
     pub interventions: InterventionPolicy,
     /// When the meeting is scheduled to end (epoch ms), if known.
     pub scheduled_end_ms: Option<i64>,
+    /// The project's accepted knowledge, given to every pass.
+    pub memory: Vec<wisp_library::MemoryEntry>,
 }
 
 impl Default for RuntimeConfig {
@@ -143,6 +145,7 @@ impl Default for RuntimeConfig {
             timeout: Duration::from_secs(180),
             interventions: InterventionPolicy::default(),
             scheduled_end_ms: None,
+            memory: Vec::new(),
         }
     }
 }
@@ -446,6 +449,7 @@ impl Worker {
                 transcript: &self.lines,
                 state: &self.state,
                 retrieved: &retrieved,
+                memory: &self.config.memory,
                 focus: self.config.focus.as_deref(),
                 timeout: self.config.timeout,
             },
@@ -485,6 +489,7 @@ impl Worker {
             retrieved: &retrieved,
             focus: self.config.focus.as_deref(),
             endgame: self.endgame.is_some(),
+            memory: &self.config.memory,
             timeout: self.config.timeout,
         };
         let now = (self.now_ms)();

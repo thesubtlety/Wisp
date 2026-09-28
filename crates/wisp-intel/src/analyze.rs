@@ -75,6 +75,8 @@ pub struct AnalyzeInput<'a> {
     pub focus: Option<&'a str>,
     /// Whether the meeting is wrapping up: candidates then focus on unresolved gaps.
     pub endgame: bool,
+    /// The project's accepted knowledge.
+    pub memory: &'a [wisp_library::MemoryEntry],
     pub timeout: Duration,
 }
 
@@ -174,7 +176,11 @@ pub fn prepare_observe(
 
     let mut packet = EvidencePacket::default();
     let transcript = render_transcript(&mut packet, &state.meeting_id, earlier, new);
-    let project = render_snippets(&mut packet, input.retrieved);
+    let project = format!(
+        "{}{}",
+        crate::evidence::render_memory(&mut packet, input.memory),
+        render_snippets(&mut packet, input.retrieved)
+    );
 
     let mut context = String::new();
     if let Some(focus) = input.focus.map(str::trim).filter(|f| !f.is_empty()) {
@@ -317,6 +323,7 @@ mod tests {
             retrieved,
             focus: Some("Scope the hosting model"),
             endgame: false,
+            memory: &[],
             timeout: Duration::from_secs(60),
         }
     }

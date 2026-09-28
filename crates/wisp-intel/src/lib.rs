@@ -14,6 +14,7 @@
 //! - [`endgame`] — wrap-up signals and the gap audit run when the meeting is closing.
 //! - [`intervene`] — proposed interventions and the conservative local filter that decides
 //!   which reach the user, with a log for tuning.
+//! - [`learning`] — end-of-meeting proposals for project memory, with hashed provenance.
 //! - [`review`] — post-call follow-up review, corrected in plain words, applied to the state.
 //! - [`runtime`] — the live worker: final lines in over a channel that never blocks, batched
 //!   passes out, one at a time.
@@ -25,6 +26,7 @@ pub mod ask;
 pub mod endgame;
 pub mod evidence;
 pub mod intervene;
+pub mod learning;
 pub mod model;
 pub mod ops;
 pub mod reducer;
@@ -40,11 +42,12 @@ pub use endgame::{
     audit, prepare_audit, wrap_probability, AuditInput, AuditReport, EndgameTrigger, Gap,
     GapCategory,
 };
-pub use evidence::{EvidenceDetail, EvidencePacket, TranscriptLine};
+pub use evidence::{memory_ref, EvidenceDetail, EvidencePacket, TranscriptLine};
 pub use intervene::{
     validate_candidate, Candidate, CandidateKind, Card, Decision, InterventionFilter,
     InterventionPolicy, LogEntry, RawCandidate, Suppressed,
 };
+pub use learning::{prepare_learning, propose_learning, LearningInput, Proposal, KNOWLEDGE_KINDS};
 pub use model::{EpistemicStatus, ItemKind, Lifecycle, MeetingState, SourceRef, StateItem};
 pub use ops::{output_schema, AppliedOp, ModelOp, OpBatch, OpKind, ReplayError, ResolvedOp};
 pub use reducer::{reduce, ApplyReport, RejectReason, Rejection};

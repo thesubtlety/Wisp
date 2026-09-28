@@ -19,7 +19,9 @@ use wisp_intel::{
     EndgameTrigger, Finished, FollowUp, FollowUpClass, Gap, IntelRuntime, IntelUpdate, LogEntry,
     MeetingState, Retriever, ReviewEdit, RuntimeConfig, StateItem, TranscriptLine, LIVE_MEETING_ID,
 };
+use wisp_intel::{propose_learning, LearningInput, Proposal};
 use wisp_library::{meeting_ref, Library, RetrievalQuery, Snippet, StoredLogEntry, StoredOp};
+use wisp_library::{MemoryEntry, Project};
 use wisp_reasoning::{CancelToken, FallbackBackend};
 
 use crate::AppState;
@@ -36,6 +38,10 @@ pub(crate) struct IntelState {
     ask_cancel: Mutex<Option<CancelToken>>,
     /// The post-call review in progress: which saved meeting, and its follow-ups.
     review: Mutex<Option<(String, Vec<FollowUp>)>>,
+    /// The last applied review's "save to project" follow-ups, for project learning.
+    review_project: Mutex<Vec<FollowUp>>,
+    /// The project of the current (or just-finished) live meeting.
+    project: Mutex<Option<String>>,
 }
 
 /// A pass result as the webview sees it.
@@ -177,15 +183,23 @@ impl Drop for StartGuard<'_> {
 }
 
 /// Starts the runtime for a new live session, using the Codex CLI and falling back to Claude Code.
-pub(crate) fn start(app: &AppHandle) {
+pub(crate) fn start(app: &AppHandle, project_id: Option<String>) {
     let emitter = app.clone();
+    let state = app.state::<AppState>();
+    let memory = project_memory(&state, project_id.as_deref());
+    if let Ok(mut slot) = state.intel.project.lock() {
+        slot.clone_from(&project_id);
+    }
     let runtime = IntelRuntime::spawn(
         Arc::new(FallbackBackend::codex_then_claude()),
         Box::new(LibraryRetriever {
             app: app.clone(),
-            project_id: None,
+            project_id,
         }),
-        RuntimeConfig::default(),
+        RuntimeConfig {
+            memory,
+            ..RuntimeConfig::default()
+        },
         Box::new(move |update| {
             match &update {
                 IntelUpdate::Pass {
@@ -473,9 +487,11 @@ pub(crate) async fn intel_ask(
                 .map_err(|_| "state lock poisoned".to_owned())?,
         );
         let meeting = current_state(&state);
+        let project_id = state.intel.project.lock().ok().and_then(|p| p.clone());
+        let memory = project_memory(&state, project_id.as_deref());
         let retrieved = LibraryRetriever {
             app: app.clone(),
-            project_id: None,
+            project_id,
         }
         .retrieve(&question);
         let backend = FallbackBackend::codex_then_claude();
@@ -488,6 +504,7 @@ pub(crate) async fn intel_ask(
                 transcript: &transcript,
                 state: &meeting,
                 retrieved: &retrieved,
+                memory: &memory,
                 timeout: std::time::Duration::from_secs(180),
             },
         )
@@ -693,6 +710,13 @@ pub(crate) fn intel_review_apply(state: State<'_, AppState>) -> Result<usize, St
         .lock()
         .map_err(|_| "library lock poisoned".to_owned())?;
     let count = apply_review(&mut library, &id, &followups, now_ms())?;
+    if let Ok(mut slot) = state.intel.review_project.lock() {
+        *slot = followups
+            .iter()
+            .filter(|f| f.class == FollowUpClass::ProjectMemory)
+            .cloned()
+            .collect();
+    }
     // Applied once: a second apply would add the same new items again.
     if let Ok(mut slot) = state.intel.review.lock() {
         *slot = None;
@@ -732,6 +756,190 @@ fn apply_review(
         .save_state_ops(id, &stored)
         .map_err(|e| e.to_string())?;
     Ok(count)
+}
+
+/// A project's accepted memory; empty with no project or on error.
+fn project_memory(state: &AppState, project_id: Option<&str>) -> Vec<MemoryEntry> {
+    let Some(project) = project_id else {
+        return Vec::new();
+    };
+    state
+        .library
+        .lock()
+        .ok()
+        .and_then(|l| l.list_memory(project).ok())
+        .unwrap_or_default()
+}
+
+/// Every project, for the project selector.
+#[tauri::command]
+pub(crate) fn list_projects(state: State<'_, AppState>) -> Result<Vec<Project>, String> {
+    state
+        .library
+        .lock()
+        .map_err(|_| "library lock poisoned".to_owned())?
+        .list_projects()
+        .map_err(|e| e.to_string())
+}
+
+/// Creates a project named `name` (trimmed, unique).
+#[tauri::command]
+pub(crate) fn create_project(state: State<'_, AppState>, name: String) -> Result<Project, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("a project needs a name".to_owned());
+    }
+    let now = now_ms();
+    let id = format!("p-{now:x}");
+    state
+        .library
+        .lock()
+        .map_err(|_| "library lock poisoned".to_owned())?
+        .create_project(&id, name, now)
+        .map_err(|e| {
+            if e.to_string().contains("UNIQUE") {
+                format!("a project named \"{name}\" already exists")
+            } else {
+                e.to_string()
+            }
+        })
+}
+
+/// A memory entry with whether each piece of its evidence still exists.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MemoryView {
+    #[serde(flatten)]
+    entry: MemoryEntry,
+    /// Per provenance ref, in order: `true` once retention deleted the raw source.
+    expired: Vec<bool>,
+}
+
+/// A project's accepted knowledge, with which sources have expired.
+#[tauri::command]
+pub(crate) fn list_project_memory(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> Result<Vec<MemoryView>, String> {
+    let library = state
+        .library
+        .lock()
+        .map_err(|_| "library lock poisoned".to_owned())?;
+    let entries = library
+        .list_memory(&project_id)
+        .map_err(|e| e.to_string())?;
+    Ok(entries
+        .into_iter()
+        .map(|entry| {
+            let expired = entry
+                .provenance
+                .iter()
+                .map(|p| !matches!(library.snippet_for_ref(&p.source_ref), Ok(Some(_))))
+                .collect();
+            MemoryView { entry, expired }
+        })
+        .collect())
+}
+
+/// Deletes one piece of project knowledge.
+#[tauri::command]
+pub(crate) fn delete_project_memory(state: State<'_, AppState>, id: i64) -> Result<bool, String> {
+    state
+        .library
+        .lock()
+        .map_err(|_| "library lock poisoned".to_owned())?
+        .delete_memory(id)
+        .map_err(|e| e.to_string())
+}
+
+/// Proposes what the saved meeting's project should remember. Errors if the meeting isn't in a
+/// project.
+#[tauri::command]
+pub(crate) async fn intel_learning_propose(
+    app: AppHandle,
+    id: String,
+) -> Result<Vec<Proposal>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let (note, project) = {
+            let library = state
+                .library
+                .lock()
+                .map_err(|_| "library lock poisoned".to_owned())?;
+            let (note, _) = library
+                .get_note(&id)
+                .map_err(|e| e.to_string())?
+                .ok_or("no such meeting")?;
+            let project = note
+                .project_id
+                .clone()
+                .ok_or("this meeting isn't in a project")?;
+            (note, project)
+        };
+        let (meeting, lines) = saved_meeting(&state, &id)?;
+        let memory = project_memory(&state, Some(&project));
+        let followups = state
+            .intel
+            .review_project
+            .lock()
+            .map(|f| f.clone())
+            .unwrap_or_default();
+        propose_learning(
+            &FallbackBackend::codex_then_claude(),
+            &CancelToken::new(),
+            &LearningInput {
+                state: &meeting,
+                transcript: &lines,
+                memory: &memory,
+                followups: &followups,
+                meeting_label: &note.title,
+                timeout: std::time::Duration::from_secs(180),
+            },
+        )
+        .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("learning task failed: {e}"))?
+}
+
+/// Stores the accepted proposals in the saved meeting's project. Returns how many were stored.
+#[tauri::command]
+pub(crate) fn intel_learning_save(
+    state: State<'_, AppState>,
+    id: String,
+    proposals: Vec<Proposal>,
+) -> Result<usize, String> {
+    let library = state
+        .library
+        .lock()
+        .map_err(|_| "library lock poisoned".to_owned())?;
+    let project = library
+        .get_note(&id)
+        .map_err(|e| e.to_string())?
+        .and_then(|(note, _)| note.project_id)
+        .ok_or("this meeting isn't in a project")?;
+    save_learning(&library, &project, &id, &proposals, now_ms())
+}
+
+/// Stores accepted, non-blank proposals.
+fn save_learning(
+    library: &Library,
+    project: &str,
+    meeting_id: &str,
+    proposals: &[Proposal],
+    now: i64,
+) -> Result<usize, String> {
+    let mut stored = 0;
+    for p in proposals
+        .iter()
+        .filter(|p| p.accepted && !p.text.trim().is_empty())
+    {
+        library
+            .add_memory(project, &p.to_memory(meeting_id), now)
+            .map_err(|e| e.to_string())?;
+        stored += 1;
+    }
+    Ok(stored)
 }
 
 #[cfg(test)]
@@ -813,6 +1021,37 @@ mod tests {
             Some("Them")
         );
         assert_eq!(meeting.item("Q-1").unwrap().created_at_ms, 99);
+    }
+
+    #[test]
+    fn only_accepted_proposals_are_saved_with_their_provenance() {
+        let library = Library::open_in_memory().unwrap();
+        library.create_project("p", "Acme", 0).unwrap();
+        let p = |text: &str, accepted: bool| Proposal {
+            kind: "requirement".into(),
+            text: text.into(),
+            status: "inferred".into(),
+            confidence: 0.8,
+            provenance: vec![wisp_library::ProvenanceRef {
+                source_ref: "Mm:T0".into(),
+                label: "Note · Sept 26 00:00, Them".into(),
+                sha256: "0".repeat(64),
+            }],
+            accepted,
+        };
+        let n = save_learning(
+            &library,
+            "p",
+            "m",
+            &[p("Azure only", true), p("Dropped", false), p("  ", true)],
+            5,
+        )
+        .unwrap();
+        assert_eq!(n, 1);
+        let memory = library.list_memory("p").unwrap();
+        assert_eq!(memory[0].text, "Azure only");
+        assert_eq!(memory[0].meeting_id.as_deref(), Some("m"));
+        assert_eq!(memory[0].provenance[0].label, "Note · Sept 26 00:00, Them");
     }
 
     #[test]

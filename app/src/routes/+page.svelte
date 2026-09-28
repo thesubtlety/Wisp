@@ -13,7 +13,15 @@
   import AssistLauncher from "$lib/AssistLauncher.svelte";
   import AssistPanel, { savedAssistWidth } from "$lib/AssistPanel.svelte";
   import IntelPanel from "$lib/IntelPanel.svelte";
-  import { ensureIntelListener, resetIntel, intel, wrapUp } from "$lib/intel.svelte";
+  import {
+    ensureIntelListener,
+    resetIntel,
+    intel,
+    wrapUp,
+    loadProjects,
+    selectProject,
+    createProject,
+  } from "$lib/intel.svelte";
   import Settings from "$lib/Settings.svelte";
   import Library from "$lib/Library.svelte";
   import { i18n, LOCALES } from "$lib/i18n.svelte";
@@ -770,6 +778,20 @@
   let intelEnabled = $state(localStorage.getItem("wisp.intel") === "true");
   // The intelligence panel shares the assist panel's slot; opening one closes the other.
   let liveIntelOpen = $state(false);
+  // Project picker: "new" shows an inline name field.
+  let newProjectOpen = $state(false);
+  let newProjectName = $state("");
+  let newProjectError = $state("");
+  $effect(() => {
+    if (intelEnabled) loadProjects();
+  });
+  async function submitNewProject() {
+    newProjectError = await createProject(newProjectName);
+    if (!newProjectError) {
+      newProjectOpen = false;
+      newProjectName = "";
+    }
+  }
   $effect(() => {
     localStorage.setItem("wisp.intel", String(intelEnabled));
   });
@@ -822,6 +844,7 @@
           // during a live session — no need to have "armed" it before Start.
           assist: true,
           intel: intelEnabled,
+          projectId: intelEnabled && intel.projectId ? intel.projectId : null,
         },
       });
       liveNotice = notice ?? "";
@@ -871,10 +894,12 @@
           ),
           startedAtMs: meetingStartedAt,
           source: "live",
+          projectId: intelEnabled && intel.projectId ? intel.projectId : null,
         });
         // With intelligence on, the meeting ends in a short review of its follow-ups.
         if (intelEnabled) {
           intel.savedMeetingId = meetingId;
+          intel.savedProjectId = intel.projectId;
           intel.tab = "review";
           liveIntelOpen = true;
           liveAssistOpen = false;
@@ -1986,6 +2011,37 @@
         <div class="transcript-pane">
           <div class="pane-head">
             <span class="pane-title">{i18n.t.common.transcript}</span>
+            {#if intelEnabled}
+              <span class="project-pick">
+                {#if newProjectOpen}
+                  <input
+                    placeholder={i18n.t.intel.projectName}
+                    bind:value={newProjectName}
+                    onkeydown={(e) => e.key === "Enter" && submitNewProject()}
+                  />
+                  <button disabled={!newProjectName.trim()} onclick={submitNewProject}>{i18n.t.intel.create}</button>
+                  <button onclick={() => ((newProjectOpen = false), (newProjectError = ""))}>×</button>
+                  {#if newProjectError}<span class="project-error">{newProjectError}</span>{/if}
+                {:else}
+                  <select
+                    aria-label={i18n.t.intel.project}
+                    value={intel.projectId}
+                    disabled={running}
+                    onchange={(e) => {
+                      const v = e.currentTarget.value;
+                      if (v === "__new") {
+                        e.currentTarget.value = intel.projectId;
+                        newProjectOpen = true;
+                      } else selectProject(v);
+                    }}
+                  >
+                    <option value="">{i18n.t.intel.noProject}</option>
+                    {#each intel.projects as p (p.id)}<option value={p.id}>{p.name}</option>{/each}
+                    <option value="__new">{i18n.t.intel.newProject}</option>
+                  </select>
+                {/if}
+              </span>
+            {/if}
             <span class="pane-actions">
               {#if intelEnabled && running}
                 <button
@@ -4158,6 +4214,36 @@
 
   .intel-launch {
     position: relative;
+  }
+
+  /* Which project the meeting is filed under; fixed once recording starts. */
+  .project-pick {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: 12px;
+    margin-right: auto;
+    font-size: 12px;
+  }
+
+  .project-pick select,
+  .project-pick input,
+  .project-pick button {
+    font: inherit;
+    font-size: 12px;
+    color: var(--text);
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 3px 6px;
+  }
+
+  .project-pick button {
+    cursor: pointer;
+  }
+
+  .project-error {
+    color: var(--danger, #c0392b);
   }
 
   /* Wrapping Up: always there during a live meeting with intelligence on; accent once in endgame. */

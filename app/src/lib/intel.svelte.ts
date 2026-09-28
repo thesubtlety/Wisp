@@ -97,6 +97,26 @@ export type FollowUp = {
   itemId: string | null;
 };
 
+export type Project = { id: string; name: string; created_at_ms: number };
+export type ProvenanceRef = { sourceRef: string; label: string; sha256: string };
+export type MemoryItem = {
+  id: number;
+  kind: string;
+  text: string;
+  status: string;
+  confidence: number;
+  provenance: ProvenanceRef[];
+  expired: boolean[];
+};
+export type Proposal = {
+  kind: string;
+  text: string;
+  status: "stated" | "inferred";
+  confidence: number;
+  provenance: ProvenanceRef[];
+  accepted: boolean;
+};
+
 type IntelUpdate =
   | { kind: "wrapSuggested"; trigger: "scheduled" | "semantic" | "manual" }
   | { kind: "audit"; gaps: Gap[]; rejected: number; markdown: string; backend: string }
@@ -140,6 +160,22 @@ export const intel = $state({
   reviewError: "",
   reviewUnderstood: [] as { n: number; class: FollowUpClass }[],
   reviewApplied: null as null | number,
+  projects: [] as Project[],
+  /** The project new meetings are filed under ("" for none). Persists per device. */
+  projectId: (() => {
+    try {
+      return localStorage.getItem("wisp.project") ?? "";
+    } catch {
+      return "";
+    }
+  })(),
+  /** The project the just-saved meeting was filed under. */
+  savedProjectId: "",
+  memory: [] as MemoryItem[],
+  proposals: null as null | Proposal[],
+  learningBusy: false,
+  learningError: "",
+  learningSaved: null as null | number,
   /** An advisory "looks like you're wrapping up", until acted on or dismissed. */
   wrapSuggested: null as null | "scheduled" | "semantic" | "manual",
   endgame: false,
@@ -205,6 +241,93 @@ export function resetIntel() {
   intel.reviewError = "";
   intel.reviewUnderstood = [];
   intel.reviewApplied = null;
+  intel.savedProjectId = "";
+  intel.proposals = null;
+  intel.learningBusy = false;
+  intel.learningError = "";
+  intel.learningSaved = null;
+}
+
+/** Loads the project list; drops a remembered project that no longer exists. */
+export async function loadProjects() {
+  try {
+    intel.projects = await invoke<Project[]>("list_projects");
+    if (intel.projectId && !intel.projects.some((p) => p.id === intel.projectId)) selectProject("");
+  } catch {
+    intel.projects = [];
+  }
+}
+
+/** Chooses the project new meetings are filed under. */
+export function selectProject(id: string) {
+  intel.projectId = id;
+  try {
+    localStorage.setItem("wisp.project", id);
+  } catch {
+    // per-device convenience only
+  }
+}
+
+/** Creates a project and selects it. Returns an error message, or "" on success. */
+export async function createProject(name: string): Promise<string> {
+  try {
+    const p = await invoke<Project>("create_project", { name });
+    intel.projects = [...intel.projects, p];
+    selectProject(p.id);
+    return "";
+  } catch (e) {
+    return String(e);
+  }
+}
+
+/** Loads the selected project's accepted knowledge. */
+export async function loadMemory() {
+  if (!intel.projectId) {
+    intel.memory = [];
+    return;
+  }
+  try {
+    intel.memory = await invoke<MemoryItem[]>("list_project_memory", { projectId: intel.projectId });
+  } catch {
+    intel.memory = [];
+  }
+}
+
+export async function deleteMemory(id: number) {
+  await invoke("delete_project_memory", { id }).catch(() => {});
+  intel.memory = intel.memory.filter((m) => m.id !== id);
+}
+
+/** Proposes what the saved meeting's project should remember. */
+export async function proposeLearning() {
+  intel.learningBusy = true;
+  intel.learningError = "";
+  intel.learningSaved = null;
+  try {
+    intel.proposals = await invoke<Proposal[]>("intel_learning_propose", { id: intel.savedMeetingId });
+  } catch (e) {
+    intel.learningError = String(e);
+  } finally {
+    intel.learningBusy = false;
+  }
+}
+
+/** Stores the accepted proposals in the project. */
+export async function saveLearning() {
+  if (!intel.proposals) return;
+  intel.learningBusy = true;
+  try {
+    intel.learningSaved = await invoke<number>("intel_learning_save", {
+      id: intel.savedMeetingId,
+      proposals: intel.proposals,
+    });
+    intel.proposals = null;
+    await loadMemory();
+  } catch (e) {
+    intel.learningError = String(e);
+  } finally {
+    intel.learningBusy = false;
+  }
 }
 
 /** Proposes the saved meeting's follow-ups. */

@@ -14,6 +14,10 @@
     replyReview,
     setFollowUpClass,
     applyReview,
+    proposeLearning,
+    saveLearning,
+    loadMemory,
+    deleteMemory,
     CLASS_ORDER,
     KIND_ORDER,
     GAP_ORDER,
@@ -37,6 +41,11 @@
   let draft = $state("");
   let reviewDraft = $state("");
   const canReview = $derived(!running && !!intel.savedMeetingId);
+  const projectName = $derived(intel.projects.find((p) => p.id === intel.savedProjectId)?.name ?? "");
+  // The State view shows the selected project's knowledge.
+  $effect(() => {
+    if (intel.tab === "state" && intel.projectId) loadMemory();
+  });
 
   function reviewMarkdown(): string {
     return (intel.review?.followups ?? [])
@@ -229,6 +238,44 @@
         </div>
       {/if}
       {#if intel.reviewError}<p class="error">{intel.reviewError}</p>{/if}
+
+      {#if intel.savedProjectId}
+        <section class="learn">
+          <h4>{i18n.t.intel.projectKnowledge} · {projectName}</h4>
+          {#if intel.learningSaved !== null}
+            <p class="hint">{i18n.t.intel.learningSaved(intel.learningSaved)}</p>
+          {/if}
+          {#if !intel.proposals}
+            <p class="hint">{i18n.t.intel.learningIntro}</p>
+            <div class="cactions">
+              <button class="btn" disabled={intel.learningBusy} onclick={proposeLearning}>
+                {intel.learningBusy ? i18n.t.intel.findingKnowledge : i18n.t.intel.proposeKnowledge}
+              </button>
+            </div>
+          {:else}
+            {#if !intel.proposals.length}<p class="hint">{i18n.t.intel.noKnowledge}</p>{/if}
+            {#each intel.proposals as p, i (i)}
+              <div class="proposal">
+                <input type="checkbox" bind:checked={p.accepted} aria-label={i18n.t.intel.accept} />
+                <div class="pbody">
+                  <input class="ptext" bind:value={p.text} />
+                  <p class="imeta">
+                    <span class="st {p.status}">{i18n.t.intel.status[p.status]} · {Math.round(p.confidence * 100)}%</span>
+                    <span>{p.kind}</span>
+                    {#each p.provenance as ref (ref.sourceRef)}<span>{ref.label}</span>{/each}
+                  </p>
+                </div>
+              </div>
+            {/each}
+            <div class="cactions">
+              <button class="btn primary" disabled={intel.learningBusy} onclick={saveLearning}>
+                {i18n.t.intel.saveKnowledge}
+              </button>
+            </div>
+          {/if}
+          {#if intel.learningError}<p class="error">{intel.learningError}</p>{/if}
+        </section>
+      {/if}
     </div>
     {#if intel.review}
       <div class="composer">
@@ -329,6 +376,26 @@
     <div class="feed">
       {#if !groups.length}
         <p class="hint">{i18n.t.intel.stateEmpty}</p>
+      {/if}
+      {#if intel.projectId && intel.memory.length}
+        <section class="group">
+          <h4>{i18n.t.intel.projectKnowledge}</h4>
+          {#each intel.memory as m (m.id)}
+            <div class="item">
+              <p class="itext">{m.text}</p>
+              <p class="imeta">
+                <span class="st {m.status}">{i18n.t.intel.status[m.status as "stated" | "inferred"] ?? m.status}</span>
+                <span>{m.kind}</span>
+                {#each m.provenance as ref, j (j)}
+                  <span title={m.expired[j] ? i18n.t.intel.sourceExpired : ""}
+                    >{m.expired[j] ? i18n.t.intel.derivedFrom : ""}{ref.label}{m.expired[j] ? " ⌛" : ""}</span
+                  >
+                {/each}
+                <button class="linkish" aria-label={i18n.t.intel.forget} onclick={() => deleteMemory(m.id)}>×</button>
+              </p>
+            </div>
+          {/each}
+        </section>
       {/if}
       {#each groups as g (g.kind)}
         <section class="group">
@@ -670,6 +737,65 @@
   .classes button.on {
     color: var(--accent);
     border-color: var(--accent);
+  }
+
+  .learn {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 6px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border);
+  }
+
+  .learn h4 {
+    margin: 0;
+    font-size: 11.5px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--muted);
+  }
+
+  .proposal {
+    display: flex;
+    gap: 8px;
+    align-items: flex-start;
+  }
+
+  .proposal input[type="checkbox"] {
+    margin-top: 6px;
+  }
+
+  .pbody {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .ptext {
+    width: 100%;
+    box-sizing: border-box;
+    font: inherit;
+    font-size: 13px;
+    color: var(--text);
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    padding: 3px 5px;
+  }
+
+  .ptext:hover,
+  .ptext:focus {
+    border-color: var(--border);
+  }
+
+  .linkish {
+    margin-left: auto;
+    font: inherit;
+    color: var(--muted);
+    background: transparent;
+    border: none;
+    cursor: pointer;
   }
 
   .composer {
