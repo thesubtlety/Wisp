@@ -7,10 +7,14 @@
 //! [`CodexCliBackend`] runs the user's installed, logged-in `codex` CLI once per request, in a
 //! fresh temp directory that holds only that request. In subscription mode it drops API-key
 //! environment variables so a stray key can't move the run onto API billing.
+//! [`ClaudeCodeBackend`] does the same with `claude -p`: no tools, bounded turns, user settings
+//! ignored. [`FallbackBackend`] tries backends in order (Codex first, then Claude, say).
 //! [`ScriptedBackend`] is a deterministic stand-in for tests.
 
 mod backend;
+mod claude;
 mod codex;
+mod fallback;
 mod json;
 mod runner;
 mod schema;
@@ -21,7 +25,9 @@ pub use backend::{
     render_prompt, CancelToken, Capabilities, Health, ReasoningBackend, ReasoningError,
     ReasoningRequest, ReasoningResponse, TaskKind,
 };
+pub use claude::{ClaudeCodeBackend, ClaudeConfig};
 pub use codex::{CodexCliBackend, CodexConfig};
+pub use fallback::FallbackBackend;
 pub use json::extract_json_object;
 pub use runner::{run_command, CommandSpec, RunOutput, SUBSCRIPTION_STRIPPED_ENV};
 pub use schema::validate;
