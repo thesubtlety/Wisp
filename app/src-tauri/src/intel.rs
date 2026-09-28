@@ -14,9 +14,9 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use wisp_core::transcript::{AudioSourceKind, TranscriptSegment};
 use wisp_intel::{
-    ask, remap_refs, saved_positions, AppliedOp, AskAnswer, AskInput, AskTurn, Card, Finished,
-    IntelRuntime, IntelUpdate, LogEntry, MeetingState, Retriever, RuntimeConfig, StateItem,
-    TranscriptLine, LIVE_MEETING_ID,
+    ask, remap_refs, saved_positions, AppliedOp, AskAnswer, AskInput, AskTurn, Card,
+    EndgameTrigger, Finished, Gap, IntelRuntime, IntelUpdate, LogEntry, MeetingState, Retriever,
+    RuntimeConfig, StateItem, TranscriptLine, LIVE_MEETING_ID,
 };
 use wisp_library::{meeting_ref, Library, RetrievalQuery, Snippet, StoredLogEntry, StoredOp};
 use wisp_reasoning::{CancelToken, FallbackBackend};
@@ -49,6 +49,16 @@ enum IntelUpdateDto {
         cards: Vec<Card>,
     },
     NothingNew,
+    WrapSuggested {
+        trigger: EndgameTrigger,
+    },
+    #[serde(rename_all = "camelCase")]
+    Audit {
+        gaps: Vec<Gap>,
+        rejected: usize,
+        markdown: String,
+        backend: String,
+    },
     Failed {
         message: String,
     },
@@ -73,6 +83,13 @@ impl From<IntelUpdate> for IntelUpdateDto {
                 cards,
             },
             IntelUpdate::NothingNew => IntelUpdateDto::NothingNew,
+            IntelUpdate::WrapSuggested(trigger) => IntelUpdateDto::WrapSuggested { trigger },
+            IntelUpdate::Audit { report, backend } => IntelUpdateDto::Audit {
+                markdown: report.to_markdown(),
+                rejected: report.rejected.len(),
+                gaps: report.gaps,
+                backend,
+            },
             IntelUpdate::Failed(message) => IntelUpdateDto::Failed { message },
         }
     }
@@ -177,7 +194,12 @@ pub(crate) fn start(app: &AppHandle) {
                     "wisp: intel pass via {backend}: {applied} applied, {rejected} rejected"
                 ),
                 IntelUpdate::Failed(e) => eprintln!("wisp: intel pass failed: {e}"),
-                IntelUpdate::NothingNew => {}
+                IntelUpdate::Audit { report, backend } => eprintln!(
+                    "wisp: intel audit via {backend}: {} gaps, {} rejected",
+                    report.gaps.len(),
+                    report.rejected.len()
+                ),
+                IntelUpdate::NothingNew | IntelUpdate::WrapSuggested(_) => {}
             }
             let _ = emitter.emit(INTEL_EVENT, IntelUpdateDto::from(update));
         }),
@@ -353,6 +375,38 @@ fn persist_parked(
             .map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+/// Runs `f` on the live runtime. `false` if intelligence isn't running.
+fn with_runtime(state: &AppState, f: impl FnOnce(&IntelRuntime)) -> Result<bool, String> {
+    let guard = state
+        .intel
+        .runtime
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())?;
+    Ok(match guard.as_ref() {
+        Some(runtime) => {
+            f(runtime);
+            true
+        }
+        None => false,
+    })
+}
+
+/// Wrapping Up: enters endgame and runs the gap audit now. Recording goes on. `false` if
+/// intelligence isn't running.
+#[tauri::command]
+pub(crate) fn intel_wrap_up(state: State<'_, AppState>) -> Result<bool, String> {
+    with_runtime(&state, IntelRuntime::wrap_up)
+}
+
+/// Sets or clears the meeting's scheduled end (epoch ms). `false` if intelligence isn't running.
+#[tauri::command]
+pub(crate) fn intel_set_scheduled_end(
+    state: State<'_, AppState>,
+    end_ms: Option<i64>,
+) -> Result<bool, String> {
+    with_runtime(&state, |r| r.set_scheduled_end(end_ms))
 }
 
 /// Records that the user dismissed a card. `false` if intelligence isn't running.

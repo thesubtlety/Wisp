@@ -11,6 +11,7 @@
 //! - [`analyze`] — "Analyze Now": one observer pass through a
 //!   [`wisp_reasoning::ReasoningBackend`].
 //! - [`ask`] — questions about the meeting, answered with checked citations.
+//! - [`endgame`] — wrap-up signals and the gap audit run when the meeting is closing.
 //! - [`intervene`] — proposed interventions and the conservative local filter that decides
 //!   which reach the user, with a log for tuning.
 //! - [`runtime`] — the live worker: final lines in over a channel that never blocks, batched
@@ -20,6 +21,7 @@
 
 pub mod analyze;
 pub mod ask;
+pub mod endgame;
 pub mod evidence;
 pub mod intervene;
 pub mod model;
@@ -32,6 +34,10 @@ pub use analyze::{
     PreparedPass,
 };
 pub use ask::{ask, ask_schema, prepare_ask, AskAnswer, AskInput, AskTurn, Citation};
+pub use endgame::{
+    audit, prepare_audit, wrap_probability, AuditInput, AuditReport, EndgameTrigger, Gap,
+    GapCategory,
+};
 pub use evidence::{EvidenceDetail, EvidencePacket, TranscriptLine};
 pub use intervene::{
     validate_candidate, Candidate, CandidateKind, Card, Decision, InterventionFilter,

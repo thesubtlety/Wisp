@@ -73,6 +73,8 @@ pub struct AnalyzeInput<'a> {
     pub retrieved: &'a [Snippet],
     /// What the user wants from this meeting, if they said.
     pub focus: Option<&'a str>,
+    /// Whether the meeting is wrapping up: candidates then focus on unresolved gaps.
+    pub endgame: bool,
     pub timeout: Duration,
 }
 
@@ -177,6 +179,13 @@ pub fn prepare_observe(
     let mut context = String::new();
     if let Some(focus) = input.focus.map(str::trim).filter(|f| !f.is_empty()) {
         let _ = writeln!(context, "## What You want from this meeting\n\n{focus}\n");
+    }
+    if input.endgame {
+        context.push_str(
+            "## The meeting is wrapping up\n\nFocus candidates on what must be resolved before \
+             everyone leaves: missing topics, unconfirmed assumptions, conflicts, commitments \
+             without owner or date, follow-up ownership. Skip everything else.\n\n",
+        );
     }
     context.push_str(&render_state(state, &packet));
     context.push_str(&project);
@@ -307,6 +316,7 @@ mod tests {
             transcript,
             retrieved,
             focus: Some("Scope the hosting model"),
+            endgame: false,
             timeout: Duration::from_secs(60),
         }
     }

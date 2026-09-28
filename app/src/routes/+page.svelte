@@ -13,7 +13,7 @@
   import AssistLauncher from "$lib/AssistLauncher.svelte";
   import AssistPanel, { savedAssistWidth } from "$lib/AssistPanel.svelte";
   import IntelPanel from "$lib/IntelPanel.svelte";
-  import { ensureIntelListener, resetIntel, intel } from "$lib/intel.svelte";
+  import { ensureIntelListener, resetIntel, intel, wrapUp } from "$lib/intel.svelte";
   import Settings from "$lib/Settings.svelte";
   import Library from "$lib/Library.svelte";
   import { i18n, LOCALES } from "$lib/i18n.svelte";
@@ -1980,6 +1980,18 @@
           <div class="pane-head">
             <span class="pane-title">{i18n.t.common.transcript}</span>
             <span class="pane-actions">
+              {#if intelEnabled && running}
+                <button
+                  class="wrap-btn"
+                  class:on={intel.endgame}
+                  title={i18n.t.intel.wrapUpTitle}
+                  onclick={() => {
+                    wrapUp();
+                    liveIntelOpen = true;
+                    liveAssistOpen = false;
+                  }}>{i18n.t.intel.wrapUp}</button
+                >
+              {/if}
               {#if intelEnabled && (running || liveSegments.length)}
                 <button
                   class="intel-launch"
@@ -4139,6 +4151,25 @@
 
   .intel-launch {
     position: relative;
+  }
+
+  /* Wrapping Up: always there during a live meeting with intelligence on; accent once in endgame. */
+  .wrap-btn {
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--muted);
+    background: transparent;
+    border: 1px dashed var(--border);
+    border-radius: 999px;
+    padding: 6px 14px;
+    cursor: pointer;
+  }
+
+  .wrap-btn:hover,
+  .wrap-btn.on {
+    color: var(--accent);
+    border-color: var(--accent);
   }
 
   /* A new insight card arrived while the panel was closed. */

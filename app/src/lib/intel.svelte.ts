@@ -63,7 +63,32 @@ export type Card = {
   };
 };
 
+export type GapCategory =
+  | "missing"
+  | "clarify"
+  | "commitment_without_owner"
+  | "commitment_without_date"
+  | "weakened_promise"
+  | "owed_by_them"
+  | "owed_by_you"
+  | "conflict";
+
+export const GAP_ORDER: GapCategory[] = [
+  "missing",
+  "clarify",
+  "commitment_without_owner",
+  "commitment_without_date",
+  "weakened_promise",
+  "owed_by_them",
+  "owed_by_you",
+  "conflict",
+];
+
+export type Gap = { category: GapCategory; text: string; cited: string[] };
+
 type IntelUpdate =
+  | { kind: "wrapSuggested"; trigger: "scheduled" | "semantic" | "manual" }
+  | { kind: "audit"; gaps: Gap[]; rejected: number; markdown: string; backend: string }
   | {
       kind: "pass";
       applied: number;
@@ -96,6 +121,13 @@ export const intel = $state({
   cards: [] as Card[],
   /** Cards shown since the Insights view was last open. */
   unseen: 0,
+  tab: "insights" as "insights" | "ask" | "state",
+  /** An advisory "looks like you're wrapping up", until acted on or dismissed. */
+  wrapSuggested: null as null | "scheduled" | "semantic" | "manual",
+  endgame: false,
+  auditing: false,
+  audit: null as null | { gaps: Gap[]; rejected: number; markdown: string },
+  scheduledEnd: "",
 });
 
 let listening: Promise<unknown> | null = null;
@@ -116,7 +148,17 @@ export function ensureIntelListener(): Promise<unknown> {
       intel.note = "";
     } else if (u.kind === "nothingNew") {
       intel.note = "nothingNew";
+    } else if (u.kind === "wrapSuggested") {
+      if (!intel.endgame) {
+        intel.wrapSuggested = u.trigger;
+        intel.unseen += 1;
+      }
+    } else if (u.kind === "audit") {
+      intel.auditing = false;
+      intel.audit = { gaps: u.gaps, rejected: u.rejected, markdown: u.markdown };
+      intel.unseen += 1;
     } else {
+      intel.auditing = false;
       intel.error = u.message;
     }
   });
@@ -133,6 +175,42 @@ export function resetIntel() {
   intel.turns = [];
   intel.cards = [];
   intel.unseen = 0;
+  intel.tab = "insights";
+  intel.wrapSuggested = null;
+  intel.endgame = false;
+  intel.auditing = false;
+  intel.audit = null;
+  intel.scheduledEnd = "";
+}
+
+/** Wrapping Up: enter endgame and audit what's still open. Recording goes on. */
+export async function wrapUp(): Promise<boolean> {
+  intel.endgame = true;
+  intel.wrapSuggested = null;
+  intel.auditing = true;
+  intel.tab = "insights";
+  try {
+    const running = await invoke<boolean>("intel_wrap_up");
+    if (!running) intel.auditing = false;
+    return running;
+  } catch (e) {
+    intel.auditing = false;
+    intel.error = String(e);
+    return false;
+  }
+}
+
+/** Sets the meeting's scheduled end from a local "HH:MM" today (blank clears it). */
+export function setScheduledEnd(hhmm: string) {
+  intel.scheduledEnd = hhmm;
+  let endMs: number | null = null;
+  const m = /^(\d{1,2}):(\d{2})$/.exec(hhmm);
+  if (m) {
+    const d = new Date();
+    d.setHours(Number(m[1]), Number(m[2]), 0, 0);
+    endMs = d.getTime();
+  }
+  invoke("intel_set_scheduled_end", { endMs }).catch(() => {});
 }
 
 /** Hides a card and tells the filter, so it holds back repeats. */

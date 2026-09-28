@@ -8,17 +8,27 @@
     cancelAsk,
     analyzeNow,
     dismissCard,
+    wrapUp,
+    setScheduledEnd,
     KIND_ORDER,
+    GAP_ORDER,
     type StateItem,
   } from "$lib/intel.svelte";
 
   let { running }: { running: boolean } = $props();
 
-  let tab = $state<"insights" | "ask" | "state">("insights");
-  // Opening Insights marks its cards seen.
+  // Opening Insights marks what's new there seen.
   $effect(() => {
-    if (tab === "insights" && intel.unseen) intel.unseen = 0;
+    if (intel.tab === "insights" && intel.unseen) intel.unseen = 0;
   });
+  const gapGroups = $derived(
+    intel.audit
+      ? GAP_ORDER.map((category) => ({
+          category,
+          gaps: intel.audit!.gaps.filter((g) => g.category === category),
+        })).filter((g) => g.gaps.length)
+      : [],
+  );
   let draft = $state("");
   let copiedAt = $state(-1);
   let notRunning = $state(false);
@@ -70,23 +80,61 @@
   <div class="tabs" role="tablist">
     <button
       role="tab"
-      aria-selected={tab === "insights"}
-      class:on={tab === "insights"}
-      onclick={() => (tab = "insights")}
+      aria-selected={intel.tab === "insights"}
+      class:on={intel.tab === "insights"}
+      onclick={() => (intel.tab = "insights")}
     >
       {i18n.t.intel.tabInsights}{#if intel.cards.length}<span class="count">{intel.cards.length}</span>{/if}
     </button>
-    <button role="tab" aria-selected={tab === "ask"} class:on={tab === "ask"} onclick={() => (tab = "ask")}>
+    <button role="tab" aria-selected={intel.tab === "ask"} class:on={intel.tab === "ask"} onclick={() => (intel.tab = "ask")}>
       {i18n.t.intel.tabAsk}
     </button>
-    <button role="tab" aria-selected={tab === "state"} class:on={tab === "state"} onclick={() => (tab = "state")}>
+    <button role="tab" aria-selected={intel.tab === "state"} class:on={intel.tab === "state"} onclick={() => (intel.tab = "state")}>
       {i18n.t.intel.tabState}{#if intel.items.length}<span class="count">{intel.items.length}</span>{/if}
     </button>
   </div>
 
-  {#if tab === "insights"}
+  {#if intel.tab === "insights"}
     <div class="feed">
-      {#if !intel.cards.length}
+      <label class="ends">
+        {i18n.t.intel.endsAt}
+        <input
+          type="time"
+          value={intel.scheduledEnd}
+          onchange={(e) => setScheduledEnd(e.currentTarget.value)}
+        />
+      </label>
+      {#if intel.wrapSuggested && !intel.endgame}
+        <div class="wrap-banner">
+          <p>{i18n.t.intel.wrapSuggested[intel.wrapSuggested === "scheduled" ? "scheduled" : "semantic"]}</p>
+          <div class="cactions">
+            <button class="btn primary" onclick={wrapUp}>{i18n.t.intel.reviewGaps}</button>
+            <button class="copy" onclick={() => (intel.wrapSuggested = null)}>{i18n.t.intel.notYet}</button>
+          </div>
+        </div>
+      {/if}
+      {#if intel.auditing}
+        <p class="hint">{i18n.t.intel.auditing}</p>
+      {:else if intel.audit}
+        <section class="audit">
+          <h4>{i18n.t.intel.beforeYouWrap}</h4>
+          {#if !gapGroups.length}<p class="hint">{i18n.t.intel.nothingOutstanding}</p>{/if}
+          {#each gapGroups as g (g.category)}
+            <p class="gcat">{i18n.t.intel.gaps[g.category]}</p>
+            {#each g.gaps as gap, j (j)}
+              <p class="gap">
+                {gap.text}{#each gap.cited as id (id)}<span class="cid gref">{id}</span>{/each}
+              </p>
+            {/each}
+          {/each}
+          <div class="cactions">
+            <button class="copy" onclick={() => copy(20_000, intel.audit!.markdown)}>
+              {copiedAt === 20_000 ? i18n.t.intel.copied : i18n.t.intel.copyAll}
+            </button>
+          </div>
+        </section>
+      {/if}
+      {#if !intel.cards.length && !intel.audit && !intel.auditing}
         <p class="hint">{i18n.t.intel.insightsEmpty}</p>
       {/if}
       {#each [...intel.cards].reverse() as card (card.id)}
@@ -111,7 +159,7 @@
         </div>
       {/each}
     </div>
-  {:else if tab === "ask"}
+  {:else if intel.tab === "ask"}
     <div class="feed" bind:this={feedEl}>
       {#if !intel.turns.length}
         <p class="hint">{i18n.t.intel.askEmpty}</p>
@@ -387,6 +435,74 @@
     -webkit-line-clamp: 2;
     line-clamp: 2;
     -webkit-box-orient: vertical;
+  }
+
+  .ends {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+
+  .ends input {
+    font: inherit;
+    font-size: 12px;
+    color: var(--text);
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 2px 6px;
+  }
+
+  .wrap-banner {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+  }
+
+  .wrap-banner p {
+    margin: 0;
+    font-size: 12.5px;
+  }
+
+  .audit {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 10px 12px;
+    border: 1px solid var(--accent);
+    border-radius: 8px;
+  }
+
+  .audit h4 {
+    margin: 0 0 4px;
+    font-size: 11.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--accent);
+  }
+
+  .gcat {
+    margin: 6px 0 0;
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--muted);
+  }
+
+  .gap {
+    margin: 0;
+    font-size: 13px;
+    user-select: text;
+  }
+
+  .gref {
+    margin-left: 6px;
+    font-size: 11px;
   }
 
   .card {

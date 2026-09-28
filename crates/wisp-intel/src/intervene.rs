@@ -309,6 +309,8 @@ pub enum LogEntry {
 #[derive(Debug, Clone, Default)]
 pub struct InterventionFilter {
     pub policy: InterventionPolicy,
+    /// In endgame the cooldown is a quarter as long: gaps matter more now than interruptions.
+    endgame: bool,
     cards: Vec<Card>,
     dismissed: BTreeSet<String>,
     log: Vec<LogEntry>,
@@ -362,6 +364,11 @@ impl InterventionFilter {
         });
     }
 
+    /// Enters or leaves endgame.
+    pub fn set_endgame(&mut self, on: bool) {
+        self.endgame = on;
+    }
+
     /// Records that the user dismissed a card. `false` if there is no such card.
     pub fn dismiss(&mut self, card_id: &str, now_ms: i64) -> bool {
         if !self.cards.iter().any(|c| c.id == card_id) || !self.dismissed.insert(card_id.to_owned())
@@ -403,7 +410,12 @@ impl InterventionFilter {
             return Decision::Suppressed(Suppressed::BelowThreshold);
         }
         if let Some(last) = self.cards.last() {
-            if now_ms - last.shown_at_ms < self.policy.cooldown_ms {
+            let cooldown = if self.endgame {
+                self.policy.cooldown_ms / 4
+            } else {
+                self.policy.cooldown_ms
+            };
+            if now_ms - last.shown_at_ms < cooldown {
                 return Decision::Suppressed(Suppressed::Cooldown);
             }
         }
@@ -610,6 +622,17 @@ mod tests {
         ));
         assert!(f
             .consider(valid("yet another separate problem"), 61 * MIN)
+            .is_some());
+    }
+
+    #[test]
+    fn endgame_shortens_the_cooldown() {
+        let mut f = InterventionFilter::default();
+        f.consider(valid("Hosting region unclear"), 0).unwrap();
+        assert!(f.consider(valid("Dataset owner missing"), MIN).is_none());
+        f.set_endgame(true);
+        assert!(f
+            .consider(valid("Budget never confirmed"), MIN + 1)
             .is_some());
     }
 

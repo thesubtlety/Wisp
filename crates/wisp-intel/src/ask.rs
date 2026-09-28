@@ -191,7 +191,7 @@ pub fn prepare_ask(input: &AskInput) -> (ReasoningRequest, EvidencePacket) {
     let project = render_snippets(&mut packet, input.retrieved);
 
     let mut context = String::new();
-    context.push_str(&render_items(input.state, &packet));
+    context.push_str(&render_items_for(input.state, &packet));
     context.push_str(&project);
     context.push_str(&earlier);
     context.push_str(&latest);
@@ -312,7 +312,7 @@ fn inline_ids(text: &str) -> Vec<String> {
 }
 
 /// All items (the latest [`MAX_ITEMS`]), live ones first, with lifecycle and evidence IDs.
-fn render_items(state: &MeetingState, packet: &EvidencePacket) -> String {
+pub(crate) fn render_items_for(state: &MeetingState, packet: &EvidencePacket) -> String {
     if state.items.is_empty() {
         return "## Meeting state\n\n(empty)\n\n".to_owned();
     }

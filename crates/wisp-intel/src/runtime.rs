@@ -20,6 +20,10 @@ use wisp_library::Snippet;
 use wisp_reasoning::{CancelToken, ReasoningBackend};
 
 use crate::analyze::{analyze_now, retrieval_text, AnalyzeInput, IntelError};
+use crate::endgame::{
+    audit, wrap_probability, AuditInput, AuditReport, EndgameTrigger, SCHEDULED_LEAD_MS,
+    WRAP_SUGGEST_AT,
+};
 use crate::evidence::TranscriptLine;
 use crate::intervene::{Card, InterventionFilter, InterventionPolicy, LogEntry};
 use crate::model::{MeetingState, StateItem};
@@ -106,6 +110,13 @@ pub enum IntelUpdate {
     },
     /// Analyze Now was asked for with nothing new.
     NothingNew,
+    /// The meeting looks like it is ending; advisory, sent at most once per meeting.
+    WrapSuggested(EndgameTrigger),
+    /// The gap audit Wrapping Up asked for.
+    Audit {
+        report: AuditReport,
+        backend: String,
+    },
     /// A pass failed; the state is unchanged and the lines will be tried again.
     Failed(String),
 }
@@ -120,6 +131,8 @@ pub struct RuntimeConfig {
     pub timeout: Duration,
     /// Which proposed interventions reach the user.
     pub interventions: InterventionPolicy,
+    /// When the meeting is scheduled to end (epoch ms), if known.
+    pub scheduled_end_ms: Option<i64>,
 }
 
 impl Default for RuntimeConfig {
@@ -129,6 +142,7 @@ impl Default for RuntimeConfig {
             focus: None,
             timeout: Duration::from_secs(180),
             interventions: InterventionPolicy::default(),
+            scheduled_end_ms: None,
         }
     }
 }
@@ -153,6 +167,8 @@ enum Msg {
     },
     AnalyzeNow,
     Dismiss(String),
+    WrapUp,
+    SetScheduledEnd(Option<i64>),
     Stop,
 }
 
@@ -201,6 +217,8 @@ impl IntelRuntime {
                     failures: 0,
                     snapshot: worker_snapshot,
                     filter: InterventionFilter::new(config_interventions),
+                    endgame: None,
+                    wrap_suggested: false,
                 }
                 .run(rx)
             })
@@ -230,6 +248,17 @@ impl IntelRuntime {
     /// Asks for a pass as soon as the worker is free, whatever the policy says.
     pub fn analyze_now(&self) {
         let _ = self.tx.send(Msg::AnalyzeNow);
+    }
+
+    /// Enters endgame and runs the gap audit as soon as the worker is free. Recording goes on; press
+    /// again for a fresh audit.
+    pub fn wrap_up(&self) {
+        let _ = self.tx.send(Msg::WrapUp);
+    }
+
+    /// Sets (or clears) when the meeting is scheduled to end, in epoch ms.
+    pub fn set_scheduled_end(&self, end_ms: Option<i64>) {
+        let _ = self.tx.send(Msg::SetScheduledEnd(end_ms));
     }
 
     /// Records that the user dismissed a card, so the filter holds back repeats.
@@ -286,12 +315,18 @@ struct Worker {
     /// Shared copy of `state`, refreshed after each pass.
     snapshot: Arc<Mutex<MeetingState>>,
     filter: InterventionFilter,
+    /// Set once the user presses Wrapping Up.
+    endgame: Option<EndgameTrigger>,
+    /// Whether the advisory wrap-up suggestion has been sent.
+    wrap_suggested: bool,
 }
 
 impl Worker {
     fn run(mut self, rx: Receiver<Msg>) -> Finished {
         loop {
             let mut manual = false;
+            let mut wrap_up = false;
+            let lines_before = self.lines.len();
             let first = match rx.recv_timeout(TICK) {
                 Ok(msg) => Some(msg),
                 Err(RecvTimeoutError::Timeout) => None,
@@ -317,12 +352,22 @@ impl Worker {
                     Msg::Dismiss(id) => {
                         self.filter.dismiss(&id, (self.now_ms)());
                     }
+                    Msg::WrapUp => wrap_up = true,
+                    Msg::SetScheduledEnd(end) => self.config.scheduled_end_ms = end,
                     Msg::Stop => stop = true,
                 }
             }
             if stop || self.cancel.is_cancelled() {
                 break;
             }
+            if wrap_up {
+                self.endgame = Some(EndgameTrigger::Manual);
+                self.wrap_suggested = true;
+                self.filter.set_endgame(true);
+                self.run_audit();
+                continue;
+            }
+            self.maybe_suggest_wrap(self.lines.len() > lines_before);
             let pending = self.pending_chars();
             let backing_off = self.last_pass.is_some_and(|t| t.elapsed() < self.backoff());
             let due = !backing_off
@@ -353,6 +398,70 @@ impl Worker {
         (self.config.policy.min_interval * factor).min(MAX_BACKOFF)
     }
 
+    /// Sends the advisory wrap-up suggestion once: when the scheduled end is near, or when the
+    /// latest lines sound like a wrap-up.
+    fn maybe_suggest_wrap(&mut self, new_lines: bool) {
+        if self.endgame.is_some() || self.wrap_suggested {
+            return;
+        }
+        let trigger = if self
+            .config
+            .scheduled_end_ms
+            .is_some_and(|end| (self.now_ms)() >= end - SCHEDULED_LEAD_MS)
+        {
+            Some(EndgameTrigger::Scheduled)
+        } else if new_lines && wrap_probability(&self.lines) >= WRAP_SUGGEST_AT {
+            Some(EndgameTrigger::Semantic)
+        } else {
+            None
+        };
+        if let Some(trigger) = trigger {
+            self.wrap_suggested = true;
+            (self.on_update)(IntelUpdate::WrapSuggested(trigger));
+        }
+    }
+
+    /// The gap audit, run on the worker right away.
+    fn run_audit(&mut self) {
+        let query = {
+            let text: String = self
+                .lines
+                .iter()
+                .rev()
+                .take(20)
+                .map(|l| l.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            text.chars().take(1500).collect::<String>()
+        };
+        let retrieved = if query.is_empty() {
+            Vec::new()
+        } else {
+            self.retriever.retrieve(&query)
+        };
+        let result = audit(
+            self.backend.as_ref(),
+            &self.cancel,
+            &AuditInput {
+                transcript: &self.lines,
+                state: &self.state,
+                retrieved: &retrieved,
+                focus: self.config.focus.as_deref(),
+                timeout: self.config.timeout,
+            },
+        );
+        let update = match result {
+            Ok(report) => IntelUpdate::Audit {
+                report,
+                backend: self.backend.name().to_owned(),
+            },
+            Err(e) => IntelUpdate::Failed(e.to_string()),
+        };
+        if !self.cancel.is_cancelled() {
+            (self.on_update)(update);
+        }
+    }
+
     fn pending_chars(&self) -> usize {
         let start = self
             .state
@@ -375,6 +484,7 @@ impl Worker {
             transcript: &self.lines,
             retrieved: &retrieved,
             focus: self.config.focus.as_deref(),
+            endgame: self.endgame.is_some(),
             timeout: self.config.timeout,
         };
         let now = (self.now_ms)();
@@ -589,6 +699,8 @@ mod tests {
             failures: 0,
             snapshot: Arc::new(Mutex::new(MeetingState::new(LIVE_MEETING_ID))),
             filter: InterventionFilter::default(),
+            endgame: None,
+            wrap_suggested: false,
         };
         assert_eq!(w.backoff(), Duration::ZERO);
         w.failures = 1;
@@ -840,6 +952,102 @@ mod tests {
         let done = rt.stop();
         assert_eq!(done.candidate_log.len(), 3, "two considered, one dismissed");
         assert!(matches!(done.candidate_log[2], LogEntry::Dismissed { .. }));
+    }
+
+    #[test]
+    fn wrap_up_runs_the_audit_at_once_and_shapes_later_passes() {
+        let backend = Arc::new(ScriptedBackend::with_responder("scripted", |req| {
+            Ok(match req.task {
+                wisp_reasoning::TaskKind::EndgameAudit => json!({"gaps": [
+                    {"category": "missing", "text": "Nobody owns deployment.", "source_refs": [], "related_items": []}
+                ]}),
+                _ => json!({"ops": [], "candidates": []}),
+            })
+        }));
+        let (seen, on_update) = collect();
+        let rt = IntelRuntime::spawn(
+            backend.clone(),
+            Box::new(NoRetrieval),
+            RuntimeConfig {
+                policy: TriggerPolicy {
+                    min_new_chars: 10_000,
+                    ..fast_policy()
+                },
+                ..RuntimeConfig::default()
+            },
+            on_update,
+            Box::new(|| 0),
+        );
+        rt.push_final("Them", 0, "We talked about the migration.");
+        rt.wrap_up();
+        wait_for(&seen, 1);
+        let IntelUpdate::Audit { report, .. } = seen.lock().unwrap()[0].clone() else {
+            panic!("expected an audit");
+        };
+        assert_eq!(report.gaps[0].text, "Nobody owns deployment.");
+        rt.analyze_now();
+        wait_for(&seen, 2);
+        let requests = backend.requests.lock().unwrap().clone();
+        assert_eq!(requests[0].task, wisp_reasoning::TaskKind::EndgameAudit);
+        assert!(requests[1]
+            .context
+            .contains("## The meeting is wrapping up"));
+        drop(requests);
+        rt.stop();
+    }
+
+    #[test]
+    fn closing_words_suggest_wrapping_up_once() {
+        let backend = Arc::new(ScriptedBackend::with_responder("s", |_| {
+            Ok(json!({"ops": [], "candidates": []}))
+        }));
+        let (seen, on_update) = collect();
+        let rt = IntelRuntime::spawn(
+            backend,
+            Box::new(NoRetrieval),
+            RuntimeConfig {
+                policy: TriggerPolicy {
+                    min_new_chars: 10_000,
+                    ..fast_policy()
+                },
+                ..RuntimeConfig::default()
+            },
+            on_update,
+            Box::new(|| 0),
+        );
+        rt.push_final("Them", 0, "Anything else before we wrap?");
+        rt.push_final("You", 1, "No, thanks everyone.");
+        wait_for(&seen, 1);
+        rt.push_final("Them", 2, "Thanks all, talk soon.");
+        std::thread::sleep(TICK * 2);
+        let updates = seen.lock().unwrap().clone();
+        assert_eq!(
+            updates,
+            [IntelUpdate::WrapSuggested(EndgameTrigger::Semantic)]
+        );
+        rt.stop();
+    }
+
+    #[test]
+    fn a_near_scheduled_end_suggests_wrapping_up() {
+        let backend = Arc::new(ScriptedBackend::named("s"));
+        let (seen, on_update) = collect();
+        let rt = IntelRuntime::spawn(
+            backend,
+            Box::new(NoRetrieval),
+            RuntimeConfig {
+                scheduled_end_ms: Some(10 * 60 * 1000),
+                ..RuntimeConfig::default()
+            },
+            on_update,
+            Box::new(|| 6 * 60 * 1000),
+        );
+        wait_for(&seen, 1);
+        assert_eq!(
+            seen.lock().unwrap()[0],
+            IntelUpdate::WrapSuggested(EndgameTrigger::Scheduled)
+        );
+        rt.stop();
     }
 
     #[test]
