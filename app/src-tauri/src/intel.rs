@@ -14,9 +14,10 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use wisp_core::transcript::{AudioSourceKind, TranscriptSegment};
 use wisp_intel::{
-    ask, remap_refs, saved_positions, AppliedOp, AskAnswer, AskInput, AskTurn, Card,
-    EndgameTrigger, Finished, Gap, IntelRuntime, IntelUpdate, LogEntry, MeetingState, Retriever,
-    RuntimeConfig, StateItem, TranscriptLine, LIVE_MEETING_ID,
+    apply_edits, ask, fallback_followups, generate_followups, interpret_reply, parse_reply,
+    remap_refs, review_ops, saved_positions, AppliedOp, AskAnswer, AskInput, AskTurn, Card,
+    EndgameTrigger, Finished, FollowUp, FollowUpClass, Gap, IntelRuntime, IntelUpdate, LogEntry,
+    MeetingState, Retriever, ReviewEdit, RuntimeConfig, StateItem, TranscriptLine, LIVE_MEETING_ID,
 };
 use wisp_library::{meeting_ref, Library, RetrievalQuery, Snippet, StoredLogEntry, StoredOp};
 use wisp_reasoning::{CancelToken, FallbackBackend};
@@ -33,6 +34,8 @@ pub(crate) struct IntelState {
     finished: Mutex<Option<Finished>>,
     /// The question being answered, so it can be cancelled.
     ask_cancel: Mutex<Option<CancelToken>>,
+    /// The post-call review in progress: which saved meeting, and its follow-ups.
+    review: Mutex<Option<(String, Vec<FollowUp>)>>,
 }
 
 /// A pass result as the webview sees it.
@@ -520,19 +523,11 @@ pub(crate) fn intel_ask_cancel(state: State<'_, AppState>) {
     }
 }
 
-/// The live items of a saved meeting's state, rebuilt from its stored log. Empty if it has none.
-#[tauri::command]
-pub(crate) fn intel_saved_items(
-    state: State<'_, AppState>,
-    id: String,
-) -> Result<Vec<StateItem>, String> {
-    let stored = state
-        .library
-        .lock()
-        .map_err(|_| "library lock poisoned".to_owned())?
-        .state_ops(&id)
-        .map_err(|e| e.to_string())?;
-    let log = stored
+/// A saved meeting's state log, parsed.
+fn stored_log(library: &Library, id: &str) -> Result<Vec<AppliedOp>, String> {
+    library
+        .state_ops(id)
+        .map_err(|e| e.to_string())?
         .into_iter()
         .map(|s| {
             Ok(AppliedOp {
@@ -541,9 +536,202 @@ pub(crate) fn intel_saved_items(
                 op: serde_json::from_str(&s.op).map_err(|e| e.to_string())?,
             })
         })
-        .collect::<Result<Vec<_>, String>>()?;
-    let meeting = MeetingState::replay(&id, &log).map_err(|e| e.to_string())?;
+        .collect()
+}
+
+/// A saved meeting's state and its transcript lines (empty once pruned).
+fn saved_meeting(
+    state: &AppState,
+    id: &str,
+) -> Result<(MeetingState, Vec<TranscriptLine>), String> {
+    let library = state
+        .library
+        .lock()
+        .map_err(|_| "library lock poisoned".to_owned())?;
+    let log = stored_log(&library, id)?;
+    let meeting = MeetingState::replay(id, &log).map_err(|e| e.to_string())?;
+    let lines = library
+        .get_note(id)
+        .map_err(|e| e.to_string())?
+        .map(|(_, segments)| segments.iter().map(TranscriptLine::from_segment).collect())
+        .unwrap_or_default();
+    Ok((meeting, lines))
+}
+
+/// The live items of a saved meeting's state, rebuilt from its stored log. Empty if it has none.
+#[tauri::command]
+pub(crate) fn intel_saved_items(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Vec<StateItem>, String> {
+    let (meeting, _) = saved_meeting(&state, &id)?;
     Ok(meeting.live_items().into_iter().cloned().collect())
+}
+
+/// A review's follow-ups, and where they came from: `"model"`, or `"state"` when no model was
+/// available (then `note` says why).
+#[derive(Serialize)]
+pub(crate) struct ReviewDto {
+    followups: Vec<FollowUp>,
+    source: &'static str,
+    note: Option<String>,
+}
+
+/// Starts the post-call review of a saved meeting: proposes its follow-ups.
+#[tauri::command]
+pub(crate) async fn intel_review_start(app: AppHandle, id: String) -> Result<ReviewDto, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let (meeting, lines) = saved_meeting(&state, &id)?;
+        let backend = FallbackBackend::codex_then_claude();
+        let (followups, source, note) = match generate_followups(
+            &backend,
+            &CancelToken::new(),
+            &meeting,
+            &lines,
+            std::time::Duration::from_secs(180),
+        ) {
+            Ok(list) => (list, "model", None),
+            Err(e) => (fallback_followups(&meeting), "state", Some(e.to_string())),
+        };
+        if let Ok(mut slot) = state.intel.review.lock() {
+            *slot = Some((id, followups.clone()));
+        }
+        Ok(ReviewDto {
+            followups,
+            source,
+            note,
+        })
+    })
+    .await
+    .map_err(|e| format!("review task failed: {e}"))?
+}
+
+/// What a reply changed.
+#[derive(Serialize)]
+pub(crate) struct ReplyDto {
+    followups: Vec<FollowUp>,
+    understood: Vec<ReviewEdit>,
+    /// `"local"` when the reply was read without a model.
+    via: &'static str,
+}
+
+/// Applies a plain-words correction ("1 and 4 are mine. Drop 5.") to the review's follow-ups.
+#[tauri::command]
+pub(crate) async fn intel_review_reply(app: AppHandle, reply: String) -> Result<ReplyDto, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let followups = state
+            .intel
+            .review
+            .lock()
+            .map_err(|_| "state lock poisoned".to_owned())?
+            .as_ref()
+            .map(|(_, f)| f.clone())
+            .ok_or("no review in progress")?;
+        let (edits, via) = match parse_reply(&reply, followups.len()) {
+            Some(edits) => (edits, "local"),
+            None => (
+                interpret_reply(
+                    &FallbackBackend::codex_then_claude(),
+                    &CancelToken::new(),
+                    &followups,
+                    &reply,
+                    std::time::Duration::from_secs(120),
+                )
+                .map_err(|e| e.to_string())?,
+                "model",
+            ),
+        };
+        let mut guard = state
+            .intel
+            .review
+            .lock()
+            .map_err(|_| "state lock poisoned".to_owned())?;
+        let (_, list) = guard.as_mut().ok_or("no review in progress")?;
+        apply_edits(list, &edits);
+        Ok(ReplyDto {
+            followups: list.clone(),
+            understood: edits,
+            via,
+        })
+    })
+    .await
+    .map_err(|e| format!("review task failed: {e}"))?
+}
+
+/// Sets one follow-up's class directly (the list's chips).
+#[tauri::command]
+pub(crate) fn intel_review_set(
+    state: State<'_, AppState>,
+    n: usize,
+    class: FollowUpClass,
+) -> Result<Vec<FollowUp>, String> {
+    let mut guard = state
+        .intel
+        .review
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())?;
+    let (_, list) = guard.as_mut().ok_or("no review in progress")?;
+    apply_edits(list, &[ReviewEdit { n, class }]);
+    Ok(list.clone())
+}
+
+/// Applies the reviewed follow-ups to the saved meeting's state (appended to its log) and ends the
+/// review. Returns how many state changes that made.
+#[tauri::command]
+pub(crate) fn intel_review_apply(state: State<'_, AppState>) -> Result<usize, String> {
+    let (id, followups) = state
+        .intel
+        .review
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())?
+        .clone()
+        .ok_or("no review in progress")?;
+    let mut library = state
+        .library
+        .lock()
+        .map_err(|_| "library lock poisoned".to_owned())?;
+    let count = apply_review(&mut library, &id, &followups, now_ms())?;
+    // Applied once: a second apply would add the same new items again.
+    if let Ok(mut slot) = state.intel.review.lock() {
+        *slot = None;
+    }
+    Ok(count)
+}
+
+/// [`intel_review_apply`] against a library, for tests.
+fn apply_review(
+    library: &mut Library,
+    id: &str,
+    followups: &[FollowUp],
+    now: i64,
+) -> Result<usize, String> {
+    let mut log = stored_log(library, id)?;
+    let meeting = MeetingState::replay(id, &log).map_err(|e| e.to_string())?;
+    let ops = review_ops(&meeting, followups);
+    let count = ops.len();
+    let first = log.len() as u64;
+    log.extend(ops.into_iter().enumerate().map(|(i, op)| AppliedOp {
+        seq: first + i as u64,
+        at_ms: now,
+        op,
+    }));
+    MeetingState::replay(id, &log).map_err(|e| e.to_string())?;
+    let stored = log
+        .iter()
+        .map(|a| {
+            Ok(StoredOp {
+                seq: a.seq as i64,
+                at_ms: a.at_ms,
+                op: serde_json::to_string(&a.op).map_err(|e| e.to_string())?,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    library
+        .save_state_ops(id, &stored)
+        .map_err(|e| e.to_string())?;
+    Ok(count)
 }
 
 #[cfg(test)]
@@ -566,6 +754,65 @@ mod tests {
             words: Vec::new(),
             aux_text: None,
         }
+    }
+
+    #[test]
+    fn a_review_is_appended_to_the_saved_log() {
+        let mut library = Library::open_in_memory().unwrap();
+        let add = AppliedOp {
+            seq: 0,
+            at_ms: 1,
+            op: ResolvedOp::Add {
+                id: "COM-1".into(),
+                kind: ItemKind::Commitment,
+                text: "Send traffic numbers".into(),
+                status: EpistemicStatus::Stated,
+                confidence: 0.8,
+                source_refs: vec!["Mm:T0".into()],
+                related_items: vec![],
+                owner: None,
+                due: None,
+            },
+        };
+        library
+            .save_state_ops(
+                "m",
+                &[StoredOp {
+                    seq: 0,
+                    at_ms: 1,
+                    op: serde_json::to_string(&add.op).unwrap(),
+                }],
+            )
+            .unwrap();
+        let followups = vec![
+            FollowUp {
+                n: 1,
+                text: "Send traffic numbers".into(),
+                class: FollowUpClass::Theirs,
+                owner: None,
+                due: None,
+                source_refs: vec!["Mm:T0".into()],
+                item_id: Some("COM-1".into()),
+            },
+            FollowUp {
+                n: 2,
+                text: "Is retention 90 days?".into(),
+                class: FollowUpClass::OpenQuestion,
+                owner: None,
+                due: None,
+                source_refs: vec!["Mm:T0".into()],
+                item_id: None,
+            },
+        ];
+        assert_eq!(apply_review(&mut library, "m", &followups, 99).unwrap(), 2);
+        let log = stored_log(&library, "m").unwrap();
+        assert_eq!(log.iter().map(|a| a.seq).collect::<Vec<_>>(), [0, 1, 2]);
+        let meeting = MeetingState::replay("m", &log).unwrap();
+        assert_eq!(
+            meeting.item("COM-1").unwrap().owner.as_deref(),
+            Some("Them")
+        );
+        assert_eq!(meeting.item("Q-1").unwrap().created_at_ms, 99);
     }
 
     #[test]

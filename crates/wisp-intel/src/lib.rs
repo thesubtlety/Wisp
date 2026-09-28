@@ -14,6 +14,7 @@
 //! - [`endgame`] — wrap-up signals and the gap audit run when the meeting is closing.
 //! - [`intervene`] — proposed interventions and the conservative local filter that decides
 //!   which reach the user, with a log for tuning.
+//! - [`review`] — post-call follow-up review, corrected in plain words, applied to the state.
 //! - [`runtime`] — the live worker: final lines in over a channel that never blocks, batched
 //!   passes out, one at a time.
 //!
@@ -27,6 +28,7 @@ pub mod intervene;
 pub mod model;
 pub mod ops;
 pub mod reducer;
+pub mod review;
 pub mod runtime;
 
 pub use analyze::{
@@ -46,6 +48,10 @@ pub use intervene::{
 pub use model::{EpistemicStatus, ItemKind, Lifecycle, MeetingState, SourceRef, StateItem};
 pub use ops::{output_schema, AppliedOp, ModelOp, OpBatch, OpKind, ReplayError, ResolvedOp};
 pub use reducer::{reduce, ApplyReport, RejectReason, Rejection};
+pub use review::{
+    apply_edits, fallback_followups, generate_followups, interpret_reply, parse_reply, review_ops,
+    FollowUp, FollowUpClass, ReviewEdit,
+};
 pub use runtime::{
     remap_refs, saved_positions, Finished, IntelRuntime, IntelUpdate, NoRetrieval, Retriever,
     RuntimeConfig, TriggerPolicy, LIVE_MEETING_ID,

@@ -872,6 +872,13 @@
           startedAtMs: meetingStartedAt,
           source: "live",
         });
+        // With intelligence on, the meeting ends in a short review of its follow-ups.
+        if (intelEnabled) {
+          intel.savedMeetingId = meetingId;
+          intel.tab = "review";
+          liveIntelOpen = true;
+          liveAssistOpen = false;
+        }
       } catch (e) {
         console.error("auto-save meeting failed", e);
       }

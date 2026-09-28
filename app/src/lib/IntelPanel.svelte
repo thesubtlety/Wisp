@@ -10,6 +10,11 @@
     dismissCard,
     wrapUp,
     setScheduledEnd,
+    startReview,
+    replyReview,
+    setFollowUpClass,
+    applyReview,
+    CLASS_ORDER,
     KIND_ORDER,
     GAP_ORDER,
     type StateItem,
@@ -30,6 +35,14 @@
       : [],
   );
   let draft = $state("");
+  let reviewDraft = $state("");
+  const canReview = $derived(!running && !!intel.savedMeetingId);
+
+  function reviewMarkdown(): string {
+    return (intel.review?.followups ?? [])
+      .map((f) => `${f.n}. [${i18n.t.intel.classes[f.class]}] ${f.text}`)
+      .join("\n");
+  }
   let copiedAt = $state(-1);
   let notRunning = $state(false);
   let feedEl = $state<HTMLDivElement>();
@@ -92,6 +105,11 @@
     <button role="tab" aria-selected={intel.tab === "state"} class:on={intel.tab === "state"} onclick={() => (intel.tab = "state")}>
       {i18n.t.intel.tabState}{#if intel.items.length}<span class="count">{intel.items.length}</span>{/if}
     </button>
+    {#if canReview}
+      <button role="tab" aria-selected={intel.tab === "review"} class:on={intel.tab === "review"} onclick={() => (intel.tab = "review")}>
+        {i18n.t.intel.tabReview}
+      </button>
+    {/if}
   </div>
 
   {#if intel.tab === "insights"}
@@ -159,6 +177,79 @@
         </div>
       {/each}
     </div>
+  {:else if intel.tab === "review" && canReview}
+    <div class="feed">
+      {#if intel.reviewApplied !== null}
+        <p class="hint">{i18n.t.intel.reviewApplied(intel.reviewApplied)}</p>
+      {/if}
+      {#if !intel.review}
+        <p class="hint">{i18n.t.intel.reviewIntro}</p>
+        <div class="cactions">
+          <button class="btn primary" disabled={intel.reviewBusy} onclick={startReview}>
+            {intel.reviewBusy ? i18n.t.intel.findingFollowUps : i18n.t.intel.reviewStart}
+          </button>
+        </div>
+      {:else}
+        {#if intel.review.source === "state"}
+          <p class="warn">{i18n.t.intel.reviewFromState}</p>
+        {/if}
+        {#if !intel.review.followups.length}<p class="hint">{i18n.t.intel.noFollowUps}</p>{/if}
+        <ol class="followups">
+          {#each intel.review.followups as f (f.n)}
+            <li>
+              <p class="ftext"><span class="fn">{f.n}.</span> {f.text}</p>
+              <div class="classes">
+                {#each CLASS_ORDER as c (c)}
+                  <button class:on={f.class === c} onclick={() => setFollowUpClass(f.n, c)}>
+                    {i18n.t.intel.classes[c]}
+                  </button>
+                {/each}
+              </div>
+              {#if f.owner || f.due}
+                <p class="imeta">
+                  {#if f.owner}<span>{i18n.t.intel.owner}: {f.owner}</span>{/if}
+                  {#if f.due}<span>{i18n.t.intel.due}: {f.due}</span>{/if}
+                </p>
+              {/if}
+            </li>
+          {/each}
+        </ol>
+        {#if intel.reviewUnderstood.length}
+          <p class="hint">
+            {i18n.t.intel.understood}: {intel.reviewUnderstood
+              .map((e) => `${e.n} → ${i18n.t.intel.classes[e.class]}`)
+              .join(", ")}
+          </p>
+        {/if}
+        <div class="cactions">
+          <button class="btn primary" disabled={intel.reviewBusy} onclick={applyReview}>{i18n.t.intel.applyReview}</button>
+          <button class="copy" onclick={() => copy(30_000, reviewMarkdown())}>
+            {copiedAt === 30_000 ? i18n.t.intel.copied : i18n.t.intel.copy}
+          </button>
+        </div>
+      {/if}
+      {#if intel.reviewError}<p class="error">{intel.reviewError}</p>{/if}
+    </div>
+    {#if intel.review}
+      <div class="composer">
+        <textarea
+          rows="2"
+          placeholder={i18n.t.intel.reviewPlaceholder}
+          bind:value={reviewDraft}
+          onkeydown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              replyReview(reviewDraft).then(() => (reviewDraft = ""));
+            }
+          }}
+        ></textarea>
+        <button
+          class="btn primary"
+          disabled={!reviewDraft.trim() || intel.reviewBusy}
+          onclick={() => replyReview(reviewDraft).then(() => (reviewDraft = ""))}>{i18n.t.intel.send}</button
+        >
+      </div>
+    {/if}
   {:else if intel.tab === "ask"}
     <div class="feed" bind:this={feedEl}>
       {#if !intel.turns.length}
@@ -536,6 +627,49 @@
   .cactions {
     display: flex;
     gap: 6px;
+  }
+
+  .followups {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .ftext {
+    margin: 0;
+    font-size: 13px;
+    user-select: text;
+  }
+
+  .fn {
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .classes {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 5px;
+  }
+
+  .classes button {
+    font: inherit;
+    font-size: 11px;
+    color: var(--muted);
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 2px 8px;
+    cursor: pointer;
+  }
+
+  .classes button.on {
+    color: var(--accent);
+    border-color: var(--accent);
   }
 
   .composer {

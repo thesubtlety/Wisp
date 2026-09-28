@@ -86,6 +86,17 @@ export const GAP_ORDER: GapCategory[] = [
 
 export type Gap = { category: GapCategory; text: string; cited: string[] };
 
+export type FollowUpClass = "mine" | "theirs" | "open_question" | "not_a_task" | "project_memory";
+export const CLASS_ORDER: FollowUpClass[] = ["mine", "theirs", "open_question", "not_a_task", "project_memory"];
+export type FollowUp = {
+  n: number;
+  text: string;
+  class: FollowUpClass;
+  owner: string | null;
+  due: string | null;
+  itemId: string | null;
+};
+
 type IntelUpdate =
   | { kind: "wrapSuggested"; trigger: "scheduled" | "semantic" | "manual" }
   | { kind: "audit"; gaps: Gap[]; rejected: number; markdown: string; backend: string }
@@ -121,7 +132,14 @@ export const intel = $state({
   cards: [] as Card[],
   /** Cards shown since the Insights view was last open. */
   unseen: 0,
-  tab: "insights" as "insights" | "ask" | "state",
+  tab: "insights" as "insights" | "ask" | "state" | "review",
+  /** The just-saved meeting a post-call review can run on. */
+  savedMeetingId: "",
+  review: null as null | { followups: FollowUp[]; source: "model" | "state"; note: string | null },
+  reviewBusy: false,
+  reviewError: "",
+  reviewUnderstood: [] as { n: number; class: FollowUpClass }[],
+  reviewApplied: null as null | number,
   /** An advisory "looks like you're wrapping up", until acted on or dismissed. */
   wrapSuggested: null as null | "scheduled" | "semantic" | "manual",
   endgame: false,
@@ -181,6 +199,70 @@ export function resetIntel() {
   intel.auditing = false;
   intel.audit = null;
   intel.scheduledEnd = "";
+  intel.savedMeetingId = "";
+  intel.review = null;
+  intel.reviewBusy = false;
+  intel.reviewError = "";
+  intel.reviewUnderstood = [];
+  intel.reviewApplied = null;
+}
+
+/** Proposes the saved meeting's follow-ups. */
+export async function startReview() {
+  if (!intel.savedMeetingId) return;
+  intel.reviewBusy = true;
+  intel.reviewError = "";
+  intel.reviewApplied = null;
+  try {
+    intel.review = await invoke("intel_review_start", { id: intel.savedMeetingId });
+  } catch (e) {
+    intel.reviewError = String(e);
+  } finally {
+    intel.reviewBusy = false;
+  }
+}
+
+/** Applies a plain-words correction to the follow-ups. */
+export async function replyReview(reply: string) {
+  if (!intel.review || !reply.trim()) return;
+  intel.reviewBusy = true;
+  intel.reviewError = "";
+  try {
+    const r = await invoke<{ followups: FollowUp[]; understood: { n: number; class: FollowUpClass }[] }>(
+      "intel_review_reply",
+      { reply },
+    );
+    intel.review.followups = r.followups;
+    intel.reviewUnderstood = r.understood;
+  } catch (e) {
+    intel.reviewError = String(e);
+  } finally {
+    intel.reviewBusy = false;
+  }
+}
+
+/** Sets one follow-up's class. */
+export async function setFollowUpClass(n: number, cls: FollowUpClass) {
+  if (!intel.review) return;
+  try {
+    intel.review.followups = await invoke<FollowUp[]>("intel_review_set", { n, class: cls });
+  } catch (e) {
+    intel.reviewError = String(e);
+  }
+}
+
+/** Applies the reviewed follow-ups to the meeting's state. */
+export async function applyReview() {
+  intel.reviewBusy = true;
+  try {
+    intel.reviewApplied = await invoke<number>("intel_review_apply");
+    intel.review = null;
+    intel.reviewUnderstood = [];
+  } catch (e) {
+    intel.reviewError = String(e);
+  } finally {
+    intel.reviewBusy = false;
+  }
 }
 
 /** Wrapping Up: enter endgame and audit what's still open. Recording goes on. */
