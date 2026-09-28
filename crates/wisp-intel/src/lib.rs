@@ -17,6 +17,7 @@
 //!   which reach the user, with a log for tuning.
 //! - [`learning`] — end-of-meeting proposals for project memory, with hashed provenance.
 //! - [`review`] — post-call follow-up review, corrected in plain words, applied to the state.
+//! - [`screenshot`] — a screenshot attached as context, described once by a vision backend.
 //! - [`runtime`] — the live worker: final lines in over a channel that never blocks, batched
 //!   passes out, one at a time.
 //!
@@ -34,6 +35,7 @@ pub mod ops;
 pub mod reducer;
 pub mod review;
 pub mod runtime;
+pub mod screenshot;
 
 pub use analyze::{
     analyze_now, prepare_observe, retrieval_text, AnalyzeInput, AnalyzeOutcome, IntelError,
@@ -62,3 +64,4 @@ pub use runtime::{
     remap_refs, saved_positions, Finished, IntelRuntime, IntelUpdate, NoRetrieval, Retriever,
     RuntimeConfig, TriggerPolicy, LIVE_MEETING_ID,
 };
+pub use screenshot::{describe_screenshot, ScreenshotDescription, ScreenshotInput};

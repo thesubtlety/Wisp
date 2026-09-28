@@ -138,6 +138,7 @@ pub fn prepare_learning(input: &LearningInput) -> (ReasoningRequest, EvidencePac
             context,
             output_schema: learning_schema(),
             timeout: input.timeout,
+            images: Vec::new(),
         },
         packet,
     )

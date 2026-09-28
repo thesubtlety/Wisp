@@ -48,6 +48,7 @@ fn main() {
             }
         }),
         timeout: Duration::from_secs(180),
+        images: Vec::new(),
     };
     match backend.invoke(&request, &CancelToken::new()) {
         Ok(resp) => println!(

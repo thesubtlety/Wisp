@@ -172,6 +172,8 @@ enum Msg {
     Dismiss(String),
     WrapUp,
     SetScheduledEnd(Option<i64>),
+    Pin(Snippet),
+    Unpin(String),
     Stop,
 }
 
@@ -235,6 +237,7 @@ impl IntelRuntime {
                     failures: 0,
                     snapshot: worker_snapshot,
                     filter: InterventionFilter::new(config_interventions),
+                    pinned: Vec::new(),
                     endgame: None,
                     wrap_suggested: false,
                 }
@@ -277,6 +280,17 @@ impl IntelRuntime {
     /// Sets (or clears) when the meeting is scheduled to end, in epoch ms.
     pub fn set_scheduled_end(&self, end_ms: Option<i64>) {
         let _ = self.tx.send(Msg::SetScheduledEnd(end_ms));
+    }
+
+    /// Adds context the user attached (a described screenshot) to every later pass and audit,
+    /// ahead of retrieval. Pinning the same ref again replaces it.
+    pub fn pin(&self, snippet: Snippet) {
+        let _ = self.tx.send(Msg::Pin(snippet));
+    }
+
+    /// Drops pinned context by its ref (the user removed the screenshot).
+    pub fn unpin(&self, ref_id: impl Into<String>) {
+        let _ = self.tx.send(Msg::Unpin(ref_id.into()));
     }
 
     /// Records that the user dismissed a card, so the filter holds back repeats.
@@ -341,6 +355,8 @@ struct Worker {
     /// Shared copy of `state`, refreshed after each pass.
     snapshot: Arc<Mutex<Snapshot>>,
     filter: InterventionFilter,
+    /// Context the user attached during the meeting, in every pass.
+    pinned: Vec<Snippet>,
     /// Set once the user presses Wrapping Up.
     endgame: Option<EndgameTrigger>,
     /// Whether the advisory wrap-up suggestion has been sent.
@@ -380,6 +396,11 @@ impl Worker {
                     }
                     Msg::WrapUp => wrap_up = true,
                     Msg::SetScheduledEnd(end) => self.config.scheduled_end_ms = end,
+                    Msg::Pin(snippet) => {
+                        self.pinned.retain(|p| p.ref_id != snippet.ref_id);
+                        self.pinned.push(snippet);
+                    }
+                    Msg::Unpin(ref_id) => self.pinned.retain(|p| p.ref_id != ref_id),
                     Msg::Stop => stop = true,
                 }
             }
@@ -460,11 +481,11 @@ impl Worker {
                 .join(" ");
             text.chars().take(1500).collect::<String>()
         };
-        let retrieved = if query.is_empty() {
+        let retrieved = self.with_pins(if query.is_empty() {
             Vec::new()
         } else {
             self.retriever.retrieve(&query)
-        };
+        });
         let result = audit(
             self.backend.as_ref(),
             &self.cancel,
@@ -489,6 +510,17 @@ impl Worker {
         }
     }
 
+    /// The pinned context first, then what retrieval found that isn't pinned.
+    fn with_pins(&self, retrieved: Vec<Snippet>) -> Vec<Snippet> {
+        let mut out = self.pinned.clone();
+        out.extend(
+            retrieved
+                .into_iter()
+                .filter(|r| !self.pinned.iter().any(|p| p.ref_id == r.ref_id)),
+        );
+        out
+    }
+
     fn pending_chars(&self) -> usize {
         let start = self
             .state
@@ -502,11 +534,11 @@ impl Worker {
     fn pass(&mut self) {
         self.last_pass = Some(Instant::now());
         let query = retrieval_text(&self.state, &self.lines);
-        let retrieved = if query.is_empty() {
+        let retrieved = self.with_pins(if query.is_empty() {
             Vec::new()
         } else {
             self.retriever.retrieve(&query)
-        };
+        });
         let input = AnalyzeInput {
             transcript: &self.lines,
             retrieved: &retrieved,
@@ -728,6 +760,7 @@ mod tests {
             failures: 0,
             snapshot: Arc::new(Mutex::new(Snapshot::default())),
             filter: InterventionFilter::default(),
+            pinned: Vec::new(),
             endgame: None,
             wrap_suggested: false,
         };
@@ -950,6 +983,58 @@ mod tests {
         );
         let ctx = backend.requests.lock().unwrap()[0].context.clone();
         assert!(ctx.contains("[D3:C0] spec.md, line 1\nEU only"));
+    }
+
+    #[test]
+    fn pinned_context_reaches_every_later_pass_once() {
+        let snippet = |text: &str| Snippet {
+            ref_id: "S7:C0".into(),
+            origin: wisp_library::SnippetOrigin::Source {
+                source_id: 7,
+                chunk_idx: 0,
+                label: "Screenshot · 14:03".into(),
+                line_start: Some(1),
+            },
+            text: text.into(),
+            score: 0.0,
+        };
+        let backend = Arc::new(ScriptedBackend::with_responder("s", |_| {
+            Ok(json!({"ops": [], "candidates": []}))
+        }));
+        let (seen, on_update) = collect();
+        let rt = IntelRuntime::spawn(
+            backend.clone(),
+            Box::new(NoRetrieval),
+            RuntimeConfig {
+                policy: fast_policy(),
+                ..RuntimeConfig::default()
+            },
+            on_update,
+            Box::new(|| 0),
+        );
+        rt.pin(snippet("Screenshot (not described yet)"));
+        rt.pin(snippet("Diagram: two regions, EU and US"));
+        rt.push_final("Them", 0, "As you can see on the slide.");
+        wait_for(&seen, 1);
+        rt.push_final("Them", 1000, "Both regions are active.");
+        wait_for(&seen, 2);
+        rt.unpin("S7:C0");
+        rt.push_final("Them", 2000, "Moving on to the rollout plan now.");
+        wait_for(&seen, 3);
+        rt.stop();
+        let requests = backend.requests.lock().unwrap();
+        assert!(
+            !requests[2].context.contains("Screenshot · 14:03"),
+            "unpinned"
+        );
+        for req in &requests[..2] {
+            assert_eq!(req.context.matches("Screenshot · 14:03").count(), 1);
+            assert!(req.context.contains("Diagram: two regions"));
+            assert!(
+                !req.context.contains("not described yet"),
+                "a re-pin replaces"
+            );
+        }
     }
 
     #[test]

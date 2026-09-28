@@ -83,6 +83,7 @@ mod tests {
             context: "[T1] hello".into(),
             output_schema: serde_json::json!({"type": "object"}),
             timeout: Duration::from_secs(1),
+            images: Vec::new(),
         };
         let ws = Workspace::create(&req).unwrap();
         let root = ws.path().to_path_buf();
@@ -113,6 +114,7 @@ mod tests {
             context: "verbatim transcript".into(),
             output_schema: serde_json::json!({}),
             timeout: Duration::from_secs(1),
+            images: Vec::new(),
         };
         let ws = Workspace::create(&req).unwrap();
         let mode = fs::metadata(ws.path()).unwrap().permissions().mode() & 0o777;

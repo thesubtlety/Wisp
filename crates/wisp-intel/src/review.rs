@@ -162,6 +162,7 @@ pub fn prepare_followups(
             context,
             output_schema: followups_schema(),
             timeout,
+            images: Vec::new(),
         },
         packet,
     )
@@ -374,6 +375,7 @@ pub fn interpret_reply(
             }}}
         }),
         timeout,
+        images: Vec::new(),
     };
     let response = backend.invoke(&request, cancel)?;
     let raw: Raw = serde_json::from_value(response.output)

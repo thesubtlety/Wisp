@@ -309,6 +309,7 @@ pub fn prepare_audit(input: &AuditInput) -> (ReasoningRequest, EvidencePacket) {
             context,
             output_schema: audit_schema(),
             timeout: input.timeout,
+            images: Vec::new(),
         },
         packet,
     )

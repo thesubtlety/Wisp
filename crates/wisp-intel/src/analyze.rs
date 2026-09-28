@@ -204,6 +204,7 @@ pub fn prepare_observe(
             context,
             output_schema: output_schema(),
             timeout: input.timeout,
+            images: Vec::new(),
         },
         packet,
         through: new.last().map(|l| l.idx),

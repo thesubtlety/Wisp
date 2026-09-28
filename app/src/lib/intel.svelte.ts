@@ -186,9 +186,47 @@ export const intel = $state({
   auditing: false,
   audit: null as null | { gaps: Gap[]; rejected: number; markdown: string },
   scheduledEnd: "",
+  /** Screenshots attached to this meeting. */
+  context: [] as ContextShot[],
+  contextBusy: false,
+  contextError: "",
 });
 
+export type ContextShot = {
+  sourceId: number;
+  label: string;
+  title: string | null;
+  status: "describing" | "described" | "undescribed";
+  note: string | null;
+};
+
+/** Shown next to Capture context; the backend registers it only during a meeting. */
+export const CAPTURE_SHORTCUT = "⌘⌥⇧C";
+
+async function attaching(run: () => Promise<unknown>) {
+  intel.contextBusy = true;
+  intel.contextError = "";
+  try {
+    await run();
+  } catch (e) {
+    intel.contextError = String(e);
+  } finally {
+    intel.contextBusy = false;
+  }
+}
+
+/** Capture Context: the system's region/window screenshot. */
+export const captureContext = () => attaching(() => invoke("capture_context"));
+/** Attach an image file the user picks. */
+export const importContext = () => attaching(() => invoke("import_context_image"));
+/** Attach a pasted image. */
+export const pasteContext = (image: Blob) =>
+  attaching(async () => invoke("paste_context_image", new Uint8Array(await image.arrayBuffer())));
+export const describeContext = (sourceId: number) => attaching(() => invoke("describe_context", { sourceId }));
+export const removeContext = (sourceId: number) => attaching(() => invoke("remove_context", { sourceId }));
+
 let listening: Promise<unknown> | null = null;
+let listeningContext: Promise<unknown> | null = null;
 
 export type ExportKind = "record" | "packet" | "json";
 
@@ -226,6 +264,9 @@ export async function saveExport(kind: ExportKind, running: boolean, liveTitle: 
 
 /** Starts listening for pass results (once per page load). */
 export function ensureIntelListener(): Promise<unknown> {
+  listeningContext ??= listen<ContextShot[]>("intel://context", (e) => {
+    intel.context = e.payload;
+  });
   listening ??= listen<IntelUpdate>("intel://update", (e) => {
     const u = e.payload;
     intel.analyzing = false;
@@ -275,6 +316,8 @@ export function resetIntel() {
   intel.scheduledEnd = "";
   intel.savedMeetingId = "";
   intel.exportNote = "";
+  intel.context = [];
+  intel.contextError = "";
   intel.review = null;
   intel.reviewBusy = false;
   intel.reviewError = "";

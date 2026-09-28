@@ -15,6 +15,9 @@
   import IntelPanel from "$lib/IntelPanel.svelte";
   import {
     ensureIntelListener,
+    captureContext,
+    pasteContext,
+    CAPTURE_SHORTCUT,
     resetIntel,
     intel,
     wrapUp,
@@ -845,6 +848,7 @@
           assist: true,
           intel: intelEnabled,
           projectId: intelEnabled && intel.projectId ? intel.projectId : null,
+          meetingLabel: i18n.t.library.newNoteTitle(new Date().toLocaleString()),
         },
       });
       liveNotice = notice ?? "";
@@ -1407,6 +1411,25 @@
       window.removeEventListener("focus", onFocus);
     };
   });
+  // A pasted image during a meeting with intelligence on is screenshot context, unless it's going
+  // into a text field.
+  function onPaste(e: ClipboardEvent) {
+    if (!intelEnabled || !running || !intel.projectId) return;
+    const target = e.target as HTMLElement | null;
+    if (target?.closest("input, textarea, [contenteditable='true']")) return;
+    const image = [...(e.clipboardData?.items ?? [])].find((i) => i.type.startsWith("image/"))?.getAsFile();
+    if (!image) return;
+    e.preventDefault();
+    pasteContext(image);
+    liveIntelOpen = true;
+    liveAssistOpen = false;
+    intel.tab = "state";
+  }
+  onMount(() => {
+    window.addEventListener("paste", onPaste);
+    return () => window.removeEventListener("paste", onPaste);
+  });
+
   onDestroy(() => {
     unlisten?.();
     liveErrorUnlisten?.();
@@ -2054,6 +2077,14 @@
                     liveIntelOpen = true;
                     liveAssistOpen = false;
                   }}>{i18n.t.intel.wrapUp}</button
+                >
+                <button
+                  class="capture-btn"
+                  disabled={!intel.projectId || intel.contextBusy}
+                  title={intel.projectId
+                    ? i18n.t.intel.captureTitle(CAPTURE_SHORTCUT)
+                    : i18n.t.intel.captureNeedsProject}
+                  onclick={() => captureContext()}>{i18n.t.intel.capture}</button
                 >
               {/if}
               {#if intelEnabled && (running || liveSegments.length)}
@@ -4248,7 +4279,8 @@
   }
 
   /* Wrapping Up: always there during a live meeting with intelligence on; accent once in endgame. */
-  .wrap-btn {
+  .wrap-btn,
+  .capture-btn {
     font-family: inherit;
     font-size: 13px;
     font-weight: 600;
@@ -4260,7 +4292,13 @@
     cursor: pointer;
   }
 
+  .capture-btn:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+
   .wrap-btn:hover,
+  .capture-btn:not(:disabled):hover,
   .wrap-btn.on {
     color: var(--accent);
     border-color: var(--accent);

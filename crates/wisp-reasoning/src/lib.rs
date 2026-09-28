@@ -24,8 +24,9 @@ mod scripted;
 mod workspace;
 
 pub use backend::{
-    render_prompt, CancelToken, Capabilities, Health, ReasoningBackend, ReasoningError,
-    ReasoningRequest, ReasoningResponse, TaskKind,
+    check_images, image_media_type, render_prompt, CancelToken, Capabilities, Health,
+    ReasoningBackend, ReasoningError, ReasoningRequest, ReasoningResponse, TaskKind,
+    MAX_IMAGE_BYTES,
 };
 pub use claude::{ClaudeCodeBackend, ClaudeConfig};
 pub use codex::{CodexCliBackend, CodexConfig};

@@ -10,6 +10,8 @@ repository.workspace = true
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Images go to `claude -p` inline, base64-encoded.
+base64 = "0.22"
 thiserror.workspace = true
 # The workspace dir for each call: 0700, deleted on drop.
 tempfile = "3"

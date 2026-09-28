@@ -20,6 +20,9 @@
     deleteMemory,
     copyExport,
     saveExport,
+    importContext,
+    describeContext,
+    removeContext,
     type ExportKind,
     CLASS_ORDER,
     KIND_ORDER,
@@ -395,6 +398,40 @@
       </div>
     {/if}
     <div class="feed">
+      {#if intel.context.length || intel.contextError || (running && intel.projectId)}
+        <section class="group shots">
+          <h4>
+            {i18n.t.intel.screenshots}
+            <button class="linkish" disabled={intel.contextBusy} onclick={() => importContext()}
+              >{i18n.t.intel.importImage}</button
+            >
+          </h4>
+          {#if intel.contextError}
+            <p class="hint error">{i18n.t.intel.contextFailed(intel.contextError)}</p>
+          {:else if !intel.context.length}
+            <p class="hint">{i18n.t.intel.screenshotsHint}</p>
+          {/if}
+          {#each intel.context as shot (shot.sourceId)}
+            <div class="item">
+              <p class="itext">{shot.title ?? i18n.t.intel.screenshot}</p>
+              <p class="imeta">
+                <span>{shot.label}</span>
+                {#if shot.status === "describing"}
+                  <span>{i18n.t.intel.describing}</span>
+                {:else if shot.status === "undescribed"}
+                  <span class="lc" title={shot.note ?? ""}>{i18n.t.intel.undescribed}</span>
+                  <button class="linkish" onclick={() => describeContext(shot.sourceId)}
+                    >{i18n.t.intel.describeAgain}</button
+                  >
+                {/if}
+                <button class="linkish" aria-label={i18n.t.intel.removeShot} onclick={() => removeContext(shot.sourceId)}
+                  >×</button
+                >
+              </p>
+            </div>
+          {/each}
+        </section>
+      {/if}
       {#if !groups.length}
         <p class="hint">{i18n.t.intel.stateEmpty}</p>
       {/if}

@@ -1,8 +1,9 @@
+use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::backend::{
-    finish, truncate, CancelToken, Capabilities, Health, ReasoningBackend, ReasoningError,
-    ReasoningRequest, ReasoningResponse,
+    check_images, finish, truncate, CancelToken, Capabilities, Health, ReasoningBackend,
+    ReasoningError, ReasoningRequest, ReasoningResponse,
 };
 use crate::runner::{run_command, CommandSpec, SUBSCRIPTION_STRIPPED_ENV};
 use crate::workspace::Workspace;
@@ -42,11 +43,19 @@ impl CodexCliBackend {
         Self { config }
     }
 
-    pub fn command(&self, ws: &Workspace, prompt: String) -> CommandSpec {
+    pub fn command(&self, ws: &Workspace, prompt: String, images: &[PathBuf]) -> CommandSpec {
         let c = &self.config;
-        let mut spec = crate::locate::cli_spec(&c.program)
-            .args(["exec", "--ephemeral", "--skip-git-repo-check"])
-            .args(["--sandbox", "read-only", "--color", "never"]);
+        let mut spec = crate::locate::cli_spec(&c.program).args([
+            "exec",
+            "--ephemeral",
+            "--skip-git-repo-check",
+        ]);
+        // `--image=<file>` binds one value each, so the variadic flag can't swallow the `-` that
+        // reads the prompt from stdin.
+        for image in images {
+            spec = spec.arg(format!("--image={}", image.display()));
+        }
+        spec = spec.args(["--sandbox", "read-only", "--color", "never"]);
         if c.ignore_user_config {
             spec = spec.args(["--ignore-user-config", "--ignore-rules"]);
         }
@@ -125,8 +134,9 @@ impl ReasoningBackend for CodexCliBackend {
         req: &ReasoningRequest,
         cancel: &CancelToken,
     ) -> Result<ReasoningResponse, ReasoningError> {
+        check_images(req)?;
         let ws = Workspace::create(req)?;
-        let spec = self.command(&ws, crate::render_prompt(req));
+        let spec = self.command(&ws, crate::render_prompt(req), &req.images);
         let out = run_command(&spec, req.timeout, cancel)?;
         if out.code != Some(0) {
             return Err(ReasoningError::Process {
@@ -191,6 +201,7 @@ mod tests {
             context: "y".into(),
             output_schema: serde_json::json!({"type": "object", "required": ["ok"]}),
             timeout: Duration::from_secs(5),
+            images: Vec::new(),
         }
     }
 
@@ -201,7 +212,7 @@ mod tests {
             ..Default::default()
         });
         let ws = Workspace::create(&req()).unwrap();
-        let spec = b.command(&ws, "p".into());
+        let spec = b.command(&ws, "p".into(), &[]);
         let a = spec.args.join(" ");
         assert!(a.starts_with("exec --ephemeral --skip-git-repo-check --sandbox read-only"));
         assert!(a.contains("--ignore-user-config --ignore-rules"));
@@ -222,7 +233,31 @@ mod tests {
             ..Default::default()
         });
         let ws = Workspace::create(&req()).unwrap();
-        assert!(b.command(&ws, "p".into()).env_remove.is_empty());
+        assert!(b.command(&ws, "p".into(), &[]).env_remove.is_empty());
+    }
+
+    #[test]
+    fn images_bind_one_value_each_and_stdin_stays_last() {
+        let b = CodexCliBackend::new(CodexConfig::default());
+        let ws = Workspace::create(&req()).unwrap();
+        let spec = b.command(
+            &ws,
+            "p".into(),
+            &[PathBuf::from("/tmp/a.png"), PathBuf::from("/tmp/b.jpg")],
+        );
+        let a = &spec.args;
+        assert_eq!(
+            &a[..5],
+            [
+                "exec",
+                "--ephemeral",
+                "--skip-git-repo-check",
+                "--image=/tmp/a.png",
+                "--image=/tmp/b.jpg"
+            ]
+        );
+        assert_eq!(a[5], "--sandbox");
+        assert_eq!(a.last().unwrap(), "-");
     }
 
     #[test]

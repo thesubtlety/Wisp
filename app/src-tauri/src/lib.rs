@@ -58,6 +58,7 @@ use wisp_pipeline::{
 use wisp_screencapture::ScreenCaptureSource;
 
 mod assist;
+mod context;
 mod dictation;
 mod intel;
 mod permissions;
@@ -2804,6 +2805,9 @@ struct LiveOptions {
     /// knowledge into the intelligence passes.
     #[serde(default)]
     project_id: Option<String>,
+    /// How screenshot labels name this meeting ("Note · 9/28/2026, 2:03 PM").
+    #[serde(default)]
+    meeting_label: Option<String>,
 }
 
 /// Resolves the engine a live session will run from `options` + app state: an on-device model, or a
@@ -2924,7 +2928,11 @@ fn start_session_blocking(app: AppHandle, options: LiveOptions) -> Result<Option
     // first; that keeps its line numbers aligned with the saved transcript.
     intel::reset(&state);
     if options.intel {
-        intel::start(&app, options.project_id.clone());
+        intel::start(
+            &app,
+            options.project_id.clone(),
+            options.meeting_label.clone(),
+        );
     }
     // A start that fails from here on drops the runtime it just made.
     let mut intel_guard = intel::StartGuard::new(&state);
@@ -3191,6 +3199,7 @@ fn stop_session_blocking(app: AppHandle) -> Result<(), String> {
     };
     // After capture, so the runtime has had every final; cancels a pass in flight.
     intel::stop(&state);
+    context::end(&app);
     result
 }
 
@@ -4423,6 +4432,12 @@ pub fn run() {
             intel::intel_analyze_now,
             intel::intel_saved_items,
             intel::intel_export,
+            context::capture_context,
+            context::paste_context_image,
+            context::import_context_image,
+            context::list_context,
+            context::describe_context,
+            context::remove_context,
             intel::intel_export_save,
             intel::intel_ask,
             intel::intel_ask_cancel,

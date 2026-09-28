@@ -50,7 +50,7 @@ impl RetentionPolicy {
     pub fn source_expiry(&self, kind: SourceKind, added_at_ms: i64) -> Option<i64> {
         match kind {
             SourceKind::File => None,
-            SourceKind::Pasted | SourceKind::Managed => self
+            SourceKind::Pasted | SourceKind::Managed | SourceKind::Screenshot => self
                 .temp_source_days
                 .map(|d| added_at_ms.saturating_add(i64::from(d) * DAY_MS)),
         }
@@ -64,8 +64,11 @@ pub enum SourceKind {
     File,
     /// Text pasted into the app. Temporary.
     Pasted,
-    /// A copy the app owns (an import, a screenshot's text). Temporary; the file is deleted too.
+    /// A copy the app owns (an import). Temporary; the file is deleted too.
     Managed,
+    /// A screenshot the user captured or pasted as context: the app-owned image, indexed by its
+    /// description. Temporary like other copies; the image is deleted too.
+    Screenshot,
 }
 
 impl SourceKind {
@@ -74,6 +77,7 @@ impl SourceKind {
             SourceKind::File => "file",
             SourceKind::Pasted => "pasted",
             SourceKind::Managed => "managed",
+            SourceKind::Screenshot => "screenshot",
         }
     }
 }
@@ -144,7 +148,7 @@ impl Library {
         let sources = tx.execute(
             "UPDATE source SET expires_at_ms =
                  CASE WHEN ?1 IS NULL THEN NULL ELSE added_at_ms + ?1 END
-             WHERE kind IN ('pasted', 'managed')",
+             WHERE kind IN ('pasted', 'managed', 'screenshot')",
             [source_ms],
         )?;
         tx.commit()?;
@@ -168,7 +172,7 @@ impl Library {
             None => 0,
             Some(d) => self.conn.query_row(
                 "SELECT count(*) FROM source
-                 WHERE kind IN ('pasted', 'managed') AND added_at_ms + ?1 <= ?2",
+                 WHERE kind IN ('pasted', 'managed', 'screenshot') AND added_at_ms + ?1 <= ?2",
                 rusqlite::params![i64::from(d) * DAY_MS, now_ms],
                 |r| r.get::<_, i64>(0),
             )? as usize,
@@ -298,16 +302,63 @@ impl Library {
         }
     }
 
+    /// Replaces a source's text (a screenshot's description once it arrives): re-chunks and
+    /// re-embeds it, keeping the source's id, kind and expiry. Returns `false` if it's gone.
+    pub fn replace_source_text(&mut self, source_id: i64, text: &str) -> Result<bool> {
+        let chunks = embed::chunk_document(text, SOURCE_CHUNK_CHARS);
+        let texts: Vec<&str> = chunks.iter().map(|c| c.text.as_str()).collect();
+        let vectors = self.embed_exact(&texts)?;
+        let sha256 = hex(&Sha256::digest(text.as_bytes()));
+        let tx = self.conn.transaction()?;
+        let found = tx.execute(
+            "UPDATE source SET sha256 = ?2 WHERE id = ?1",
+            rusqlite::params![source_id, sha256],
+        )?;
+        if found == 0 {
+            return Ok(false);
+        }
+        tx.execute("DELETE FROM source_chunk WHERE source_id = ?1", [source_id])?;
+        for (i, chunk) in chunks.iter().enumerate() {
+            let vector = vectors.as_ref().and_then(|v| v.get(i));
+            tx.execute(
+                "INSERT INTO source_chunk (source_id, idx, text, embedding, line_start)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    source_id,
+                    i as i64,
+                    chunk.text,
+                    vector,
+                    chunk.line_start as i64
+                ],
+            )?;
+        }
+        tx.commit()?;
+        self.after_delete()?;
+        Ok(true)
+    }
+
+    /// One source by id.
+    pub fn get_source(&self, source_id: i64) -> Result<Option<Source>> {
+        Ok(self
+            .sources_where("WHERE s.id = ?1", [source_id])?
+            .into_iter()
+            .next())
+    }
+
     /// A project's sources, newest first.
     pub fn list_sources(&self, project_id: &str) -> Result<Vec<Source>> {
-        let mut stmt = self.conn.prepare(
+        self.sources_where("WHERE s.project_id = ?1", [project_id])
+    }
+
+    fn sources_where(&self, filter: &str, params: impl rusqlite::Params) -> Result<Vec<Source>> {
+        let mut stmt = self.conn.prepare(&format!(
             "SELECT s.id, s.project_id, s.kind, s.label, s.origin_path, s.managed_path, s.sha256,
                     s.added_at_ms, s.expires_at_ms,
                     (SELECT count(*) FROM source_chunk c WHERE c.source_id = s.id)
-             FROM source s WHERE s.project_id = ?1 ORDER BY s.added_at_ms DESC, s.id DESC",
-        )?;
+             FROM source s {filter} ORDER BY s.added_at_ms DESC, s.id DESC"
+        ))?;
         let rows = stmt
-            .query_map([project_id], |r| {
+            .query_map(params, |r| {
                 Ok(Source {
                     id: r.get(0)?,
                     project_id: r.get(1)?,
@@ -759,6 +810,59 @@ mod tests {
             1,
             "expired chunks left the full-text index"
         );
+    }
+
+    #[test]
+    fn a_screenshot_is_temporary_its_description_is_searchable_and_its_image_goes_with_it() {
+        let mut lib = library_with_meeting();
+        lib.create_project("p1", "Acme", T0).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let image = root.path().join("shot.png");
+        std::fs::write(&image, "png").unwrap();
+        let id = lib
+            .add_source(
+                "p1",
+                &SourceInput {
+                    kind: SourceKind::Screenshot,
+                    label: "Screenshot · 14:03".into(),
+                    text: "Screenshot (not described yet)".into(),
+                    origin_path: None,
+                    managed_path: Some(image.clone()),
+                    added_at_ms: T0,
+                },
+            )
+            .unwrap();
+        let source = lib.get_source(id).unwrap().unwrap();
+        assert_eq!(source.kind, "screenshot");
+        assert_eq!(source.expires_at_ms, Some(T0 + 30 * DAY_MS));
+
+        assert!(lib
+            .replace_source_text(id, "Architecture diagram: web tier in Azure West Europe")
+            .unwrap());
+        let fts = |w: &str| {
+            format!("SELECT count(*) FROM source_chunk_fts WHERE source_chunk_fts MATCH '{w}'")
+        };
+        assert_eq!(count(&lib, &fts("diagram")), 1);
+        assert_eq!(count(&lib, &fts("described")), 0, "the placeholder is gone");
+        assert!(!lib.replace_source_text(999, "x").unwrap());
+
+        assert_eq!(
+            lib.preview_policy(
+                RetentionPolicy {
+                    transcript_days: None,
+                    temp_source_days: Some(7)
+                },
+                T0 + 8 * DAY_MS
+            )
+            .unwrap()
+            .1,
+            1,
+            "screenshots follow the temporary-source policy"
+        );
+        let report = lib.prune(T0 + 30 * DAY_MS, root.path()).unwrap();
+        assert_eq!(report.sources_expired, 1);
+        assert!(!image.exists(), "the image is deleted with its source");
+        assert!(lib.get_source(id).unwrap().is_none());
     }
 
     #[test]

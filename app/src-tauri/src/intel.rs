@@ -23,7 +23,7 @@ use wisp_intel::{context_packet, meeting_record, memory_ref, state_json, ExportM
 use wisp_intel::{propose_learning, LearningInput, Proposal};
 use wisp_library::{meeting_ref, Library, RetrievalQuery, Snippet, StoredLogEntry, StoredOp};
 use wisp_library::{MemoryEntry, Project};
-use wisp_reasoning::{CancelToken, FallbackBackend};
+use wisp_reasoning::{CancelToken, FallbackBackend, ReasoningBackend};
 
 use crate::AppState;
 
@@ -43,6 +43,8 @@ pub(crate) struct IntelState {
     review_project: Mutex<Vec<FollowUp>>,
     /// The project of the current (or just-finished) live meeting.
     project: Mutex<Option<String>>,
+    /// Screenshots attached to the current (or just-finished) live meeting.
+    pub(crate) context: crate::context::ContextState,
 }
 
 /// A pass result as the webview sees it.
@@ -184,7 +186,9 @@ impl Drop for StartGuard<'_> {
 }
 
 /// Starts the runtime for a new live session, using the Codex CLI and falling back to Claude Code.
-pub(crate) fn start(app: &AppHandle, project_id: Option<String>) {
+/// `meeting_label` names the meeting in screenshot labels.
+pub(crate) fn start(app: &AppHandle, project_id: Option<String>, meeting_label: Option<String>) {
+    crate::context::begin(app, project_id.clone(), meeting_label);
     let emitter = app.clone();
     let state = app.state::<AppState>();
     let memory = project_memory(&state, project_id.as_deref());
@@ -395,8 +399,20 @@ fn persist_parked(
     Ok(())
 }
 
+/// The live transcript so far, numbered as the runtime numbers it.
+pub(crate) fn recent_lines(state: &AppState) -> Vec<TranscriptLine> {
+    state
+        .live_segments
+        .lock()
+        .map(|s| live_lines(&s))
+        .unwrap_or_default()
+}
+
 /// Runs `f` on the live runtime. `false` if intelligence isn't running.
-fn with_runtime(state: &AppState, f: impl FnOnce(&IntelRuntime)) -> Result<bool, String> {
+pub(crate) fn with_runtime(
+    state: &AppState,
+    f: impl FnOnce(&IntelRuntime),
+) -> Result<bool, String> {
     let guard = state
         .intel
         .runtime
@@ -496,6 +512,12 @@ pub(crate) async fn intel_ask(
         }
         .retrieve(&question);
         let backend = FallbackBackend::codex_then_claude();
+        // Screenshots are shown only when retrieval picked them for this question.
+        let images = if backend.capabilities().vision {
+            state.intel.context.images()
+        } else {
+            Vec::new()
+        };
         let result = ask(
             &backend,
             &cancel,
@@ -506,6 +528,7 @@ pub(crate) async fn intel_ask(
                 state: &meeting,
                 retrieved: &retrieved,
                 memory: &memory,
+                images: &images,
                 timeout: std::time::Duration::from_secs(180),
             },
         )
