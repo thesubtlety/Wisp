@@ -42,10 +42,19 @@ impl TranscriptLine {
     }
 }
 
+/// What an evidence ID shows a person: where it is from, and its text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvidenceDetail {
+    /// "This meeting 03:04, Them", "security.md, line 40", "previous meeting \"Kickoff\" at 31:04".
+    pub label: String,
+    pub text: String,
+}
+
 /// The IDs a reasoning call may cite and what they stand for.
 #[derive(Debug, Clone, Default)]
 pub struct EvidencePacket {
     by_alias: BTreeMap<String, SourceRef>,
+    details: BTreeMap<String, EvidenceDetail>,
     /// Previous meetings by canonical id, in order of first appearance.
     meetings: Vec<String>,
 }
@@ -64,6 +73,11 @@ impl EvidencePacket {
             .map(|(a, _)| a.as_str())
     }
 
+    /// Where an ID is from and its text, for showing a citation.
+    pub fn detail(&self, alias: &str) -> Option<&EvidenceDetail> {
+        self.details.get(alias.trim())
+    }
+
     pub fn len(&self) -> usize {
         self.by_alias.len()
     }
@@ -77,11 +91,18 @@ impl EvidencePacket {
         let alias = format!("T{}", line.idx);
         self.by_alias
             .insert(alias.clone(), meeting_ref(meeting_id, line.idx));
+        self.details.insert(
+            alias.clone(),
+            EvidenceDetail {
+                label: format!("This meeting {}, {}", clock(line.start_ms), line.speaker),
+                text: one_line(&line.text),
+            },
+        );
         alias
     }
 
     /// The short ID for a retrieved snippet, registering it.
-    fn add_snippet(&mut self, snippet: &Snippet) -> String {
+    fn add_snippet(&mut self, snippet: &Snippet, label: &str) -> String {
         let alias = match &snippet.origin {
             SnippetOrigin::Source {
                 source_id,
@@ -104,6 +125,13 @@ impl EvidencePacket {
             }
         };
         self.by_alias.insert(alias.clone(), snippet.ref_id.clone());
+        self.details.insert(
+            alias.clone(),
+            EvidenceDetail {
+                label: label.to_owned(),
+                text: snippet.text.trim().to_owned(),
+            },
+        );
         alias
     }
 }
@@ -127,30 +155,45 @@ pub(crate) fn render_transcript(
     earlier: &[TranscriptLine],
     new: &[TranscriptLine],
 ) -> String {
-    let mut out = String::new();
-    let mut section = |title: &str, lines: &[TranscriptLine], out: &mut String| {
-        if lines.is_empty() {
-            return;
-        }
-        let _ = writeln!(out, "## {title}\n");
-        for line in lines {
-            let alias = packet.add_line(meeting_id, line);
-            let _ = writeln!(
-                out,
-                "[{alias}] {} {}: {}",
-                clock(line.start_ms),
-                line.speaker,
-                one_line(&line.text)
-            );
-        }
-        out.push('\n');
-    };
-    section(
+    let mut out = render_lines(
+        packet,
+        meeting_id,
         "Earlier in this meeting (already analyzed)",
         earlier,
-        &mut out,
     );
-    section("New in this meeting", new, &mut out);
+    out.push_str(&render_lines(
+        packet,
+        meeting_id,
+        "New in this meeting",
+        new,
+    ));
+    out
+}
+
+/// One titled section of transcript lines with their IDs; empty when there are no lines. Registers
+/// every line in `packet`.
+pub(crate) fn render_lines(
+    packet: &mut EvidencePacket,
+    meeting_id: &str,
+    title: &str,
+    lines: &[TranscriptLine],
+) -> String {
+    let mut out = String::new();
+    if lines.is_empty() {
+        return out;
+    }
+    let _ = writeln!(out, "## {title}\n");
+    for line in lines {
+        let alias = packet.add_line(meeting_id, line);
+        let _ = writeln!(
+            out,
+            "[{alias}] {} {}: {}",
+            clock(line.start_ms),
+            line.speaker,
+            one_line(&line.text)
+        );
+    }
+    out.push('\n');
     out
 }
 
@@ -161,7 +204,6 @@ pub(crate) fn render_snippets(packet: &mut EvidencePacket, snippets: &[Snippet])
     }
     let mut out = String::from("## Project context (retrieved)\n\n");
     for snippet in snippets {
-        let alias = packet.add_snippet(snippet);
         let heading = match &snippet.origin {
             SnippetOrigin::Source {
                 label, line_start, ..
@@ -173,6 +215,7 @@ pub(crate) fn render_snippets(packet: &mut EvidencePacket, snippets: &[Snippet])
                 title, start_ms, ..
             } => format!("previous meeting \"{title}\" at {}", clock(*start_ms)),
         };
+        let alias = packet.add_snippet(snippet, &heading);
         let _ = writeln!(out, "[{alias}] {heading}\n{}\n", snippet.text.trim());
     }
     out
@@ -247,6 +290,15 @@ mod tests {
         assert_eq!(p.resolve("T5"), None);
         assert_eq!(p.resolve("S17:C4"), None, "canonical refs are not citable");
         assert_eq!(p.len(), 6);
+        assert_eq!(
+            p.detail("T4"),
+            Some(&EvidenceDetail {
+                label: "This meeting 00:04, Them".into(),
+                text: "new line".into(),
+            })
+        );
+        assert_eq!(p.detail("D17:C4").unwrap().label, "security.md, line 40");
+        assert_eq!(p.detail("M1:T221").unwrap().text, "We said SAML.");
 
         assert!(
             text.contains("## Earlier in this meeting (already analyzed)\n\n[T3] 00:03 Them: old")

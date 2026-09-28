@@ -12,6 +12,8 @@
   import AiNotes from "$lib/AiNotes.svelte";
   import AssistLauncher from "$lib/AssistLauncher.svelte";
   import AssistPanel, { savedAssistWidth } from "$lib/AssistPanel.svelte";
+  import IntelPanel from "$lib/IntelPanel.svelte";
+  import { ensureIntelListener, resetIntel } from "$lib/intel.svelte";
   import Settings from "$lib/Settings.svelte";
   import Library from "$lib/Library.svelte";
   import { i18n, LOCALES } from "$lib/i18n.svelte";
@@ -766,6 +768,8 @@
   // Live meeting intelligence runs observer passes through the user's own Codex or Claude CLI, so
   // it stays off until they turn it on. Applies from the next session.
   let intelEnabled = $state(localStorage.getItem("wisp.intel") === "true");
+  // The intelligence panel shares the assist panel's slot; opening one closes the other.
+  let liveIntelOpen = $state(false);
   $effect(() => {
     localStorage.setItem("wisp.intel", String(intelEnabled));
   });
@@ -803,6 +807,10 @@
         await applyLiveDecode();
       }
       await ensureListener();
+      if (intelEnabled) {
+        resetIntel();
+        await ensureIntelListener();
+      }
       const notice = await invoke<string | null>("start_session", {
         options: {
           engine: liveEngine,
@@ -1972,12 +1980,26 @@
           <div class="pane-head">
             <span class="pane-title">{i18n.t.common.transcript}</span>
             <span class="pane-actions">
+              {#if intelEnabled && (running || liveSegments.length)}
+                <button
+                  class="intel-launch"
+                  class:on={liveIntelOpen}
+                  title={i18n.t.intel.launcherTitle}
+                  onclick={() => {
+                    liveIntelOpen = !liveIntelOpen;
+                    if (liveIntelOpen) liveAssistOpen = false;
+                  }}>{i18n.t.intel.launcher}</button
+                >
+              {/if}
               {#if running || liveSegments.length}
                 <AssistLauncher
                   on={liveAssistOpen}
                   label="Assist"
                   title="AI Assist — live hints, notes & summary"
-                  onclick={() => (liveAssistOpen = !liveAssistOpen)}
+                  onclick={() => {
+                    liveAssistOpen = !liveAssistOpen;
+                    if (liveAssistOpen) liveIntelOpen = false;
+                  }}
                 />
               {/if}
             </span>
@@ -2044,6 +2066,15 @@
             onclose={() => (liveAssistOpen = false)}
           >
             <AiNotes transcript={liveTranscriptText} live sessionRunning={running} />
+          </AssistPanel>
+        {:else if liveIntelOpen && intelEnabled && (running || segments.length)}
+          <AssistPanel
+            title={i18n.t.intel.title}
+            bind:width={assistWidth}
+            container={liveBodyEl}
+            onclose={() => (liveIntelOpen = false)}
+          >
+            <IntelPanel {running} />
           </AssistPanel>
         {/if}
       </div>
@@ -4078,6 +4109,28 @@
     display: flex;
     align-items: center;
     gap: 8px;
+  }
+
+  /* The meeting intelligence launcher: a plain pill beside Assist, accent-outlined while open. */
+  .intel-launch {
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 6px 14px;
+    cursor: pointer;
+  }
+
+  .intel-launch:hover {
+    border-color: var(--accent);
+  }
+
+  .intel-launch.on {
+    color: var(--accent);
+    border-color: var(--accent);
   }
 
   .pane-clear {
