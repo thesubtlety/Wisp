@@ -314,10 +314,14 @@ impl Library {
             [project_id],
             |r| r.get::<_, i64>(0),
         )?;
-        tx.execute(
-            "DELETE FROM state_op WHERE meeting_id IN (SELECT id FROM meeting WHERE project_id = ?1)",
-            [project_id],
-        )?;
+        for table in ["state_op", "candidate_log"] {
+            tx.execute(
+                &format!(
+                    "DELETE FROM {table} WHERE meeting_id IN (SELECT id FROM meeting WHERE project_id = ?1)"
+                ),
+                [project_id],
+            )?;
+        }
         let meetings = tx.execute("DELETE FROM meeting WHERE project_id = ?1", [project_id])?;
         tx.execute("DELETE FROM project WHERE id = ?1", [project_id])?;
         tx.commit()?;
@@ -360,6 +364,7 @@ impl Library {
         for id in &expired {
             tx.execute("DELETE FROM segment WHERE meeting_id = ?1", [id])?;
             tx.execute("DELETE FROM chunk WHERE meeting_id = ?1", [id])?;
+            tx.execute("DELETE FROM candidate_log WHERE meeting_id = ?1", [id])?;
             tx.execute(
                 "UPDATE meeting SET transcript_pruned_at_ms = ?2, segment_count = 0 WHERE id = ?1",
                 rusqlite::params![id, now_ms],

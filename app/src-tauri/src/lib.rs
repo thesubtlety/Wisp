@@ -4403,6 +4403,7 @@ pub fn run() {
             intel::intel_saved_items,
             intel::intel_ask,
             intel::intel_ask_cancel,
+            intel::intel_dismiss_card,
             assist::realtime::stop_assist_realtime,
             assist::realtime::assist_hint_now,
             transcribe_file,

@@ -1,6 +1,7 @@
-//! Storage for a meeting's state log: the ordered operations the intelligence layer applied, as
-//! opaque JSON. The library doesn't interpret them; it keeps them apart from the transcript, with
-//! their own lifetime (see `SCHEMA_V5`).
+//! Storage for a meeting's two intelligence logs, as opaque JSON the library doesn't interpret:
+//! the state log (the ordered operations applied to the meeting state; long-lived, see
+//! `SCHEMA_V5`) and the intervention log (candidates considered, decisions, dismissals;
+//! short-lived, see `SCHEMA_V6`). Both are kept apart from the transcript.
 
 use serde::{Deserialize, Serialize};
 
@@ -44,6 +45,57 @@ impl Library {
                     seq: r.get(0)?,
                     at_ms: r.get(1)?,
                     op: r.get(2)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+}
+
+/// One stored line of a meeting's intervention log.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredLogEntry {
+    pub seq: i64,
+    pub at_ms: i64,
+    /// The entry, serialized by its writer.
+    pub entry: String,
+}
+
+impl Library {
+    /// Replaces a meeting's whole intervention log with `entries`, in one transaction.
+    pub fn save_candidate_log(
+        &mut self,
+        meeting_id: &str,
+        entries: &[StoredLogEntry],
+    ) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM candidate_log WHERE meeting_id = ?1",
+            [meeting_id],
+        )?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO candidate_log (meeting_id, seq, at_ms, entry) VALUES (?1, ?2, ?3, ?4)",
+            )?;
+            for e in entries {
+                stmt.execute(rusqlite::params![meeting_id, e.seq, e.at_ms, e.entry])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// A meeting's intervention log in order; empty if it has none.
+    pub fn candidate_log(&self, meeting_id: &str) -> Result<Vec<StoredLogEntry>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT seq, at_ms, entry FROM candidate_log WHERE meeting_id = ?1 ORDER BY seq",
+        )?;
+        let rows = stmt
+            .query_map([meeting_id], |r| {
+                Ok(StoredLogEntry {
+                    seq: r.get(0)?,
+                    at_ms: r.get(1)?,
+                    entry: r.get(2)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -128,6 +180,32 @@ mod tests {
         assert!(lib.state_ops("m").unwrap().is_empty());
     }
 
+    fn entry(seq: i64) -> StoredLogEntry {
+        StoredLogEntry {
+            seq,
+            at_ms: seq,
+            entry: format!("{{\"n\":{seq}}}"),
+        }
+    }
+
+    #[test]
+    fn the_candidate_log_goes_with_the_transcript_unlike_the_state_log() {
+        let mut lib = Library::open_in_memory().unwrap();
+        save_meeting(&mut lib, "m", 0);
+        lib.save_state_ops("m", &[op(0)]).unwrap();
+        lib.save_candidate_log("m", &[entry(1), entry(0)]).unwrap();
+        assert_eq!(lib.candidate_log("m").unwrap(), [entry(0), entry(1)]);
+
+        let root = tempfile::tempdir().unwrap();
+        lib.prune(i64::MAX, root.path()).unwrap();
+        assert!(lib.candidate_log("m").unwrap().is_empty(), "short-lived");
+        assert_eq!(lib.state_ops("m").unwrap().len(), 1, "long-lived");
+
+        lib.save_candidate_log("m", &[entry(0)]).unwrap();
+        lib.delete_note("m").unwrap();
+        assert!(lib.candidate_log("m").unwrap().is_empty());
+    }
+
     #[test]
     fn deleting_a_project_removes_its_meetings_logs() {
         let mut lib = Library::open_in_memory().unwrap();
@@ -137,9 +215,11 @@ mod tests {
         lib.set_meeting_project("in", Some("p")).unwrap();
         lib.save_state_ops("in", &[op(0)]).unwrap();
         lib.save_state_ops("out", &[op(0)]).unwrap();
+        lib.save_candidate_log("in", &[entry(0)]).unwrap();
         let root = tempfile::tempdir().unwrap();
         lib.delete_project("p", root.path()).unwrap();
         assert!(lib.state_ops("in").unwrap().is_empty());
+        assert!(lib.candidate_log("in").unwrap().is_empty());
         assert_eq!(lib.state_ops("out").unwrap().len(), 1);
     }
 }

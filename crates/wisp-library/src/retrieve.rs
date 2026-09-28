@@ -808,6 +808,7 @@ mod tests {
                      ALTER TABLE chunk DROP COLUMN seg_end;
                      ALTER TABLE source_chunk DROP COLUMN line_start;
                      DROP TABLE state_op;
+                     DROP TABLE candidate_log;
                      PRAGMA user_version = 3;",
                 )
                 .unwrap();

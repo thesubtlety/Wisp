@@ -49,8 +49,30 @@ export type StateItem = {
   due: string | null;
 };
 
+export type Card = {
+  id: string;
+  score: number;
+  shownAtMs: number;
+  candidate: {
+    kind: string;
+    title: string;
+    detail: string;
+    suggestedQuestion: string | null;
+    cited: string[];
+    confidence: number;
+  };
+};
+
 type IntelUpdate =
-  | { kind: "pass"; applied: number; rejected: number; items: StateItem[]; remainingLines: number; backend: string }
+  | {
+      kind: "pass";
+      applied: number;
+      rejected: number;
+      items: StateItem[];
+      remainingLines: number;
+      backend: string;
+      cards: Card[];
+    }
   | { kind: "nothingNew" }
   | { kind: "failed"; message: string };
 
@@ -71,6 +93,9 @@ export const intel = $state({
   error: "",
   analyzing: false,
   turns: [] as AskTurn[],
+  cards: [] as Card[],
+  /** Cards shown since the Insights view was last open. */
+  unseen: 0,
 });
 
 let listening: Promise<unknown> | null = null;
@@ -82,6 +107,10 @@ export function ensureIntelListener(): Promise<unknown> {
     intel.analyzing = false;
     if (u.kind === "pass") {
       intel.items = u.items;
+      if (u.cards.length) {
+        intel.cards.push(...u.cards);
+        intel.unseen += u.cards.length;
+      }
       intel.lastPass = { applied: u.applied, rejected: u.rejected, backend: u.backend };
       intel.error = "";
       intel.note = "";
@@ -102,6 +131,14 @@ export function resetIntel() {
   intel.error = "";
   intel.analyzing = false;
   intel.turns = [];
+  intel.cards = [];
+  intel.unseen = 0;
+}
+
+/** Hides a card and tells the filter, so it holds back repeats. */
+export function dismissCard(id: string) {
+  intel.cards = intel.cards.filter((c) => c.id !== id);
+  invoke("intel_dismiss_card", { id }).catch(() => {});
 }
 
 /** Asks the runtime for a pass now. `false` if intelligence isn't running. */

@@ -13,7 +13,7 @@ use crate::retention::RetentionPolicy;
 use crate::Result;
 
 /// On-disk schema version, bumped on schema changes (drives migration via `PRAGMA user_version`).
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 /// Characters of transcript kept as a list preview.
 const PREVIEW_CHARS: usize = 160;
@@ -174,6 +174,19 @@ CREATE TABLE state_op (
 );
 ";
 
+/// Schema v6 — the intervention log: every candidate the intelligence layer considered for a
+/// meeting, what the local filter decided, and what the user dismissed, as JSON, for tuning the
+/// policy. Short-lived: it goes when the meeting's transcript expires, and with the meeting.
+pub(crate) const SCHEMA_V6: &str = "\
+CREATE TABLE candidate_log (
+    meeting_id TEXT NOT NULL,
+    seq        INTEGER NOT NULL,
+    at_ms      INTEGER NOT NULL,
+    entry      TEXT NOT NULL,
+    PRIMARY KEY (meeting_id, seq)
+);
+";
+
 /// A handle to the meeting knowledge base. Open once and reuse across queries. With no embedder it
 /// is full-text only; configure one via [`Library::set_embedder`] to enable semantic and hybrid
 /// search.
@@ -238,12 +251,13 @@ impl Library {
             .pragma_query_value(None, "user_version", |r| r.get(0))?;
         // Each step commits with its version, so a failed step leaves the database at the previous
         // version rather than half-migrated (a re-run ALTER TABLE would fail on the duplicate column).
-        let steps: [(i64, &str); 5] = [
+        let steps: [(i64, &str); 6] = [
             (1, SCHEMA_V1),
             (2, SCHEMA_V2),
             (3, SCHEMA_V3),
             (4, SCHEMA_V4),
             (5, SCHEMA_V5),
+            (6, SCHEMA_V6),
         ];
         for (step, sql) in steps {
             if version >= step {
@@ -711,6 +725,8 @@ impl Library {
     pub fn delete_note(&self, id: &str) -> Result<bool> {
         self.conn
             .execute("DELETE FROM state_op WHERE meeting_id = ?1", [id])?;
+        self.conn
+            .execute("DELETE FROM candidate_log WHERE meeting_id = ?1", [id])?;
         let affected = self
             .conn
             .execute("DELETE FROM meeting WHERE id = ?1", [id])?;

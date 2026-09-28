@@ -2,11 +2,23 @@
   // The meeting intelligence panel's body: Ask (questions answered with cited evidence, each answer
   // copyable) and State (the structured meeting state, with Analyze now). Lives inside AssistPanel.
   import { i18n } from "$lib/i18n.svelte";
-  import { intel, askQuestion, cancelAsk, analyzeNow, KIND_ORDER, type StateItem } from "$lib/intel.svelte";
+  import {
+    intel,
+    askQuestion,
+    cancelAsk,
+    analyzeNow,
+    dismissCard,
+    KIND_ORDER,
+    type StateItem,
+  } from "$lib/intel.svelte";
 
   let { running }: { running: boolean } = $props();
 
-  let tab = $state<"ask" | "state">("ask");
+  let tab = $state<"insights" | "ask" | "state">("insights");
+  // Opening Insights marks its cards seen.
+  $effect(() => {
+    if (tab === "insights" && intel.unseen) intel.unseen = 0;
+  });
   let draft = $state("");
   let copiedAt = $state(-1);
   let notRunning = $state(false);
@@ -56,6 +68,14 @@
 
 <div class="intel">
   <div class="tabs" role="tablist">
+    <button
+      role="tab"
+      aria-selected={tab === "insights"}
+      class:on={tab === "insights"}
+      onclick={() => (tab = "insights")}
+    >
+      {i18n.t.intel.tabInsights}{#if intel.cards.length}<span class="count">{intel.cards.length}</span>{/if}
+    </button>
     <button role="tab" aria-selected={tab === "ask"} class:on={tab === "ask"} onclick={() => (tab = "ask")}>
       {i18n.t.intel.tabAsk}
     </button>
@@ -64,7 +84,34 @@
     </button>
   </div>
 
-  {#if tab === "ask"}
+  {#if tab === "insights"}
+    <div class="feed">
+      {#if !intel.cards.length}
+        <p class="hint">{i18n.t.intel.insightsEmpty}</p>
+      {/if}
+      {#each [...intel.cards].reverse() as card (card.id)}
+        <div class="card">
+          <p class="ctitle">{card.candidate.title}</p>
+          {#if card.candidate.detail}<p class="cdetail">{card.candidate.detail}</p>{/if}
+          {#if card.candidate.suggestedQuestion}
+            <p class="cq">“{card.candidate.suggestedQuestion}”</p>
+          {/if}
+          <p class="imeta">
+            <span>{Math.round(card.candidate.confidence * 100)}%</span>
+            {#each card.candidate.cited as id (id)}<span class="cid">{id}</span>{/each}
+          </p>
+          <div class="cactions">
+            {#if card.candidate.suggestedQuestion}
+              <button class="copy" onclick={() => copy(10_000 + intel.cards.indexOf(card), card.candidate.suggestedQuestion!)}>
+                {copiedAt === 10_000 + intel.cards.indexOf(card) ? i18n.t.intel.copied : i18n.t.intel.copyQuestion}
+              </button>
+            {/if}
+            <button class="copy" onclick={() => dismissCard(card.id)}>{i18n.t.intel.dismiss}</button>
+          </div>
+        </div>
+      {/each}
+    </div>
+  {:else if tab === "ask"}
     <div class="feed" bind:this={feedEl}>
       {#if !intel.turns.length}
         <p class="hint">{i18n.t.intel.askEmpty}</p>
@@ -340,6 +387,39 @@
     -webkit-line-clamp: 2;
     line-clamp: 2;
     -webkit-box-orient: vertical;
+  }
+
+  .card {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: 8px;
+  }
+
+  .ctitle {
+    margin: 0;
+    font-size: 13px;
+    font-weight: 600;
+    user-select: text;
+  }
+
+  .cdetail,
+  .cq {
+    margin: 0;
+    font-size: 12.5px;
+    user-select: text;
+  }
+
+  .cq {
+    color: var(--muted);
+  }
+
+  .cactions {
+    display: flex;
+    gap: 6px;
   }
 
   .composer {

@@ -21,6 +21,7 @@ use wisp_reasoning::{CancelToken, ReasoningBackend};
 
 use crate::analyze::{analyze_now, retrieval_text, AnalyzeInput, IntelError};
 use crate::evidence::TranscriptLine;
+use crate::intervene::{Card, InterventionFilter, InterventionPolicy, LogEntry};
 use crate::model::{MeetingState, StateItem};
 use crate::ops::{AppliedOp, ResolvedOp};
 
@@ -100,6 +101,8 @@ pub enum IntelUpdate {
         /// New lines still waiting because the pass was full.
         remaining_lines: usize,
         backend: String,
+        /// Cards the local filter chose to show from this pass (usually none).
+        cards: Vec<Card>,
     },
     /// Analyze Now was asked for with nothing new.
     NothingNew,
@@ -115,6 +118,8 @@ pub struct RuntimeConfig {
     pub focus: Option<String>,
     /// Longest a single pass may take.
     pub timeout: Duration,
+    /// Which proposed interventions reach the user.
+    pub interventions: InterventionPolicy,
 }
 
 impl Default for RuntimeConfig {
@@ -123,6 +128,7 @@ impl Default for RuntimeConfig {
             policy: TriggerPolicy::default(),
             focus: None,
             timeout: Duration::from_secs(180),
+            interventions: InterventionPolicy::default(),
         }
     }
 }
@@ -135,6 +141,8 @@ pub struct Finished {
     pub log: Vec<AppliedOp>,
     /// Final lines received, in arrival order.
     pub lines: usize,
+    /// Every intervention candidate considered, what was decided, and what was dismissed.
+    pub candidate_log: Vec<LogEntry>,
 }
 
 enum Msg {
@@ -144,6 +152,7 @@ enum Msg {
         text: String,
     },
     AnalyzeNow,
+    Dismiss(String),
     Stop,
 }
 
@@ -173,6 +182,7 @@ impl IntelRuntime {
         let worker_cancel = cancel.clone();
         let snapshot = Arc::new(Mutex::new(MeetingState::new(LIVE_MEETING_ID)));
         let worker_snapshot = snapshot.clone();
+        let config_interventions = config.interventions.clone();
         let worker = std::thread::Builder::new()
             .name("wisp-intel".into())
             .spawn(move || {
@@ -190,6 +200,7 @@ impl IntelRuntime {
                     pending_since: None,
                     failures: 0,
                     snapshot: worker_snapshot,
+                    filter: InterventionFilter::new(config_interventions),
                 }
                 .run(rx)
             })
@@ -221,6 +232,11 @@ impl IntelRuntime {
         let _ = self.tx.send(Msg::AnalyzeNow);
     }
 
+    /// Records that the user dismissed a card, so the filter holds back repeats.
+    pub fn dismiss(&self, card_id: impl Into<String>) {
+        let _ = self.tx.send(Msg::Dismiss(card_id.into()));
+    }
+
     /// A copy of the state as of the last completed pass.
     pub fn snapshot(&self) -> MeetingState {
         self.snapshot
@@ -235,6 +251,7 @@ impl IntelRuntime {
             state: MeetingState::new(LIVE_MEETING_ID),
             log: Vec::new(),
             lines: 0,
+            candidate_log: Vec::new(),
         })
     }
 
@@ -268,6 +285,7 @@ struct Worker {
     failures: u32,
     /// Shared copy of `state`, refreshed after each pass.
     snapshot: Arc<Mutex<MeetingState>>,
+    filter: InterventionFilter,
 }
 
 impl Worker {
@@ -296,6 +314,9 @@ impl Worker {
                         self.pending_since.get_or_insert_with(Instant::now);
                     }
                     Msg::AnalyzeNow => manual = true,
+                    Msg::Dismiss(id) => {
+                        self.filter.dismiss(&id, (self.now_ms)());
+                    }
                     Msg::Stop => stop = true,
                 }
             }
@@ -318,6 +339,7 @@ impl Worker {
             state: self.state,
             log: self.log,
             lines: self.lines.len(),
+            candidate_log: self.filter.log().to_vec(),
         }
     }
 
@@ -369,6 +391,13 @@ impl Worker {
                 if let Ok(mut shared) = self.snapshot.lock() {
                     *shared = self.state.clone();
                 }
+                let mut cards = Vec::new();
+                for candidate in out.candidates {
+                    cards.extend(self.filter.consider(candidate, now));
+                }
+                for (title, reason) in &out.rejected_candidates {
+                    self.filter.reject(title, reason, now);
+                }
                 self.pending_since = (out.remaining_lines > 0).then(Instant::now);
                 IntelUpdate::Pass {
                     applied: out.report.applied.len(),
@@ -376,6 +405,7 @@ impl Worker {
                     live_items: self.state.live_items().into_iter().cloned().collect(),
                     remaining_lines: out.remaining_lines,
                     backend: out.backend,
+                    cards,
                 }
             }
             Err(IntelError::NothingNew) => IntelUpdate::NothingNew,
@@ -503,7 +533,7 @@ mod tests {
                 "text": format!("noted {last}"), "epistemic_status": "stated", "confidence": 0.8,
                 "lifecycle": null, "superseded_by": null, "owner": null, "due": null,
                 "source_refs": [last], "related_items": []
-            }]}))
+            }], "candidates": []}))
         })
     }
 
@@ -558,6 +588,7 @@ mod tests {
             pending_since: None,
             failures: 0,
             snapshot: Arc::new(Mutex::new(MeetingState::new(LIVE_MEETING_ID))),
+            filter: InterventionFilter::default(),
         };
         assert_eq!(w.backoff(), Duration::ZERO);
         w.failures = 1;
@@ -651,7 +682,7 @@ mod tests {
     fn a_failed_pass_is_reported_and_retried_later() {
         let backend = Arc::new(ScriptedBackend::named("scripted"));
         backend.push_err(ReasoningError::Unavailable("not logged in".into()));
-        backend.push_ok(json!({"ops": []}));
+        backend.push_ok(json!({"ops": [], "candidates": []}));
         let (seen, on_update) = collect();
         let rt = IntelRuntime::spawn(
             backend.clone(),
@@ -704,7 +735,7 @@ mod tests {
     fn pushing_never_waits_for_a_slow_pass() {
         let backend = Arc::new(ScriptedBackend::with_responder("slow", |_| {
             std::thread::sleep(Duration::from_millis(400));
-            Ok(json!({"ops": []}))
+            Ok(json!({"ops": [], "candidates": []}))
         }));
         let (_seen, on_update) = collect();
         let rt = IntelRuntime::spawn(
@@ -750,7 +781,7 @@ mod tests {
         }
         let queries = Arc::new(Mutex::new(Vec::new()));
         let backend = Arc::new(ScriptedBackend::with_responder("s", |_| {
-            Ok(json!({"ops": []}))
+            Ok(json!({"ops": [], "candidates": []}))
         }));
         let (seen, on_update) = collect();
         let rt = IntelRuntime::spawn(
@@ -772,6 +803,43 @@ mod tests {
         );
         let ctx = backend.requests.lock().unwrap()[0].context.clone();
         assert!(ctx.contains("[D3:C0] spec.md, line 1\nEU only"));
+    }
+
+    #[test]
+    fn candidates_pass_the_filter_into_cards_and_dismissals_reach_the_log() {
+        let strong = |title: &str| {
+            json!({"kind": "missing_owner", "title": title, "detail": "", "suggested_question": null,
+                   "source_refs": ["T0"], "related_items": [], "importance": 0.9, "urgency": 0.9,
+                   "confidence": 0.9, "future_work_risk": 0.9})
+        };
+        let mut weak = strong("They seem interested");
+        weak["confidence"] = json!(0.3);
+        let backend = Arc::new(ScriptedBackend::named("scripted"));
+        backend
+            .push_ok(json!({"ops": [], "candidates": [strong("Test dataset has no owner"), weak]}));
+        let (seen, on_update) = collect();
+        let rt = IntelRuntime::spawn(
+            backend.clone(),
+            Box::new(NoRetrieval),
+            RuntimeConfig {
+                policy: fast_policy(),
+                ..RuntimeConfig::default()
+            },
+            on_update,
+            Box::new(|| 1_000),
+        );
+        rt.push_final("Them", 0, "We'll send a test dataset at some point.");
+        wait_for(&seen, 1);
+        let IntelUpdate::Pass { cards, .. } = seen.lock().unwrap()[0].clone() else {
+            panic!("expected a pass");
+        };
+        assert_eq!(cards.len(), 1, "the weak candidate is held back");
+        assert_eq!(cards[0].id, "CARD-1");
+        assert_eq!(cards[0].candidate.source_refs, ["Mlive:T0"]);
+        rt.dismiss("CARD-1");
+        let done = rt.stop();
+        assert_eq!(done.candidate_log.len(), 3, "two considered, one dismissed");
+        assert!(matches!(done.candidate_log[2], LogEntry::Dismissed { .. }));
     }
 
     #[test]

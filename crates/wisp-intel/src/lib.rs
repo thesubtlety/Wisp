@@ -11,6 +11,8 @@
 //! - [`analyze`] — "Analyze Now": one observer pass through a
 //!   [`wisp_reasoning::ReasoningBackend`].
 //! - [`ask`] — questions about the meeting, answered with checked citations.
+//! - [`intervene`] — proposed interventions and the conservative local filter that decides
+//!   which reach the user, with a log for tuning.
 //! - [`runtime`] — the live worker: final lines in over a channel that never blocks, batched
 //!   passes out, one at a time.
 //!
@@ -19,6 +21,7 @@
 pub mod analyze;
 pub mod ask;
 pub mod evidence;
+pub mod intervene;
 pub mod model;
 pub mod ops;
 pub mod reducer;
@@ -30,6 +33,10 @@ pub use analyze::{
 };
 pub use ask::{ask, ask_schema, prepare_ask, AskAnswer, AskInput, AskTurn, Citation};
 pub use evidence::{EvidenceDetail, EvidencePacket, TranscriptLine};
+pub use intervene::{
+    validate_candidate, Candidate, CandidateKind, Card, Decision, InterventionFilter,
+    InterventionPolicy, LogEntry, RawCandidate, Suppressed,
+};
 pub use model::{EpistemicStatus, ItemKind, Lifecycle, MeetingState, SourceRef, StateItem};
 pub use ops::{output_schema, AppliedOp, ModelOp, OpBatch, OpKind, ReplayError, ResolvedOp};
 pub use reducer::{reduce, ApplyReport, RejectReason, Rejection};

@@ -13,7 +13,7 @@
   import AssistLauncher from "$lib/AssistLauncher.svelte";
   import AssistPanel, { savedAssistWidth } from "$lib/AssistPanel.svelte";
   import IntelPanel from "$lib/IntelPanel.svelte";
-  import { ensureIntelListener, resetIntel } from "$lib/intel.svelte";
+  import { ensureIntelListener, resetIntel, intel } from "$lib/intel.svelte";
   import Settings from "$lib/Settings.svelte";
   import Library from "$lib/Library.svelte";
   import { i18n, LOCALES } from "$lib/i18n.svelte";
@@ -1988,7 +1988,11 @@
                   onclick={() => {
                     liveIntelOpen = !liveIntelOpen;
                     if (liveIntelOpen) liveAssistOpen = false;
-                  }}>{i18n.t.intel.launcher}</button
+                  }}
+                  >{i18n.t.intel.launcher}{#if intel.unseen && !liveIntelOpen}<span
+                      class="intel-dot"
+                      aria-label={String(intel.unseen)}
+                    ></span>{/if}</button
                 >
               {/if}
               {#if running || liveSegments.length}
@@ -4131,6 +4135,21 @@
   .intel-launch.on {
     color: var(--accent);
     border-color: var(--accent);
+  }
+
+  .intel-launch {
+    position: relative;
+  }
+
+  /* A new insight card arrived while the panel was closed. */
+  .intel-dot {
+    position: absolute;
+    top: 3px;
+    right: 5px;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--accent);
   }
 
   .pane-clear {

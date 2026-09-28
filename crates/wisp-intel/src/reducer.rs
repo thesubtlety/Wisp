@@ -476,7 +476,15 @@ mod tests {
     }
 
     fn run(state: &mut MeetingState, ops: Vec<ModelOp>) -> ApplyReport {
-        reduce(state, &OpBatch { ops }, &packet(), NOW)
+        reduce(
+            state,
+            &OpBatch {
+                ops,
+                candidates: vec![],
+            },
+            &packet(),
+            NOW,
+        )
     }
 
     fn reasons(report: &ApplyReport) -> Vec<(usize, RejectReason)> {

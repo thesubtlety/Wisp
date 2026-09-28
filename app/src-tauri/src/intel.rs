@@ -14,11 +14,11 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use wisp_core::transcript::{AudioSourceKind, TranscriptSegment};
 use wisp_intel::{
-    ask, remap_refs, saved_positions, AppliedOp, AskAnswer, AskInput, AskTurn, Finished,
-    IntelRuntime, IntelUpdate, MeetingState, Retriever, RuntimeConfig, StateItem, TranscriptLine,
-    LIVE_MEETING_ID,
+    ask, remap_refs, saved_positions, AppliedOp, AskAnswer, AskInput, AskTurn, Card, Finished,
+    IntelRuntime, IntelUpdate, LogEntry, MeetingState, Retriever, RuntimeConfig, StateItem,
+    TranscriptLine, LIVE_MEETING_ID,
 };
-use wisp_library::{meeting_ref, Library, RetrievalQuery, Snippet, StoredOp};
+use wisp_library::{meeting_ref, Library, RetrievalQuery, Snippet, StoredLogEntry, StoredOp};
 use wisp_reasoning::{CancelToken, FallbackBackend};
 
 use crate::AppState;
@@ -46,6 +46,7 @@ enum IntelUpdateDto {
         items: Vec<StateItem>,
         remaining_lines: usize,
         backend: String,
+        cards: Vec<Card>,
     },
     NothingNew,
     Failed {
@@ -62,12 +63,14 @@ impl From<IntelUpdate> for IntelUpdateDto {
                 live_items,
                 remaining_lines,
                 backend,
+                cards,
             } => IntelUpdateDto::Pass {
                 applied,
                 rejected,
                 items: live_items,
                 remaining_lines,
                 backend,
+                cards,
             },
             IntelUpdate::NothingNew => IntelUpdateDto::NothingNew,
             IntelUpdate::Failed(message) => IntelUpdateDto::Failed { message },
@@ -285,7 +288,7 @@ fn persist_parked(
     let Some(finished) = intel.finished.lock().ok().and_then(|mut f| f.take()) else {
         return Ok(());
     };
-    if finished.log.is_empty() {
+    if finished.log.is_empty() && finished.candidate_log.is_empty() {
         return Ok(());
     }
     let starts: Vec<_> = retained
@@ -295,10 +298,11 @@ fn persist_parked(
         .collect();
     let saved = saved_positions(&starts);
     let live_prefix = format!("M{LIVE_MEETING_ID}:T");
-    let log = remap_refs(&finished.log, |r| {
+    let to_saved = |r: &str| -> Option<String> {
         let arrival: usize = r.strip_prefix(&live_prefix)?.parse().ok()?;
         saved.get(arrival).map(|&idx| meeting_ref(meeting_id, idx))
-    });
+    };
+    let log = remap_refs(&finished.log, to_saved);
     let ops = log
         .iter()
         .map(|a| {
@@ -309,9 +313,63 @@ fn persist_parked(
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
-    library
-        .save_state_ops(meeting_id, &ops)
-        .map_err(|e| e.to_string())
+    if !ops.is_empty() {
+        library
+            .save_state_ops(meeting_id, &ops)
+            .map_err(|e| e.to_string())?;
+    }
+
+    let entries = finished
+        .candidate_log
+        .iter()
+        .enumerate()
+        .map(|(seq, entry)| {
+            let mut entry = entry.clone();
+            let at_ms = match &mut entry {
+                LogEntry::Considered {
+                    at_ms, candidate, ..
+                } => {
+                    if let Some(c) = candidate {
+                        c.source_refs = c
+                            .source_refs
+                            .iter()
+                            .map(|r| to_saved(r).unwrap_or_else(|| r.clone()))
+                            .collect();
+                    }
+                    *at_ms
+                }
+                LogEntry::Dismissed { at_ms, .. } => *at_ms,
+            };
+            Ok(StoredLogEntry {
+                seq: seq as i64,
+                at_ms,
+                entry: serde_json::to_string(&entry).map_err(|e| e.to_string())?,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    if !entries.is_empty() {
+        library
+            .save_candidate_log(meeting_id, &entries)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Records that the user dismissed a card. `false` if intelligence isn't running.
+#[tauri::command]
+pub(crate) fn intel_dismiss_card(state: State<'_, AppState>, id: String) -> Result<bool, String> {
+    let guard = state
+        .intel
+        .runtime
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())?;
+    Ok(match guard.as_ref() {
+        Some(runtime) => {
+            runtime.dismiss(id);
+            true
+        }
+        None => false,
+    })
 }
 
 /// Asks the running runtime for a pass now. `false` if intelligence isn't running.
@@ -506,10 +564,29 @@ mod tests {
             },
         };
         let finished_state = MeetingState::replay(LIVE_MEETING_ID, [&add]).unwrap();
+        let mut filter = wisp_intel::InterventionFilter::default();
+        filter.consider(
+            wisp_intel::Candidate {
+                kind: wisp_intel::CandidateKind::Conflict,
+                title: "Hosting unclear".into(),
+                detail: String::new(),
+                suggested_question: None,
+                source_refs: vec!["Mlive:T0".into()],
+                cited: vec!["T0".into()],
+                related_items: vec![],
+                importance: 0.9,
+                urgency: 0.9,
+                confidence: 0.9,
+                future_work_risk: 0.9,
+            },
+            7,
+        );
+        filter.dismiss("CARD-1", 8);
         *state_intel.finished.lock().unwrap() = Some(Finished {
             state: finished_state,
             log: vec![add],
             lines: 2,
+            candidate_log: filter.log().to_vec(),
         });
 
         let mut library = Library::open_in_memory().unwrap();
@@ -533,6 +610,14 @@ mod tests {
         };
         // Saved order: mic line (3s) is T0, system line (5s) is T1.
         assert_eq!(source_refs, ["Mm1:T1", "Mm1:T0"]);
+        let logged = library.candidate_log("m1").unwrap();
+        assert_eq!(logged.len(), 2);
+        assert!(
+            logged[0].entry.contains("\"Mm1:T1\""),
+            "{}",
+            logged[0].entry
+        );
+        assert!(logged[1].entry.contains("dismissed"));
         let (_, segments) = library.get_note("m1").unwrap().unwrap();
         assert_eq!(segments[1].text, "We host in Azure.");
         assert_eq!(segments[0].text, "Where do you host?");
