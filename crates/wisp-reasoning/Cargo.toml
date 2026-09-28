@@ -1,0 +1,22 @@
+[package]
+name = "wisp-reasoning"
+version = "0.0.0"
+description = "Model-independent reasoning backends for Wisp: Codex CLI in an isolated workspace, schema-validated JSON output"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror.workspace = true
+# The workspace dir for each call: 0700, deleted on drop.
+tempfile = "3"
+
+[target.'cfg(unix)'.dependencies]
+# killpg: a timeout or cancel kills the CLI's whole process group, not just the CLI.
+libc = "0.2"
+
+[lints]
+workspace = true
