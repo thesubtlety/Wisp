@@ -4401,6 +4401,8 @@ pub fn run() {
             assist::realtime::start_assist_realtime,
             intel::intel_analyze_now,
             intel::intel_saved_items,
+            intel::intel_ask,
+            intel::intel_ask_cancel,
             assist::realtime::stop_assist_realtime,
             assist::realtime::assist_hint_now,
             transcribe_file,

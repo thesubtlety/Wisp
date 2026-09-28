@@ -10,12 +10,14 @@
 //! - [`ops`] — the op format, its JSON Schema, and the replayable log of applied ops.
 //! - [`analyze`] — "Analyze Now": one observer pass through a
 //!   [`wisp_reasoning::ReasoningBackend`].
+//! - [`ask`] — questions about the meeting, answered with checked citations.
 //! - [`runtime`] — the live worker: final lines in over a channel that never blocks, batched
 //!   passes out, one at a time.
 //!
 //! Nothing here knows about Tauri, audio or the UI. The model proposes; the reducer decides.
 
 pub mod analyze;
+pub mod ask;
 pub mod evidence;
 pub mod model;
 pub mod ops;
@@ -26,7 +28,8 @@ pub use analyze::{
     analyze_now, prepare_observe, retrieval_text, AnalyzeInput, AnalyzeOutcome, IntelError,
     PreparedPass,
 };
-pub use evidence::{EvidencePacket, TranscriptLine};
+pub use ask::{ask, ask_schema, prepare_ask, AskAnswer, AskInput, AskTurn, Citation};
+pub use evidence::{EvidenceDetail, EvidencePacket, TranscriptLine};
 pub use model::{EpistemicStatus, ItemKind, Lifecycle, MeetingState, SourceRef, StateItem};
 pub use ops::{output_schema, AppliedOp, ModelOp, OpBatch, OpKind, ReplayError, ResolvedOp};
 pub use reducer::{reduce, ApplyReport, RejectReason, Rejection};

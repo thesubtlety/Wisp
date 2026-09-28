@@ -12,7 +12,7 @@
 //! is saved, [`remap_refs`] rewrites those refs to the stored transcript's ids.
 
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -151,6 +151,7 @@ enum Msg {
 pub struct IntelRuntime {
     tx: Sender<Msg>,
     cancel: CancelToken,
+    snapshot: Arc<Mutex<MeetingState>>,
     worker: Option<JoinHandle<Finished>>,
 }
 
@@ -170,6 +171,8 @@ impl IntelRuntime {
         let (tx, rx) = mpsc::channel();
         let cancel = CancelToken::new();
         let worker_cancel = cancel.clone();
+        let snapshot = Arc::new(Mutex::new(MeetingState::new(LIVE_MEETING_ID)));
+        let worker_snapshot = snapshot.clone();
         let worker = std::thread::Builder::new()
             .name("wisp-intel".into())
             .spawn(move || {
@@ -186,6 +189,7 @@ impl IntelRuntime {
                     last_pass: None,
                     pending_since: None,
                     failures: 0,
+                    snapshot: worker_snapshot,
                 }
                 .run(rx)
             })
@@ -193,6 +197,7 @@ impl IntelRuntime {
         Self {
             tx,
             cancel,
+            snapshot,
             worker: Some(worker),
         }
     }
@@ -214,6 +219,14 @@ impl IntelRuntime {
     /// Asks for a pass as soon as the worker is free, whatever the policy says.
     pub fn analyze_now(&self) {
         let _ = self.tx.send(Msg::AnalyzeNow);
+    }
+
+    /// A copy of the state as of the last completed pass.
+    pub fn snapshot(&self) -> MeetingState {
+        self.snapshot
+            .lock()
+            .map(|s| s.clone())
+            .unwrap_or_else(|_| MeetingState::new(LIVE_MEETING_ID))
     }
 
     /// Cancels any pass in flight, stops the worker, and returns the state and its log.
@@ -253,6 +266,8 @@ struct Worker {
     pending_since: Option<Instant>,
     /// Failed passes in a row.
     failures: u32,
+    /// Shared copy of `state`, refreshed after each pass.
+    snapshot: Arc<Mutex<MeetingState>>,
 }
 
 impl Worker {
@@ -351,6 +366,9 @@ impl Worker {
             Ok(out) => {
                 self.failures = 0;
                 self.log.extend(out.report.applied.iter().cloned());
+                if let Ok(mut shared) = self.snapshot.lock() {
+                    *shared = self.state.clone();
+                }
                 self.pending_since = (out.remaining_lines > 0).then(Instant::now);
                 IntelUpdate::Pass {
                     applied: out.report.applied.len(),
@@ -539,6 +557,7 @@ mod tests {
             last_pass: None,
             pending_since: None,
             failures: 0,
+            snapshot: Arc::new(Mutex::new(MeetingState::new(LIVE_MEETING_ID))),
         };
         assert_eq!(w.backoff(), Duration::ZERO);
         w.failures = 1;
@@ -568,6 +587,11 @@ mod tests {
         rt.push_final("Them", 1000, "   ");
         rt.push_final("You", 2000, "And what about single sign-on?");
         wait_for(&seen, 2);
+        assert_eq!(
+            rt.snapshot().items.len(),
+            2,
+            "the snapshot follows each pass"
+        );
         let done = rt.stop();
 
         assert_eq!(done.lines, 2, "the blank line is dropped");

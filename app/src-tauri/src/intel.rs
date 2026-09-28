@@ -14,11 +14,12 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use wisp_core::transcript::{AudioSourceKind, TranscriptSegment};
 use wisp_intel::{
-    remap_refs, saved_positions, AppliedOp, Finished, IntelRuntime, IntelUpdate, MeetingState,
-    Retriever, RuntimeConfig, StateItem, LIVE_MEETING_ID,
+    ask, remap_refs, saved_positions, AppliedOp, AskAnswer, AskInput, AskTurn, Finished,
+    IntelRuntime, IntelUpdate, MeetingState, Retriever, RuntimeConfig, StateItem, TranscriptLine,
+    LIVE_MEETING_ID,
 };
 use wisp_library::{meeting_ref, Library, RetrievalQuery, Snippet, StoredOp};
-use wisp_reasoning::FallbackBackend;
+use wisp_reasoning::{CancelToken, FallbackBackend};
 
 use crate::AppState;
 
@@ -30,6 +31,8 @@ pub(crate) const INTEL_EVENT: &str = "intel://update";
 pub(crate) struct IntelState {
     runtime: Mutex<Option<IntelRuntime>>,
     finished: Mutex<Option<Finished>>,
+    /// The question being answered, so it can be cancelled.
+    ask_cancel: Mutex<Option<CancelToken>>,
 }
 
 /// A pass result as the webview sees it.
@@ -70,6 +73,14 @@ impl From<IntelUpdate> for IntelUpdateDto {
             IntelUpdate::Failed(message) => IntelUpdateDto::Failed { message },
         }
     }
+}
+
+/// An answer as the webview gets it: the checked answer plus its Markdown for the copy button.
+#[derive(Serialize)]
+pub(crate) struct AskAnswerDto {
+    #[serde(flatten)]
+    answer: AskAnswer,
+    markdown: String,
 }
 
 /// Retrieves project context from the library, scoped to the meeting's project. A meeting outside
@@ -200,6 +211,47 @@ pub(crate) fn route_final(app: &AppHandle, segment: &TranscriptSegment) {
     }
 }
 
+/// The live transcript as the runtime numbers it: admitted finals in arrival order, blank lines
+/// dropped, so `T<n>` means the same line to Ask as to the state's evidence.
+fn live_lines(retained: &[TranscriptSegment]) -> Vec<TranscriptLine> {
+    retained
+        .iter()
+        .filter(|s| !s.text.trim().is_empty())
+        .enumerate()
+        .map(|(i, s)| TranscriptLine {
+            idx: i as i64,
+            start_ms: s.start.as_millis() as i64,
+            speaker: speaker_label(s),
+            text: s.text.clone(),
+        })
+        .collect()
+}
+
+/// The current meeting's state: the running runtime's latest, else the stopped meeting's, else empty.
+fn current_state(state: &AppState) -> MeetingState {
+    if let Some(runtime) = state
+        .intel
+        .runtime
+        .lock()
+        .ok()
+        .as_ref()
+        .and_then(|r| r.as_ref())
+    {
+        return runtime.snapshot();
+    }
+    if let Some(finished) = state
+        .intel
+        .finished
+        .lock()
+        .ok()
+        .as_ref()
+        .and_then(|f| f.as_ref())
+    {
+        return finished.state.clone();
+    }
+    MeetingState::new(LIVE_MEETING_ID)
+}
+
 /// Stops the runtime (cancelling any pass in flight) and parks its result for `save_note`.
 pub(crate) fn stop(state: &AppState) {
     let runtime = state.intel.runtime.lock().ok().and_then(|mut r| r.take());
@@ -279,6 +331,83 @@ pub(crate) fn intel_analyze_now(state: State<'_, AppState>) -> Result<bool, Stri
     })
 }
 
+/// Answers a question about the current (or just-finished) live meeting from its transcript and
+/// state, with checked citations. One question at a time; a new one cancels the last.
+#[tauri::command]
+pub(crate) async fn intel_ask(
+    app: AppHandle,
+    question: String,
+    history: Vec<AskTurn>,
+) -> Result<AskAnswerDto, String> {
+    let question = question.trim().to_owned();
+    if question.is_empty() {
+        return Err("empty question".to_owned());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let cancel = CancelToken::new();
+        if let Ok(mut slot) = state.intel.ask_cancel.lock() {
+            if let Some(previous) = slot.replace(cancel.clone()) {
+                previous.cancel();
+            }
+        }
+        let transcript = live_lines(
+            &state
+                .live_segments
+                .lock()
+                .map_err(|_| "state lock poisoned".to_owned())?,
+        );
+        let meeting = current_state(&state);
+        let retrieved = LibraryRetriever {
+            app: app.clone(),
+            project_id: None,
+        }
+        .retrieve(&question);
+        let backend = FallbackBackend::codex_then_claude();
+        let result = ask(
+            &backend,
+            &cancel,
+            &AskInput {
+                question: &question,
+                history: &history,
+                transcript: &transcript,
+                state: &meeting,
+                retrieved: &retrieved,
+                timeout: std::time::Duration::from_secs(180),
+            },
+        )
+        .map(|answer| AskAnswerDto {
+            markdown: answer.to_markdown(),
+            answer,
+        })
+        .map_err(|e| e.to_string());
+        // A newer question cancels this one's token as it takes the slot, so an uncancelled token
+        // means the slot still holds it.
+        if !cancel.is_cancelled() {
+            if let Ok(mut slot) = state.intel.ask_cancel.lock() {
+                *slot = None;
+            }
+        }
+        result
+    })
+    .await
+    .map_err(|e| format!("ask task failed: {e}"))?
+}
+
+/// Cancels the question being answered, if any.
+#[tauri::command]
+pub(crate) fn intel_ask_cancel(state: State<'_, AppState>) {
+    if let Some(cancel) = state
+        .intel
+        .ask_cancel
+        .lock()
+        .ok()
+        .and_then(|mut c| c.take())
+    {
+        cancel.cancel();
+    }
+}
+
 /// The live items of a saved meeting's state, rebuilt from its stored log. Empty if it has none.
 #[tauri::command]
 pub(crate) fn intel_saved_items(
@@ -325,6 +454,20 @@ mod tests {
             words: Vec::new(),
             aux_text: None,
         }
+    }
+
+    #[test]
+    fn live_lines_number_admitted_finals_like_the_runtime() {
+        let retained = vec![
+            seg(AudioSourceKind::System, 5000, "We host in Azure."),
+            seg(AudioSourceKind::System, 5500, "  "),
+            seg(AudioSourceKind::Microphone, 3000, "Where do you host?"),
+        ];
+        let lines = live_lines(&retained);
+        assert_eq!(lines.len(), 2);
+        assert_eq!((lines[1].idx, lines[1].start_ms), (1, 3000));
+        assert_eq!(lines[1].speaker, "You");
+        assert_eq!(lines[0].speaker, "Them");
     }
 
     #[test]
