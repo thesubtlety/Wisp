@@ -44,7 +44,7 @@ impl CodexCliBackend {
 
     pub fn command(&self, ws: &Workspace, prompt: String) -> CommandSpec {
         let c = &self.config;
-        let mut spec = CommandSpec::new(&c.program)
+        let mut spec = crate::locate::cli_spec(&c.program)
             .args(["exec", "--ephemeral", "--skip-git-repo-check"])
             .args(["--sandbox", "read-only", "--color", "never"]);
         if c.ignore_user_config {
@@ -93,7 +93,7 @@ impl ReasoningBackend for CodexCliBackend {
         if !self.config.subscription_mode {
             return Health::Ready { version };
         }
-        let mut spec = CommandSpec::new(&self.config.program).args(["login", "status"]);
+        let mut spec = crate::locate::cli_spec(&self.config.program).args(["login", "status"]);
         spec.env_remove = SUBSCRIPTION_STRIPPED_ENV
             .iter()
             .map(|s| s.to_string())
@@ -165,7 +165,7 @@ fn classify_login(code: Option<i32>, output: &str) -> Login {
 }
 
 pub(crate) fn version_health(program: &str) -> Health {
-    let spec = CommandSpec::new(program).arg("--version");
+    let spec = crate::locate::cli_spec(program).arg("--version");
     match run_command(&spec, Duration::from_secs(10), &CancelToken::new()) {
         Ok(o) if o.code == Some(0) => Health::Ready {
             version: o.stdout.trim().to_string(),

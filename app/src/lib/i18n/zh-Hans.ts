@@ -300,6 +300,9 @@ export const zhHans: Messages = {
     storage: "存储空间",
     storageIntro: "Wisp 在此设备上存放模型、笔记库与 app 数据的位置。点「打开」即可在文件管理器中显示。",
     autoSaveNotes: "结束后自动将笔记存入库",
+    meetingIntel: "会议智能",
+    meetingIntelNote:
+      "实时会议期间，将已定稿的转录内容发送给你自己的 Codex 或 Claude 命令行工具（使用你的订阅），并整理需求、决定和承诺。随笔记一起保存。下次会话开始生效。",
     storageModels: "模型",
     storageNotes: "笔记",
     storageData: "App 数据",

@@ -300,6 +300,9 @@ export const zhHant: Messages = {
     storage: "儲存空間",
     storageIntro: "Wisp 在此裝置上存放模型、筆記庫與 app 資料的位置。點「開啟」即可在檔案總管中顯示。",
     autoSaveNotes: "結束後自動將筆記存入庫",
+    meetingIntel: "會議智慧",
+    meetingIntelNote:
+      "即時會議期間，將已定稿的逐字稿傳送給你自己的 Codex 或 Claude 命令列工具（使用你的訂閱），並整理需求、決定與承諾。隨筆記一併儲存。下次工作階段開始生效。",
     storageModels: "模型",
     storageNotes: "筆記",
     storageData: "App 資料",

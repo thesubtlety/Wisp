@@ -10,6 +10,8 @@
 //! - [`ops`] — the op format, its JSON Schema, and the replayable log of applied ops.
 //! - [`analyze`] — "Analyze Now": one observer pass through a
 //!   [`wisp_reasoning::ReasoningBackend`].
+//! - [`runtime`] — the live worker: final lines in over a channel that never blocks, batched
+//!   passes out, one at a time.
 //!
 //! Nothing here knows about Tauri, audio or the UI. The model proposes; the reducer decides.
 
@@ -18,6 +20,7 @@ pub mod evidence;
 pub mod model;
 pub mod ops;
 pub mod reducer;
+pub mod runtime;
 
 pub use analyze::{
     analyze_now, prepare_observe, retrieval_text, AnalyzeInput, AnalyzeOutcome, IntelError,
@@ -27,3 +30,7 @@ pub use evidence::{EvidencePacket, TranscriptLine};
 pub use model::{EpistemicStatus, ItemKind, Lifecycle, MeetingState, SourceRef, StateItem};
 pub use ops::{output_schema, AppliedOp, ModelOp, OpBatch, OpKind, ReplayError, ResolvedOp};
 pub use reducer::{reduce, ApplyReport, RejectReason, Rejection};
+pub use runtime::{
+    remap_refs, saved_positions, Finished, IntelRuntime, IntelUpdate, NoRetrieval, Retriever,
+    RuntimeConfig, TriggerPolicy, LIVE_MEETING_ID,
+};

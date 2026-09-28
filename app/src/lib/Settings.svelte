@@ -10,7 +10,11 @@
   import NotesSearch from "$lib/NotesSearch.svelte";
   import { i18n } from "$lib/i18n.svelte";
 
-  let { open = $bindable(false), autoSave = $bindable(false) }: { open?: boolean; autoSave?: boolean } =
+  let {
+    open = $bindable(false),
+    autoSave = $bindable(false),
+    intel = $bindable(false),
+  }: { open?: boolean; autoSave?: boolean; intel?: boolean } =
     $props();
 
   type Section = "models" | "search" | "downloads" | "dictation" | "storage";
@@ -319,6 +323,14 @@
                 {autoSave ? i18n.t.settings.on : i18n.t.settings.off}
               </button>
             </div>
+
+            <div class="set-row">
+              <span class="set-label">{i18n.t.settings.meetingIntel}</span>
+              <button class="set-btn" class:on={intel} onclick={() => (intel = !intel)}>
+                {intel ? i18n.t.settings.on : i18n.t.settings.off}
+              </button>
+            </div>
+            <p class="set-intro">{i18n.t.settings.meetingIntelNote}</p>
 
             {#if storageError}<p class="set-error">{storageError}</p>{/if}
             {#if paths}

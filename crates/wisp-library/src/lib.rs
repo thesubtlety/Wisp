@@ -13,6 +13,7 @@ mod embed;
 mod record;
 mod retention;
 mod retrieve;
+mod state_log;
 mod store;
 
 pub use embed::Embedder;
@@ -24,6 +25,7 @@ pub use retention::{
 pub use retrieve::{
     meeting_ref, source_ref, RetrievalQuery, Snippet, SnippetOrigin, SNIPPET_CHARS,
 };
+pub use state_log::StoredOp;
 pub use store::Library;
 
 /// An error from the meeting library.
