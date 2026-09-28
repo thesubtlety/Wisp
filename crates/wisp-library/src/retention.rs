@@ -92,6 +92,14 @@ pub struct SourceInput {
     pub added_at_ms: i64,
 }
 
+/// What [`Library::upsert_file_source`] did, with the source's id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Upsert {
+    Added(i64),
+    Updated(i64),
+    Unchanged(i64),
+}
+
 /// What a [`Library::prune`] (or a project deletion) removed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PruneReport {
@@ -162,12 +170,10 @@ impl Library {
     /// Adds a source to a project: stores it, chunks its text for search, and embeds the chunks when
     /// an embedder is set. Its expiry follows the [`RetentionPolicy`] for its kind. Returns its id.
     pub fn add_source(&mut self, project_id: &str, input: &SourceInput) -> Result<i64> {
-        let lines: Vec<&str> = input.text.lines().collect();
-        let chunks = embed::chunk_texts(&lines, SOURCE_CHUNK_CHARS);
+        let chunks = embed::chunk_document(&input.text, SOURCE_CHUNK_CHARS);
         // Embed before the transaction — inference touches no DB and may be slow.
-        let vectors: Option<Vec<Vec<u8>>> = self
-            .embed_texts(&lines)?
-            .map(|embedded| embedded.into_iter().map(|(_, v)| v).collect());
+        let texts: Vec<&str> = chunks.iter().map(|c| c.text.as_str()).collect();
+        let vectors = self.embed_exact(&texts)?;
         let sha256 = hex(&Sha256::digest(input.text.as_bytes()));
         let expires_at_ms = self.retention.source_expiry(input.kind, input.added_at_ms);
 
@@ -189,15 +195,57 @@ impl Library {
             ],
         )?;
         let source_id = tx.last_insert_rowid();
-        for (i, text) in chunks.iter().enumerate() {
+        for (i, chunk) in chunks.iter().enumerate() {
             let vector = vectors.as_ref().and_then(|v| v.get(i));
             tx.execute(
-                "INSERT INTO source_chunk (source_id, idx, text, embedding) VALUES (?1, ?2, ?3, ?4)",
-                rusqlite::params![source_id, i as i64, text, vector],
+                "INSERT INTO source_chunk (source_id, idx, text, embedding, line_start)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    source_id,
+                    i as i64,
+                    chunk.text,
+                    vector,
+                    chunk.line_start as i64
+                ],
             )?;
         }
         tx.commit()?;
         Ok(source_id)
+    }
+
+    /// Adds a file source, or refreshes the one already indexed from the same path in this project:
+    /// unchanged text (same hash) is left alone; changed text replaces the old source. Other kinds
+    /// of source are simply added.
+    pub fn upsert_file_source(&mut self, project_id: &str, input: &SourceInput) -> Result<Upsert> {
+        let origin = match (&input.kind, &input.origin_path) {
+            (SourceKind::File, Some(path)) => path.display().to_string(),
+            _ => return self.add_source(project_id, input).map(Upsert::Added),
+        };
+        let existing: Option<(i64, String)> = self
+            .conn
+            .query_row(
+                "SELECT id, sha256 FROM source
+                 WHERE project_id = ?1 AND kind = 'file' AND origin_path = ?2",
+                rusqlite::params![project_id, origin],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let sha256 = hex(&Sha256::digest(input.text.as_bytes()));
+        match existing {
+            Some((id, old)) if old == sha256 => Ok(Upsert::Unchanged(id)),
+            Some(_) => {
+                let id = self.add_source(project_id, input)?;
+                // Every other row for this path goes, so an interrupted refresh can't leave two.
+                self.conn.execute(
+                    "DELETE FROM source
+                     WHERE project_id = ?1 AND kind = 'file' AND origin_path = ?2 AND id <> ?3",
+                    rusqlite::params![project_id, origin, id],
+                )?;
+                self.after_delete()?;
+                Ok(Upsert::Updated(id))
+            }
+            None => self.add_source(project_id, input).map(Upsert::Added),
+        }
     }
 
     /// A project's sources, newest first.

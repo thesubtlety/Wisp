@@ -2508,6 +2508,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "wisp-ingest"
+version = "0.0.0"
+dependencies = [
+ "tempfile",
+ "thiserror 2.0.18",
+ "wisp-library",
+ "zip",
+]
+
+[[package]]
 name = "wisp-library"
 version = "0.0.0"
 dependencies = [

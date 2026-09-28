@@ -1,0 +1,20 @@
+[package]
+name = "wisp-ingest"
+version = "0.0.0"
+description = "Project ingestion for Wisp: local text extraction, safe folder scans, app-managed imports"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+wisp-library = { path = "../wisp-library" }
+thiserror.workspace = true
+# .docx is a zip of XML; the same crate and features wisp-models already uses.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true
