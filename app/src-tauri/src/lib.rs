@@ -4,7 +4,7 @@
 //! start/stop transcription. A session is spawned per audio source (microphone = "Me", system
 //! loopback = meeting participants), all forwarding transcript segments to the webview.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,12 +18,10 @@ use tauri::{path::BaseDirectory, AppHandle, Emitter, Manager, State};
 use wisp_aec::WebrtcEchoCanceller;
 use wisp_audio::{
     normalize_for_asr_in_place, tee, to_mono_16k, ChannelSource, EchoCancellingSource, MediaSource,
-    MeetingMixer, MicSource, MutedSource, Resampler, RnnoiseDenoiser, Tee, FRAME_CHUNK_MS,
-    TARGET_SAMPLE_RATE,
+    MicSource, MutedSource, RnnoiseDenoiser, Tee, FRAME_CHUNK_MS, TARGET_SAMPLE_RATE,
 };
 use wisp_core::aec::{EchoCanceller, PassthroughEchoCanceller};
-use wisp_core::audio::{AudioFrame, AudioSource, AudioSourceInfo};
-use wisp_core::channel::FrameReceiver;
+use wisp_core::audio::AudioSource;
 use wisp_core::cloud::{CloudAuth, CloudModel, CloudProtocol, CloudProvider, StreamingProtocol};
 use wisp_core::dedup::CrossStreamEchoFilter;
 use wisp_core::denoise::Denoiser;
@@ -36,9 +34,8 @@ use wisp_core::params::{ParamKind, ParamSpec, ParamValue, ParamValues};
 use wisp_core::task::run_within;
 use wisp_core::transcript::{AudioSourceKind, SegmentStatus, TranscriptEvent, TranscriptSegment};
 use wisp_engine_cloud::{
-    assist_param_specs, assist_realtime_param_specs, batch_param_specs as cloud_batch_param_specs,
-    build_assist_engine, build_realtime_engine, chat_completion, chat_completion_stream,
-    streaming_param_specs as cloud_streaming_param_specs, ChatRequest, CloudEngine,
+    batch_param_specs as cloud_batch_param_specs, build_realtime_engine,
+    streaming_param_specs as cloud_streaming_param_specs, CloudEngine,
 };
 use wisp_engine_sherpa::{
     GtcrnDenoiser, ParaformerEngine, ParakeetEngine, SenseVoiceEngine, SherpaDiarizer,
@@ -60,26 +57,17 @@ use wisp_pipeline::{
 #[cfg(target_os = "macos")]
 use wisp_screencapture::ScreenCaptureSource;
 
+mod assist;
 mod dictation;
 mod permissions;
+
+use assist::{normalize_assist, AssistParams};
 
 /// Event channel the UI listens on for transcript segments.
 const SEGMENT_EVENT: &str = "transcript://segment";
 
 /// Event channel the UI listens on for a live cloud-streaming error (so a failure isn't silent).
 const LIVE_ERROR_EVENT: &str = "live://error";
-
-/// Event channel the UI listens on for realtime AI-assist responses — one finalised reply per turn,
-/// payload is the response text. A reply that streamed in via [`ASSIST_DELTA_EVENT`] is closed by this.
-const ASSIST_TEXT_EVENT: &str = "assist://text";
-
-/// Event channel for an incremental chunk of the in-progress assist reply (payload is the new text to
-/// append) — so a reply streams into the feed as it generates instead of popping in whole at the end.
-const ASSIST_DELTA_EVENT: &str = "assist://delta";
-
-/// Event channel for a realtime AI-assist error (bad key/model, server error, dropped socket) — kept
-/// separate from [`LIVE_ERROR_EVENT`] so the assist pane shows its own failures, not the transcript's.
-const ASSIST_ERROR_EVENT: &str = "assist://error";
 
 /// Event channel the UI listens on for model-download progress.
 const DOWNLOAD_PROGRESS_EVENT: &str = "download://progress";
@@ -139,19 +127,9 @@ struct AppState {
     live_accurate: Mutex<bool>,
     /// The system-audio fan-out, present only while mic + system run together (AEC active).
     tee: Mutex<Option<Tee>>,
-    /// Fan-out tees feeding the realtime AI assist its copy of each transcription stream — kept alive
-    /// for the session's duration (dropping them closes the assist branches).
-    assist_tees: Mutex<Vec<Tee>>,
-    /// The mixed live audio (mic + system) for the realtime assist, available while a live session
-    /// runs; the assist's realtime engine consumes it when started. `None` between sessions.
-    assist_audio: Mutex<Option<Box<dyn AudioSource>>>,
-    /// The running realtime AI-assist worker (its stop flag + thread), or `None` when assist is idle.
-    /// The worker owns the mix source while running and hands it back on stop, so assist can restart.
-    assist_worker: Mutex<Option<AssistWorker>>,
-    /// While the realtime assist runs, the channel the live session pushes each diarized final into, so
-    /// the assist injects authoritative, speaker-attributed text alongside the audio it hears. `None`
-    /// when no assist is running (the live sink then skips the routing).
-    assist_finals_tx: Mutex<Option<std::sync::mpsc::Sender<String>>>,
+    /// The realtime AI assist's live resources — its audio taps and mix, its worker, and the
+    /// finals channel the live sink feeds. Empty between live sessions.
+    assist: assist::AssistState,
     /// Segments from the most recent file transcription, kept for export.
     file_segments: Mutex<Vec<TranscriptSegment>>,
     /// Set by `cancel_file_transcription` to stop the running file transcription at the next window
@@ -716,90 +694,6 @@ struct LiveSettings {
     accurate: bool,
 }
 
-/// The mono rate the assist mix runs at — OpenAI Realtime's native input, so the engine passes it
-/// through without a second resample. Both tapped streams are converted to it before summing.
-const ASSIST_MIX_RATE: u32 = 24_000;
-
-/// The live audio for the realtime AI assist (option B): the same post-processed streams the
-/// transcription gets (mic after AEC + system), summed into one mono [`ASSIST_MIX_RATE`] stream.
-///
-/// The two taps arrive at *different* rates (the AEC mic at 16 kHz, the raw system at the capture
-/// rate, e.g. 48 kHz) and in differently-sized frames, so each is resampled to the common rate first;
-/// the secondary is accumulated in a small jitter buffer and mixed sample-aligned (never decimated, no
-/// rate-mismatched sum). `primary` drives the cadence (`recv`, blocking) — its drop-oldest tee means an
-/// idle assist never stalls or backs up the capture.
-struct MixSource {
-    primary: FrameReceiver,
-    primary_rs: Resampler,
-    secondary: Option<FrameReceiver>,
-    secondary_rs: Resampler,
-    /// Resampled secondary samples waiting to be mixed (bounded; oldest dropped past the cap).
-    secondary_buf: VecDeque<f32>,
-    /// Soft-knee + depth-capped-ducking mixer (no clip distortion, both speakers stay intelligible).
-    mixer: MeetingMixer,
-    info: AudioSourceInfo,
-}
-
-impl AudioSource for MixSource {
-    fn info(&self) -> AudioSourceInfo {
-        self.info.clone()
-    }
-
-    fn next_frame(&mut self) -> wisp_core::error::Result<Option<AudioFrame>> {
-        let Some(frame) = self.primary.recv() else {
-            return Ok(None);
-        };
-        let timestamp = frame.timestamp;
-        let mut mono = self.primary_rs.process(&frame);
-
-        if let Some(sec) = &self.secondary {
-            // Drain every buffered secondary frame (resampled to the mix rate) — never decimate it —
-            // capping the jitter buffer so a slightly-faster stream can't grow it without bound.
-            while let Some(other) = sec.try_recv() {
-                let resampled = self.secondary_rs.process(&other);
-                self.secondary_buf.extend(resampled);
-            }
-            let cap = ASSIST_MIX_RATE as usize / 2; // ~0.5 s
-            while self.secondary_buf.len() > cap {
-                self.secondary_buf.pop_front();
-            }
-
-            // Mix in time order, as many secondary samples as this frame holds — soft-limited so a loud
-            // mic+system sum never clips, with light depth-capped ducking so the dominant talker stays
-            // clear while the other side is never lost.
-            let take = mono.len().min(self.secondary_buf.len());
-            let secondary: Vec<f32> = self.secondary_buf.drain(..take).collect();
-            self.mixer.mix(&mut mono, &secondary);
-        }
-
-        Ok(Some(AudioFrame::new(mono, ASSIST_MIX_RATE, 1, timestamp)))
-    }
-}
-
-/// Tees a processed transcription `source` so the assist can hear the same audio: returns the source
-/// for transcription (a [`ChannelSource`] over one branch) and stashes the other branch + the tee
-/// handle. The tee is drop-oldest, so an unread assist branch never stalls or backs up the capture.
-///
-/// When `want` is false (no real-time assist armed for this session) the source is returned untouched —
-/// no tee, no pump thread — so an ordinary live session's audio path is byte-for-byte the original.
-fn tap_for_assist(
-    source: Box<dyn AudioSource>,
-    want: bool,
-    branches: &mut Vec<FrameReceiver>,
-    tees: &mut Vec<Tee>,
-) -> Box<dyn AudioSource> {
-    if !want {
-        return source;
-    }
-
-    let info = source.info();
-    let (handle, main_rx, assist_rx) = tee(source);
-
-    tees.push(handle);
-    branches.push(assist_rx);
-    Box::new(ChannelSource::new(main_rx, info))
-}
-
 /// Wraps a live stream's source with its shared mute flag (mic = You, system = Them), so the Live bar
 /// can silence it mid-session. Any non-live kind is returned untouched.
 fn wrap_muted(
@@ -960,7 +854,7 @@ fn build_live_sink(
             if emit {
                 let _ = emitter.emit(SEGMENT_EVENT, SegmentDto::from(&segment));
                 if matches!(segment.status, SegmentStatus::Final) {
-                    route_assist_final(&emitter, &segment);
+                    assist::route_assist_final(&emitter, &segment);
                     retain_live_segment(&emitter, &segment);
                 }
             }
@@ -1573,38 +1467,6 @@ fn save_cloud_custom_models(path: &Path, models: &[CloudCustomModel]) {
     }
 }
 
-/// The AI notes/assist tuning a custom endpoint carries (its chat model's knobs). All optional —
-/// an empty/`None` field falls back to a built-in default and is never sent to the provider. Used
-/// only by [`run_llm_task`]; transcription has its own per-model parameter panel.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AssistParams {
-    /// Sampling temperature for the chat model (omitted from the request when unset, so a model that
-    /// only accepts its default temperature — e.g. a reasoning model — isn't sent one).
-    #[serde(default)]
-    temperature: Option<f64>,
-    /// Cap on the reply length, in tokens (omitted from the request when unset).
-    #[serde(default)]
-    max_tokens: Option<u32>,
-    /// The model's context window, in tokens. When set and a transcript would exceed it, the assist
-    /// runs map-reduce (summarize chunks, then combine) instead of one over-long request.
-    #[serde(default)]
-    context_tokens: Option<u32>,
-    /// Nucleus sampling cutoff (omitted from the request when unset).
-    #[serde(default)]
-    top_p: Option<f64>,
-    /// Repetition penalty: positive discourages reusing the same words (omitted when unset).
-    #[serde(default)]
-    frequency_penalty: Option<f64>,
-    /// Topic-novelty penalty: positive pushes toward new subjects (omitted when unset).
-    #[serde(default)]
-    presence_penalty: Option<f64>,
-    /// A standing instruction prepended to every assist task on this endpoint (persona, language,
-    /// style). Empty for none.
-    #[serde(default)]
-    system_prompt: String,
-}
-
 /// A user-defined OpenAI-compatible cloud endpoint: a base URL, the API shape it speaks, one model
 /// id, and its assist tuning. The API key is stored separately in `cloud_keys` under `id`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1842,19 +1704,6 @@ fn add_cloud_endpoint(state: State<'_, AppState>, input: EndpointInput) -> Resul
     Ok(id)
 }
 
-/// Clamps assist params to sane ranges (and drops zero token caps to "unset") so a hand-edited or
-/// stale value can never reach the provider as something invalid.
-fn normalize_assist(mut assist: AssistParams) -> AssistParams {
-    assist.temperature = assist.temperature.map(|t| t.clamp(0.0, 2.0));
-    assist.top_p = assist.top_p.map(|p| p.clamp(0.0, 1.0));
-    assist.frequency_penalty = assist.frequency_penalty.map(|p| p.clamp(-2.0, 2.0));
-    assist.presence_penalty = assist.presence_penalty.map(|p| p.clamp(-2.0, 2.0));
-    assist.max_tokens = assist.max_tokens.filter(|&n| n > 0);
-    assist.context_tokens = assist.context_tokens.filter(|&n| n > 0);
-    assist.system_prompt = assist.system_prompt.trim().to_owned();
-    assist
-}
-
 /// Trims + validates a custom endpoint's fields, returning `(name, base_url, protocol, model)` or an
 /// error message. `protocol` is normalized to `"chat"` or `"openai"`.
 fn clean_endpoint_fields(
@@ -2035,332 +1884,6 @@ fn batch_params(
         .iter()
         .map(param_spec_dto)
         .collect())
-}
-
-/// The advanced parameter specs the chat assist exposes (temperature / top_p / max reply tokens), for
-/// the generic settings panel — the assist-side counterpart of [`batch_params`]. Vendor-agnostic (every
-/// assist provider speaks the same OpenAI-compatible chat tuning), so it takes no provider/model.
-#[tauri::command]
-fn assist_params() -> Vec<ParamSpecDto> {
-    assist_param_specs().iter().map(param_spec_dto).collect()
-}
-
-/// The advanced parameter specs the **realtime** assist exposes (turn-detection endpointing + noise
-/// reduction) — the realtime counterpart of [`assist_params`]. OpenAI-realtime-only, like the realtime
-/// assist itself, so it takes no provider/model.
-#[tauri::command]
-fn assist_realtime_params() -> Vec<ParamSpecDto> {
-    assist_realtime_param_specs()
-        .iter()
-        .map(param_spec_dto)
-        .collect()
-}
-
-/// Runs a one-shot LLM task (summary, action items, or a custom prompt) over `transcript` using the
-/// chat model of cloud `provider` — typically a user's custom OpenAI-compatible endpoint (their
-/// gateway, a local Ollama, …). Runs off the main thread (the call is a slow HTTP round-trip).
-#[tauri::command]
-async fn run_llm_task(
-    app: AppHandle,
-    provider: String,
-    model: String,
-    system_prompt: String,
-    transcript: String,
-    params: HashMap<String, serde_json::Value>,
-) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        run_llm_task_blocking(app, &provider, &model, &system_prompt, &transcript, &params)
-    })
-    .await
-    .map_err(|e| format!("LLM task failed: {e}"))?
-}
-
-/// The blocking body of [`run_llm_task`]: resolve the provider (catalog or custom endpoint) and its
-/// key, then call the chat model with the task's system prompt and the transcript.
-fn run_llm_task_blocking(
-    app: AppHandle,
-    provider_id: &str,
-    model: &str,
-    system_prompt: &str,
-    transcript: &str,
-    params: &HashMap<String, serde_json::Value>,
-) -> Result<String, String> {
-    if transcript.trim().is_empty() {
-        return Err("there's no transcript to work on yet".to_owned());
-    }
-
-    let state = app.state::<AppState>();
-    let (provider, key, assist) = resolve_assist_target(&state, provider_id)?;
-    let assist = overlay_assist_params(assist, &build_param_values(&assist_param_specs(), params));
-
-    // Prepend the endpoint's standing instruction (persona / language / style) to the task prompt.
-    let system = combine_system(&assist.system_prompt, system_prompt);
-
-    run_assist(&provider, model, &key, &system, transcript, &assist)
-}
-
-/// Resolves the cloud `provider` (catalog or custom endpoint), its on-device key, and its assist tuning
-/// — the common preamble for every assist call. A catalog provider uses default tuning; a custom
-/// endpoint carries its own (temperature, context size, system prompt, …).
-fn resolve_assist_target(
-    state: &AppState,
-    provider_id: &str,
-) -> Result<(CloudProvider, String, AssistParams), String> {
-    let endpoints = state
-        .cloud_custom_endpoints
-        .lock()
-        .map_err(|_| "state lock poisoned".to_owned())?;
-
-    let provider = resolve_cloud_provider(provider_id, &endpoints)
-        .ok_or_else(|| format!("unknown provider {provider_id}"))?;
-
-    let key = state
-        .cloud_keys
-        .lock()
-        .map_err(|_| "state lock poisoned".to_owned())?
-        .get(provider_id)
-        .filter(|k| !k.trim().is_empty())
-        .cloned()
-        .ok_or_else(|| format!("no API key saved for {provider_id}"))?;
-
-    let assist = endpoints
-        .iter()
-        .find(|e| e.id == provider_id)
-        .map(|e| e.assist.clone())
-        .unwrap_or_default();
-
-    Ok((provider, key, assist))
-}
-
-/// Overlays the user's advanced assist params (from the settings panel) onto the resolved endpoint
-/// tuning: a knob the user moved off its default is present in `params` and overrides; one left at its
-/// default isn't present, so the endpoint's own value (often "unset" → the model's own optimum) stands.
-/// Each override is clamped here, since these bypass the save-time [`normalize_assist`]. A `max_tokens`
-/// of 0 means "no cap" (its default), so it's treated as unset.
-fn overlay_assist_params(mut assist: AssistParams, params: &ParamValues) -> AssistParams {
-    if params.contains("temperature") {
-        assist.temperature = Some(params.float("temperature", 1.0).clamp(0.0, 2.0));
-    }
-
-    if params.contains("top_p") {
-        assist.top_p = Some(params.float("top_p", 1.0).clamp(0.0, 1.0));
-    }
-
-    if params.contains("frequency_penalty") {
-        assist.frequency_penalty = Some(params.float("frequency_penalty", 0.0).clamp(-2.0, 2.0));
-    }
-
-    if params.contains("presence_penalty") {
-        assist.presence_penalty = Some(params.float("presence_penalty", 0.0).clamp(-2.0, 2.0));
-    }
-
-    if params.contains("max_tokens") {
-        let n = params.int("max_tokens", 0).clamp(0, i64::from(u32::MAX));
-        if n > 0 {
-            assist.max_tokens = Some(n as u32);
-        }
-    }
-
-    assist
-}
-
-/// Streams a chat assist task into the feed: resolve the provider, then run a single chat call with
-/// `stream: true`, emitting each chunk as [`ASSIST_DELTA_EVENT`] and the full reply as
-/// [`ASSIST_TEXT_EVENT`]. A transcript too long for one call falls back to (non-streamed) map-reduce and
-/// emits the combined result whole. Off the main thread — the call is a slow streamed round-trip.
-#[tauri::command]
-async fn run_assist_stream(
-    app: AppHandle,
-    provider: String,
-    model: String,
-    system_prompt: String,
-    transcript: String,
-    params: HashMap<String, serde_json::Value>,
-) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        run_assist_stream_blocking(app, &provider, &model, &system_prompt, &transcript, &params)
-    })
-    .await
-    .map_err(|e| format!("assist stream task failed: {e}"))?
-}
-
-fn run_assist_stream_blocking(
-    app: AppHandle,
-    provider_id: &str,
-    model: &str,
-    system_prompt: &str,
-    transcript: &str,
-    params: &HashMap<String, serde_json::Value>,
-) -> Result<(), String> {
-    if transcript.trim().is_empty() {
-        return Err("there's no transcript to work on yet".to_owned());
-    }
-
-    let state = app.state::<AppState>();
-    let (provider, key, assist) = resolve_assist_target(&state, provider_id)?;
-    let assist = overlay_assist_params(assist, &build_param_values(&assist_param_specs(), params));
-
-    let system = combine_system(&assist.system_prompt, system_prompt);
-
-    // A transcript that fits one call streams token-by-token; one too long map-reduces (each chunk
-    // whole, no per-token stream) and the combined result is emitted as the single final reply.
-    let text = match input_char_budget(assist.context_tokens) {
-        Some(budget) if transcript.chars().count() > budget => {
-            map_reduce_assist(&provider, model, &key, &system, transcript, &assist, budget)?
-        }
-        _ => {
-            let app_delta = app.clone();
-            let req = ChatRequest {
-                system: &system,
-                user: transcript,
-                temperature: assist.temperature,
-                max_tokens: assist.max_tokens,
-                top_p: assist.top_p,
-                frequency_penalty: assist.frequency_penalty,
-                presence_penalty: assist.presence_penalty,
-            };
-            chat_completion_stream(&provider, model, &key, &req, |chunk| {
-                let _ = app_delta.emit(ASSIST_DELTA_EVENT, chunk.to_owned());
-            })
-            .map_err(|e| e.to_string())?
-        }
-    };
-
-    let _ = app.emit(ASSIST_TEXT_EVENT, text.trim().to_owned());
-    Ok(())
-}
-
-/// Approximate characters per token — used only to decide when a transcript needs map-reduce. A
-/// rough cross-language middle (English ~4, CJK ~1–2); 3 errs toward chunking, which is the safe way
-/// to be wrong (an extra round-trip beats overflowing the model's context).
-const ASSIST_CHARS_PER_TOKEN: usize = 3;
-
-/// The character budget for one assist request given a context window in tokens, or `None` when no
-/// window is set (0 counts as unset). Reserves ~40% of the window for the system prompt and reply.
-fn input_char_budget(context_tokens: Option<u32>) -> Option<usize> {
-    context_tokens
-        .filter(|&t| t > 0)
-        .map(|t| (t as usize * ASSIST_CHARS_PER_TOKEN * 3) / 5)
-}
-
-/// Splits `text` into chunks of at most `budget` characters, breaking only at line boundaries (one
-/// transcript turn per line) so an utterance is never cut mid-sentence. A single over-long line
-/// becomes its own chunk.
-fn chunk_by_chars(text: &str, budget: usize) -> Vec<String> {
-    let mut chunks = Vec::new();
-    let mut cur = String::new();
-
-    for line in text.lines() {
-        if !cur.is_empty() && cur.chars().count() + 1 + line.chars().count() > budget {
-            chunks.push(std::mem::take(&mut cur));
-        }
-        if !cur.is_empty() {
-            cur.push('\n');
-        }
-        cur.push_str(line);
-    }
-
-    if !cur.is_empty() {
-        chunks.push(cur);
-    }
-    chunks
-}
-
-/// Prepends an endpoint's standing instruction to a task's system prompt (blank-safe).
-fn combine_system(standing: &str, task: &str) -> String {
-    let standing = standing.trim();
-
-    if standing.is_empty() {
-        task.to_owned()
-    } else {
-        format!("{standing}\n\n{task}")
-    }
-}
-
-/// Runs an assist task, transparently map-reducing when `context_tokens` is set and the transcript
-/// would overflow it: split into chunks, run the task on each, then combine the partial results.
-fn run_assist(
-    provider: &CloudProvider,
-    model: &str,
-    key: &str,
-    system: &str,
-    transcript: &str,
-    assist: &AssistParams,
-) -> Result<String, String> {
-    match input_char_budget(assist.context_tokens) {
-        Some(budget) if transcript.chars().count() > budget => {
-            map_reduce_assist(provider, model, key, system, transcript, assist, budget)
-        }
-        _ => chat_once(provider, model, key, system, transcript, assist),
-    }
-}
-
-/// One chat-completion call with the endpoint's tuning — temperature / max_tokens / top_p are each
-/// sent only when set, so a model that rejects a non-default temperature isn't sent one.
-fn chat_once(
-    provider: &CloudProvider,
-    model: &str,
-    key: &str,
-    system: &str,
-    user: &str,
-    assist: &AssistParams,
-) -> Result<String, String> {
-    chat_completion(
-        provider,
-        model,
-        key,
-        &ChatRequest {
-            system,
-            user,
-            temperature: assist.temperature,
-            max_tokens: assist.max_tokens,
-            top_p: assist.top_p,
-            frequency_penalty: assist.frequency_penalty,
-            presence_penalty: assist.presence_penalty,
-        },
-    )
-    .map_err(|e| e.to_string())
-}
-
-/// Map-reduce for a transcript that exceeds the context window: run the task on each chunk (map),
-/// then combine the partials under the original instruction (reduce). Covers the whole transcript
-/// rather than truncating it.
-fn map_reduce_assist(
-    provider: &CloudProvider,
-    model: &str,
-    key: &str,
-    system: &str,
-    transcript: &str,
-    assist: &AssistParams,
-    budget: usize,
-) -> Result<String, String> {
-    let chunks = chunk_by_chars(transcript, budget);
-
-    let mut partials = Vec::with_capacity(chunks.len());
-    for (i, chunk) in chunks.iter().enumerate() {
-        let part = chat_once(provider, model, key, system, chunk, assist)?;
-        partials.push(format!(
-            "=== Part {}/{} ===\n{}",
-            i + 1,
-            chunks.len(),
-            part.trim()
-        ));
-    }
-
-    let reduce_system = format!(
-        "Below are results from running the same instruction on consecutive parts of one long \
-         transcript. Combine them into a single coherent result that follows this instruction, \
-         merging duplicates and keeping it faithful:\n\n{system}"
-    );
-
-    chat_once(
-        provider,
-        model,
-        key,
-        &reduce_system,
-        &partials.join("\n\n"),
-        assist,
-    )
 }
 
 /// A user-imported model. Its files live under `custom_models_dir/<id>/`; `kind` selects the engine
@@ -3458,8 +2981,7 @@ fn start_session_blocking(app: AppHandle, options: LiveOptions) -> Result<Option
     };
 
     // Tap each processed transcription stream so the realtime assist can hear the same audio (mixed).
-    let mut assist_branches: Vec<FrameReceiver> = Vec::new();
-    let mut assist_tees: Vec<Tee> = Vec::new();
+    let mut assist_taps = assist::AssistTaps::default();
 
     match (mic_source, system_source) {
         // Both on → the mic re-hears the system audio on speakers (echo). Tee the system capture
@@ -3478,21 +3000,11 @@ fn start_session_blocking(app: AppHandle, options: LiveOptions) -> Result<Option
                 reference_rx,
                 echo_canceller(),
             ));
-            let aec_mic = tap_for_assist(
-                aec_mic,
-                options.assist,
-                &mut assist_branches,
-                &mut assist_tees,
-            );
+            let aec_mic = assist_taps.tap(aec_mic, options.assist);
 
             let meeting: Box<dyn AudioSource> =
                 Box::new(ChannelSource::new(meeting_rx, system_info));
-            let meeting = tap_for_assist(
-                meeting,
-                options.assist,
-                &mut assist_branches,
-                &mut assist_tees,
-            );
+            let meeting = assist_taps.tap(meeting, options.assist);
 
             // A shareable local batch engine runs BOTH streams through one model — half the RAM, one
             // rolling context, one unified speaker space. Streaming/Apple/cloud engines can't share a
@@ -3546,7 +3058,7 @@ fn start_session_blocking(app: AppHandle, options: LiveOptions) -> Result<Option
 
         // Mic only → no playback to echo; capture it directly.
         (Some(mic), None) => {
-            let mic = tap_for_assist(mic, options.assist, &mut assist_branches, &mut assist_tees);
+            let mic = assist_taps.tap(mic, options.assist);
             sessions.push(
                 spawn_session(
                     &app,
@@ -3562,12 +3074,7 @@ fn start_session_blocking(app: AppHandle, options: LiveOptions) -> Result<Option
 
         // System only → clean digital capture, no echo path; transcribe it directly.
         (None, Some(system)) => {
-            let system = tap_for_assist(
-                system,
-                options.assist,
-                &mut assist_branches,
-                &mut assist_tees,
-            );
+            let system = assist_taps.tap(system, options.assist);
             sessions.push(
                 spawn_session(
                     &app,
@@ -3593,54 +3100,9 @@ fn start_session_blocking(app: AppHandle, options: LiveOptions) -> Result<Option
     // Mirror the live audio (post-AEC mic + system) into a single mono source the realtime AI
     // assist can subscribe to on demand. The tee is drop-oldest, so an idle assist branch never
     // backs up transcription; the mix is built lazily here and consumed by `start_assist_realtime`.
-    store_assist_mix(&state, assist_branches, assist_tees)?;
+    assist::store_assist_mix(&state.assist, assist_taps)?;
 
     Ok(degraded_notice)
-}
-
-/// Combines the tapped live branches into one mono [`MixSource`] and parks it (plus the tee handles
-/// that keep the taps alive) on [`AppState`] for the realtime assist to pick up. With no branches
-/// (no source started) it clears any stale mix instead.
-fn store_assist_mix(
-    state: &AppState,
-    mut branches: Vec<FrameReceiver>,
-    tees: Vec<Tee>,
-) -> Result<(), String> {
-    let mix: Option<Box<dyn AudioSource>> = if branches.is_empty() {
-        None
-    } else {
-        let primary = branches.remove(0);
-        let secondary = if branches.is_empty() {
-            None
-        } else {
-            Some(branches.remove(0))
-        };
-        let info = AudioSourceInfo {
-            kind: AudioSourceKind::Microphone,
-            name: "Assist mix".to_owned(),
-        };
-
-        Some(Box::new(MixSource {
-            primary,
-            primary_rs: Resampler::new(ASSIST_MIX_RATE),
-            secondary,
-            secondary_rs: Resampler::new(ASSIST_MIX_RATE),
-            secondary_buf: VecDeque::new(),
-            mixer: MeetingMixer::new(),
-            info,
-        }))
-    };
-
-    *state
-        .assist_audio
-        .lock()
-        .map_err(|_| "state lock poisoned".to_owned())? = mix;
-    *state
-        .assist_tees
-        .lock()
-        .map_err(|_| "state lock poisoned".to_owned())? = tees;
-
-    Ok(())
 }
 
 /// Stops the live session off the main thread — joining the capture/transcription threads (which can
@@ -3660,9 +3122,7 @@ const STOP_TEARDOWN_TIMEOUT: Duration = Duration::from_secs(8);
 /// The live resources lifted out of [`AppState`] for teardown — joined off the Stop command so a
 /// wedged native handle (a stuck ScreenCaptureKit pump, a blocked engine drop) can never hang it.
 struct LiveTeardown {
-    worker: Option<AssistWorker>,
-    assist_tees: Vec<Tee>,
-    assist_audio: Option<Box<dyn AudioSource>>,
+    assist: assist::AssistTeardown,
     tee: Option<Tee>,
     sessions: Vec<Session>,
 }
@@ -3705,23 +3165,8 @@ fn take_live_teardown(state: &AppState) -> Result<LiveTeardown, String> {
         session.signal_stop();
     }
 
-    // Stop routing finals first so the sink doesn't push into a worker that's about to be joined.
-    *state
-        .assist_finals_tx
-        .lock()
-        .map_err(|_| "state lock poisoned".to_owned())? = None;
-    let assist_tees = std::mem::take(
-        &mut *state
-            .assist_tees
-            .lock()
-            .map_err(|_| "state lock poisoned".to_owned())?,
-    );
-    let assist_audio = state
-        .assist_audio
-        .lock()
-        .map_err(|_| "state lock poisoned".to_owned())?
-        .take();
-    let worker = take_assist_worker(state)?;
+    // Lift the assist out first (it stops routing finals before anything else), then the tee.
+    let assist = assist::take_assist_teardown(&state.assist)?;
     let tee = state
         .tee
         .lock()
@@ -3729,9 +3174,7 @@ fn take_live_teardown(state: &AppState) -> Result<LiveTeardown, String> {
         .take();
 
     Ok(LiveTeardown {
-        worker,
-        assist_tees,
-        assist_audio,
+        assist,
         tee,
         sessions,
     })
@@ -3743,21 +3186,13 @@ fn take_live_teardown(state: &AppState) -> Result<LiveTeardown, String> {
 /// stop each transcription session. Returns the first session error, if any.
 fn teardown_session(t: LiveTeardown) -> Result<(), String> {
     let LiveTeardown {
-        worker,
-        assist_tees,
-        assist_audio,
+        assist,
         tee,
         sessions,
     } = t;
 
-    // Close the assist taps + drop any parked mix BEFORE joining the worker: it blocks on its mixed
-    // `recv` fed by these taps, so closing them lets it observe end-of-stream and exit even if the
-    // capture device wedged — otherwise the join could hang on a recv nothing satisfies.
-    drop(assist_tees);
-    drop(assist_audio);
-    if let Some(worker) = worker {
-        let _ = worker.stop_join();
-    }
+    // Close the assist taps, then join its worker — `AssistTeardown::shutdown` explains the order.
+    assist.shutdown();
 
     // Dropping the tee stops the capture pump and closes the system session's source channel, so its
     // blocking `recv` returns `None`. Joining the sessions before this would deadlock on that recv.
@@ -3776,76 +3211,12 @@ fn teardown_session(t: LiveTeardown) -> Result<(), String> {
     }
 }
 
-/// How often the realtime assist may volunteer an ambient reply, when there's new speech since the
-/// last one — so it rides along the conversation without firing on every utterance (noisy + costly).
-const ASSIST_THROTTLE: std::time::Duration = std::time::Duration::from_secs(15);
-
-/// If a triggered reply never completes within this long (stalled stream), stop waiting on it so the
-/// cadence resumes — a safety valve, not the normal path (replies finish in a second or two).
-const ASSIST_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// A running realtime AI-assist worker: the stop flag its loop polls, a one-shot flag the UI sets to
-/// pull a reply on demand, and the thread handle — which *returns the mix source* on join, so the
-/// assist can be stopped and restarted within one live session without re-tapping the capture.
-struct AssistWorker {
-    stop: Arc<std::sync::atomic::AtomicBool>,
-    hint: Arc<std::sync::atomic::AtomicBool>,
-    handle: std::thread::JoinHandle<Box<dyn AudioSource>>,
-}
-
-impl AssistWorker {
-    /// Signals the loop to stop, joins the thread, and hands back the mix source it owned — `None`
-    /// only if the thread panicked (then the source is gone with it).
-    fn stop_join(self) -> Option<Box<dyn AudioSource>> {
-        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        self.handle.join().ok()
-    }
-}
-
-/// One line of authoritative, speaker-attributed text for the realtime assist — the mic is "Me", the
-/// system side is "Them" plus the live diarizer's 1-based speaker number when known. Mirrors the
-/// frontend's on-screen attribution so the injected anchor reads the same way the user sees it.
-fn assist_final_text(segment: &TranscriptSegment) -> String {
-    let who = match segment.source {
-        AudioSourceKind::Microphone => "Me".to_owned(),
-        AudioSourceKind::System => match segment.speaker {
-            Some(id) => format!("Them (Speaker {})", id.0 + 1),
-            None => "Them".to_owned(),
-        },
-        _ => "Speaker".to_owned(),
-    };
-
-    format!("{who}: {}", segment.text)
-}
-
-/// Routes one diarized final into the running realtime assist, if any — best-effort (a closed channel
-/// just means the assist stopped). Called from the live sink for every admitted final.
-fn route_assist_final(app: &AppHandle, segment: &TranscriptSegment) {
-    let state = app.state::<AppState>();
-    let Ok(guard) = state.assist_finals_tx.lock() else {
-        return;
-    };
-
-    if let Some(tx) = guard.as_ref() {
-        let _ = tx.send(assist_final_text(segment));
-    }
-}
-
 /// Retains one committed live final for export (the meeting transcript), accumulated across both the
 /// mic and system streams. Best-effort: a poisoned lock just drops it from the export, never the feed.
 fn retain_live_segment(app: &AppHandle, segment: &TranscriptSegment) {
     if let Ok(mut segments) = app.state::<AppState>().live_segments.lock() {
         segments.push(segment.clone());
     }
-}
-
-/// Takes the running assist worker out of state, if any — the caller stops + joins it.
-fn take_assist_worker(state: &AppState) -> Result<Option<AssistWorker>, String> {
-    Ok(state
-        .assist_worker
-        .lock()
-        .map_err(|_| "state lock poisoned".to_owned())?
-        .take())
 }
 
 /// The on-device API key for cloud `provider`, or an error naming the provider if none is saved.
@@ -3858,239 +3229,6 @@ fn cloud_key(state: &AppState, provider: &str) -> Result<String, String> {
         .filter(|k| !k.trim().is_empty())
         .cloned()
         .ok_or_else(|| format!("no API key saved for {provider}"))
-}
-
-/// The realtime assist loop — the hybrid, controlled-cadence engine room. Each iteration:
-/// 1. injects any new diarized finals as authoritative text context (`engine.inject_text`),
-/// 2. feeds one audio frame (prosody + low latency) and drains any in-flight reply,
-/// 3. decides whether to trigger a reply now — on a manual pull, or throttled when there's new speech.
-///
-/// Replies fire on `response.create` (the session is configured `create_response:false`), so the
-/// model answers on this cadence instead of every utterance. Exits when stopped or when the capture
-/// closes (the live session ended), returning the source so the assist can restart.
-fn spawn_assist_worker(
-    app: AppHandle,
-    mut engine: Box<dyn StreamingAsrEngine>,
-    mut source: Box<dyn AudioSource>,
-    finals_rx: std::sync::mpsc::Receiver<String>,
-) -> AssistWorker {
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    let stop = Arc::new(AtomicBool::new(false));
-    let hint = Arc::new(AtomicBool::new(false));
-    let stop_worker = Arc::clone(&stop);
-    let hint_worker = Arc::clone(&hint);
-
-    let handle = std::thread::spawn(move || {
-        let mut last_trigger = std::time::Instant::now();
-        let mut new_speech = false; // a final arrived since the last reply → worth a throttled reply
-        let mut awaiting = false; // a reply is in flight (don't stack another)
-        let mut awaiting_since = std::time::Instant::now();
-        let mut streamed = 0usize; // chars of the in-progress reply already streamed to the UI
-
-        while !stop_worker.load(Ordering::Relaxed) {
-            // 1. Inject every authoritative final waiting — the diarized anchor the model trusts.
-            while let Ok(text) = finals_rx.try_recv() {
-                engine.inject_text(&text);
-                new_speech = true;
-            }
-
-            // 2. Feed audio + drain any reply. Continuous capture means a frame is always close behind,
-            // so the stop flag is honoured within one frame; `None` = the live tee was dropped → stop.
-            let frame = match source.next_frame() {
-                Ok(Some(frame)) => frame,
-                Ok(None) => break,
-                Err(_) => break,
-            };
-            let result = engine.accept_waveform(frame.sample_rate, &frame.samples);
-            if result.is_endpoint {
-                let text = result.text.trim();
-                if !text.is_empty() {
-                    let _ = app.emit(ASSIST_TEXT_EVENT, text.to_owned());
-                }
-                streamed = 0; // the reply closed; the next one starts a fresh stream
-                awaiting = false; // the reply completed
-            } else {
-                // Stream the in-progress reply as it grows: emit only the new suffix (char-safe for CJK),
-                // so the feed fills token-by-token instead of waiting for the whole reply.
-                let total = result.text.chars().count();
-                if total > streamed {
-                    let delta: String = result.text.chars().skip(streamed).collect();
-                    let _ = app.emit(ASSIST_DELTA_EVENT, delta);
-                    streamed = total;
-                }
-            }
-
-            // A stalled reply must not wedge the cadence forever.
-            if awaiting && awaiting_since.elapsed() >= ASSIST_RESPONSE_TIMEOUT {
-                awaiting = false;
-            }
-
-            // 3. Trigger a reply only when idle: a manual pull always fires; otherwise throttle, and
-            // only when there's been new speech since the last one (never reply to silence).
-            if !awaiting {
-                let manual = hint_worker.swap(false, Ordering::Relaxed);
-                let throttled = new_speech && last_trigger.elapsed() >= ASSIST_THROTTLE;
-                if manual || throttled {
-                    engine.request_response();
-                    last_trigger = std::time::Instant::now();
-                    awaiting = true;
-                    awaiting_since = last_trigger;
-                    new_speech = false;
-                }
-            }
-        }
-
-        source
-    });
-
-    AssistWorker { stop, hint, handle }
-}
-
-/// Starts the realtime AI assist over the live session's audio. Off the main thread — the WebSocket
-/// handshake blocks ~1-2s, which would freeze the UI (the Connecting spinner can't animate).
-#[tauri::command]
-async fn start_assist_realtime(
-    app: AppHandle,
-    provider: String,
-    model: String,
-    instructions: String,
-    params: HashMap<String, serde_json::Value>,
-) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        start_assist_realtime_blocking(app, provider, model, instructions, params)
-    })
-    .await
-    .map_err(|e| format!("assist start task failed: {e}"))?
-}
-
-/// Connects an OpenAI realtime `model` that listens to the same mic+system mix as transcription and
-/// answers each turn under `instructions` (the user's assist prompt). Requires a live session (for the
-/// audio to tap) and that the assist isn't already running. Surfaces a missing key / bad model / failed
-/// handshake as an error; on a build failure the mix source is restored so a retry can run.
-fn start_assist_realtime_blocking(
-    app: AppHandle,
-    provider: String,
-    model: String,
-    instructions: String,
-    params: HashMap<String, serde_json::Value>,
-) -> Result<(), String> {
-    let state = app.state::<AppState>();
-
-    if assist_worker_running(&state)? {
-        return Err("the realtime assist is already running".to_owned());
-    }
-
-    // Realtime assist speaks OpenAI's `response.output_text` protocol; other providers' live APIs
-    // differ, so they aren't wired yet (a chat model runs the polling assist instead).
-    if provider != "openai" {
-        return Err("realtime assist currently supports OpenAI realtime models".to_owned());
-    }
-
-    let key = cloud_key(&state, &provider)?;
-
-    // The model's full instruction is exactly what the user sees + edits in the assist prompt — no
-    // hidden backend preamble. (The frontend's realtime prompt carries the grounding/anti-conversational
-    // rules, visibly, so every detail is the user's to read and tune.)
-    let source = state
-        .assist_audio
-        .lock()
-        .map_err(|_| "state lock poisoned".to_owned())?
-        .take()
-        .ok_or("start a live session before the realtime assist")?;
-
-    let app_err = app.clone();
-    let on_error: Box<dyn Fn(&str) + Send> = Box::new(move |msg: &str| {
-        let _ = app_err.emit(ASSIST_ERROR_EVENT, msg.to_owned());
-    });
-
-    let assist_params = build_param_values(&assist_realtime_param_specs(), &params);
-    let engine = match build_assist_engine(&model, &key, &instructions, &assist_params, on_error) {
-        Ok(engine) => engine,
-        Err(e) => {
-            *state
-                .assist_audio
-                .lock()
-                .map_err(|_| "state lock poisoned".to_owned())? = Some(source);
-            return Err(e.to_string());
-        }
-    };
-
-    // Open the finals channel so the live sink starts feeding the assist its diarized anchors.
-    let (finals_tx, finals_rx) = std::sync::mpsc::channel::<String>();
-    *state
-        .assist_finals_tx
-        .lock()
-        .map_err(|_| "state lock poisoned".to_owned())? = Some(finals_tx);
-
-    let worker = spawn_assist_worker(app.clone(), engine, source, finals_rx);
-    *state
-        .assist_worker
-        .lock()
-        .map_err(|_| "state lock poisoned".to_owned())? = Some(worker);
-
-    Ok(())
-}
-
-/// Pulls a realtime-assist reply on demand — the "give me a hint now" button. Sets the worker's
-/// one-shot flag, which its loop consumes on the next frame. No-op error if the assist isn't running.
-#[tauri::command]
-fn assist_hint_now(state: State<'_, AppState>) -> Result<(), String> {
-    let guard = state
-        .assist_worker
-        .lock()
-        .map_err(|_| "state lock poisoned".to_owned())?;
-
-    match guard.as_ref() {
-        Some(worker) => {
-            worker
-                .hint
-                .store(true, std::sync::atomic::Ordering::Relaxed);
-            Ok(())
-        }
-        None => Err("the realtime assist isn't running".to_owned()),
-    }
-}
-
-/// Whether an assist worker is currently running (a peek that doesn't take it).
-fn assist_worker_running(state: &AppState) -> Result<bool, String> {
-    Ok(state
-        .assist_worker
-        .lock()
-        .map_err(|_| "state lock poisoned".to_owned())?
-        .is_some())
-}
-
-/// Stops the realtime AI assist and restores the mix source so it can be started again within the same
-/// live session. No-op when the assist isn't running. Off the main thread — the join may take a moment.
-#[tauri::command]
-async fn stop_assist_realtime(app: AppHandle) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || stop_assist_realtime_blocking(app))
-        .await
-        .map_err(|e| format!("assist stop task failed: {e}"))?
-}
-
-fn stop_assist_realtime_blocking(app: AppHandle) -> Result<(), String> {
-    let state = app.state::<AppState>();
-
-    // Stop the live sink from routing finals before joining the worker (it's about to be gone).
-    *state
-        .assist_finals_tx
-        .lock()
-        .map_err(|_| "state lock poisoned".to_owned())? = None;
-
-    if let Some(worker) = take_assist_worker(&state)? {
-        // Restore the source so the assist can restart while the session is still live (a session-level
-        // Stop clears it separately).
-        if let Some(source) = worker.stop_join() {
-            *state
-                .assist_audio
-                .lock()
-                .map_err(|_| "state lock poisoned".to_owned())? = Some(source);
-        }
-    }
-
-    Ok(())
 }
 
 /// The transcription backend chosen for a file: the active on-device model, or a cloud
@@ -5058,10 +4196,7 @@ pub fn run() {
                 live_prompt: Mutex::new(String::new()),
                 live_accurate: Mutex::new(false),
                 tee: Mutex::new(None),
-                assist_tees: Mutex::new(Vec::new()),
-                assist_audio: Mutex::new(None),
-                assist_worker: Mutex::new(None),
-                assist_finals_tx: Mutex::new(None),
+                assist: assist::AssistState::default(),
                 file_segments: Mutex::new(Vec::new()),
                 file_cancel: Arc::new(AtomicBool::new(false)),
                 file_busy: Arc::new(AtomicBool::new(false)),
@@ -5112,10 +4247,10 @@ pub fn run() {
             remove_cloud_endpoint,
             streaming_params,
             batch_params,
-            assist_params,
-            assist_realtime_params,
-            run_llm_task,
-            run_assist_stream,
+            assist::chat::assist_params,
+            assist::realtime::assist_realtime_params,
+            assist::chat::run_llm_task,
+            assist::chat::run_assist_stream,
             get_download_settings,
             set_download_settings,
             download_model,
@@ -5139,9 +4274,9 @@ pub fn run() {
             set_devices,
             start_session,
             stop_session,
-            start_assist_realtime,
-            stop_assist_realtime,
-            assist_hint_now,
+            assist::realtime::start_assist_realtime,
+            assist::realtime::stop_assist_realtime,
+            assist::realtime::assist_hint_now,
             transcribe_file,
             cancel_file_transcription,
             export_transcript,
@@ -5248,103 +4383,6 @@ mod tests {
         }
         .to_provider();
         assert_eq!(cloud_live_protocol(&custom, "metis"), None);
-    }
-
-    #[test]
-    fn assist_helpers_budget_chunk_combine_and_normalize() {
-        // No window (or 0) disables map-reduce; a window reserves headroom (3 chars/token × 3/5).
-        assert_eq!(input_char_budget(None), None);
-        assert_eq!(input_char_budget(Some(0)), None);
-        assert_eq!(input_char_budget(Some(1000)), Some(1800));
-
-        // Chunking breaks only at line boundaries, stays under budget, and never drops content.
-        let text = "aaaa\nbbbb\ncccc\ndddd";
-        let chunks = chunk_by_chars(text, 9);
-        assert!(chunks.iter().all(|c| c.chars().count() <= 9));
-        assert_eq!(chunks.join("\n"), text);
-
-        // A single over-long line becomes its own chunk rather than being split mid-line.
-        let long = "x".repeat(50);
-        assert_eq!(chunk_by_chars(&long, 10).len(), 1);
-
-        // The standing instruction is prepended, blank-safe.
-        assert_eq!(combine_system("  ", "task"), "task");
-        assert_eq!(
-            combine_system("Reply in Cantonese.", "Summarize."),
-            "Reply in Cantonese.\n\nSummarize."
-        );
-
-        // Normalize clamps ranges and drops zero token caps to "unset".
-        let n = normalize_assist(AssistParams {
-            temperature: Some(5.0),
-            max_tokens: Some(0),
-            context_tokens: Some(8000),
-            top_p: Some(-1.0),
-            frequency_penalty: Some(3.0),
-            presence_penalty: Some(-3.0),
-            system_prompt: "  hi  ".to_owned(),
-        });
-        assert_eq!(n.temperature, Some(2.0));
-        assert_eq!(n.top_p, Some(0.0));
-        assert_eq!(n.frequency_penalty, Some(2.0));
-        assert_eq!(n.presence_penalty, Some(-2.0));
-        assert_eq!(n.max_tokens, None);
-        assert_eq!(n.context_tokens, Some(8000));
-        assert_eq!(n.system_prompt, "hi");
-    }
-
-    #[test]
-    fn overlay_assist_params_applies_only_set_knobs_and_clamps() {
-        let base = AssistParams {
-            temperature: None,
-            max_tokens: None,
-            context_tokens: Some(8000),
-            top_p: None,
-            frequency_penalty: None,
-            presence_penalty: None,
-            system_prompt: "persona".to_owned(),
-        };
-
-        // A knob the user set overrides; unset knobs leave the resolved value untouched.
-        let mut set = ParamValues::new();
-        set.set("temperature", ParamValue::Float(0.3));
-        let out = overlay_assist_params(base.clone(), &set);
-        assert_eq!(out.temperature, Some(0.3), "set temperature overrides");
-        assert_eq!(out.top_p, None, "unset top_p stays unset");
-        assert_eq!(out.presence_penalty, None, "unset penalty stays unset");
-        assert_eq!(out.context_tokens, Some(8000), "untouched fields preserved");
-        assert_eq!(out.system_prompt, "persona");
-
-        // Empty overrides leave every field as resolved — so an unset temperature is still omitted.
-        let untouched = overlay_assist_params(base.clone(), &ParamValues::new());
-        assert_eq!(untouched.temperature, None);
-
-        // Overrides bypass the save-time normaliser, so the overlay clamps them itself.
-        let mut wild = ParamValues::new();
-        wild.set("temperature", ParamValue::Float(5.0));
-        wild.set("top_p", ParamValue::Float(2.0));
-        wild.set("frequency_penalty", ParamValue::Float(9.0));
-        wild.set("presence_penalty", ParamValue::Float(-9.0));
-        wild.set("max_tokens", ParamValue::Int(512));
-        let clamped = overlay_assist_params(base.clone(), &wild);
-        assert_eq!(clamped.temperature, Some(2.0), "temperature clamped to 2");
-        assert_eq!(clamped.top_p, Some(1.0), "top_p clamped to 1");
-        assert_eq!(
-            clamped.frequency_penalty,
-            Some(2.0),
-            "frequency clamped to 2"
-        );
-        assert_eq!(
-            clamped.presence_penalty,
-            Some(-2.0),
-            "presence clamped to -2"
-        );
-        assert_eq!(clamped.max_tokens, Some(512));
-
-        // A max_tokens of 0 is the neutral default ("no cap") → treated as unset.
-        let mut zero = ParamValues::new();
-        zero.set("max_tokens", ParamValue::Int(0));
-        assert_eq!(overlay_assist_params(base, &zero).max_tokens, None);
     }
 
     #[test]
