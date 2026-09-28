@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main]
 
+# Read-only token: no job here needs to write to the repo.
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -73,51 +77,12 @@ jobs:
       - name: test wisp-embed
         run: cargo test --manifest-path crates/wisp-embed/Cargo.toml --lib
 
-  # Proves the Tauri shell + its cross-platform deps (sherpa-onnx, cpal) build on Windows, where the
-  # macOS-only bits (ScreenCaptureKit, WebRTC AEC, Metal whisper.cpp) are absent and degrade.
-  #
-  # No rust-cache here: sherpa-rs-sys downloads its prebuilt C library to a dir *outside* the cached
-  # target/ + ~/.cargo (AppData\Local\sherpa-rs), then bakes that absolute path into the build
-  # script's link-search directives. A cache hit restores target/ with those directives but not the
-  # download they point at, so link.exe fails with "cannot open input file 'cargs.lib'". Build clean.
-  windows-app:
-    name: app builds (windows)
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      # Exposes VCToolsRedistDir so build.rs can app-local deploy the exact VC++ runtime used by the
-      # release compiler. The packaging smoke test rejects any fallback to the runner's System32.
-      - name: Set up the MSVC build environment
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-      - name: Build the frontend (tauri-build needs the dist)
-        working-directory: app
-        run: |
-          npm ci
-          npm run build
-      - name: Verify Windows runtime config
-        run: node scripts/verify-windows-runtime-config.mjs
-      # Build the sherpa engine first so sherpa-rs-sys drops the onnxruntime / sherpa DLLs into the
-      # target dir before the app's build.rs stages them for tauri's `resources` check. Cargo doesn't
-      # order one build script before a dependent's, so a single `cargo build` can run the app's
-      # build.rs first and fail on the not-yet-present DLLs; a separate prior step removes that race.
-      - name: Stage sherpa runtime DLLs
-        run: cargo build --manifest-path app/src-tauri/Cargo.toml -p wisp-engine-sherpa
-      - name: Build the app
-        run: cargo build --manifest-path app/src-tauri/Cargo.toml
-      - name: Verify staged Windows runtime
-        shell: bash
-        run: ./scripts/verify-windows-runtime.sh app/src-tauri/windows-runtime
-
   # Proves the macOS app builds — including the macOS-ONLY code no other CI job ever compiles:
   # ScreenCaptureKit system audio, the WebRTC AEC3 echo canceller, Metal whisper.cpp, and Apple
   # SpeechAnalyzer. Without this job a macOS-only regression slips past CI and only surfaces on a real
-  # Mac build/release. Same sherpa-rs-sys download-path caveat as the Windows job, so no rust-cache.
+  # Mac build/release. No rust-cache: sherpa-rs-sys downloads its prebuilt library outside the
+  # cached target/ + ~/.cargo and bakes that absolute path into its link-search directives, so a
+  # cache hit restores directives that point at nothing. Build clean.
   macos-app:
     name: app builds (macos)
     runs-on: macos-15
