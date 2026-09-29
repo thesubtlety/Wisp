@@ -97,8 +97,16 @@ export const zhHans: Messages = {
     ok: "成功",
     failed: "出错",
     defaultModel: "默认模型",
-    tokens: (input: number, output: number, estimated: boolean) =>
-      `输入 ${estimated ? "≈" : ""}${input.toLocaleString()} / 输出 ${estimated ? "≈" : ""}${output.toLocaleString()}`,
+    tokens: (input: number, cached: number, output: number, estimated: boolean) =>
+      estimated
+        ? `输入 ≈${input.toLocaleString()} / 输出 ≈${output.toLocaleString()}`
+        : `输入 ${input.toLocaleString()} / 缓存 ${cached.toLocaleString()} / 输出 ${output.toLocaleString()}`,
+    cacheSplit: (read: number, written: number) =>
+      `从提示缓存读取 ${read.toLocaleString()}，写入 ${written.toLocaleString()}`,
+    apiCost: (usd: string) => `按 API 计价约 $${usd}`,
+    apiCostNote: "后端报告的按 API 价格计算的费用。使用订阅时，你支付的是订阅费用，而不是这个金额。",
+    totals: (calls: number) => `${calls.toLocaleString()} 次调用`,
+    partialCost: (n: number) => `不完整：${n.toLocaleString()} 次调用未报告费用`,
     estimatedNote: "该后端未报告 token 数，因此按文本估算（约 4 个字符 1 个 token）。",
     sent: "发送内容",
     instructions: "指令",

@@ -234,15 +234,29 @@ fn parse_envelope(stdout: &str) -> Result<Envelope, ReasoningError> {
     Ok((text, structured, envelope_usage(&env)))
 }
 
-/// The envelope's `usage`: every kind of input token (fresh, cache writes, cache reads) counts as
-/// input, since all of it was sent.
+/// The envelope's `usage`, `total_cost_usd` and the model that answered. Claude reports uncached
+/// input, cache writes and cache reads separately; they stay separate here.
 fn envelope_usage(env: &serde_json::Value) -> Option<TokenUsage> {
     let usage = env.get("usage")?;
     let n = |k: &str| usage.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
     Some(TokenUsage {
-        input: n("input_tokens") + n("cache_creation_input_tokens") + n("cache_read_input_tokens"),
+        input: n("input_tokens"),
         output: usage.get("output_tokens")?.as_u64()?,
+        cache_read: n("cache_read_input_tokens"),
+        cache_write: n("cache_creation_input_tokens"),
+        cost_usd: env.get("total_cost_usd").and_then(|v| v.as_f64()),
+        model: main_model(env),
     })
+}
+
+/// The model in `modelUsage` that cost the most (a call can touch more than one), or the only one.
+fn main_model(env: &serde_json::Value) -> Option<String> {
+    let models = env.get("modelUsage")?.as_object()?;
+    let cost = |v: &serde_json::Value| v.get("costUSD").and_then(|c| c.as_f64()).unwrap_or(0.0);
+    models
+        .iter()
+        .max_by(|a, b| cost(a.1).total_cmp(&cost(b.1)))
+        .map(|(name, _)| name.clone())
 }
 
 #[cfg(test)]
@@ -326,18 +340,49 @@ mod tests {
     }
 
     #[test]
-    fn envelope_usage_counts_cached_input() {
+    fn envelope_usage_keeps_cache_tokens_apart() {
         let (_, _, u) = parse_envelope(
             r#"{"type":"result","result":"{}","usage":{"input_tokens":10,"cache_creation_input_tokens":200,"cache_read_input_tokens":3000,"output_tokens":42}}"#,
         )
         .unwrap();
+        let u = u.unwrap();
         assert_eq!(
-            u,
-            Some(TokenUsage {
-                input: 3210,
-                output: 42
-            })
+            (u.input, u.cache_write, u.cache_read, u.output),
+            (10, 200, 3000, 42)
         );
+        assert_eq!(u.total_input(), 3210);
+        assert_eq!(u.total(), 3252);
+        assert_eq!((u.cost_usd, u.model), (None, None), "neither reported");
+    }
+
+    /// A real `claude -p "Reply OK" --output-format json` envelope (ids zeroed).
+    const JSON_FIXTURE: &str = include_str!("../fixtures/claude_result.json");
+    /// The same result as the last line of `--output-format stream-json --verbose`.
+    const STREAM_FIXTURE: &str = include_str!("../fixtures/claude_result_stream.jsonl");
+
+    #[test]
+    fn real_envelopes_report_cost_cache_and_model() {
+        for out in [JSON_FIXTURE, STREAM_FIXTURE] {
+            let (text, _, u) = parse_envelope(result_line(out)).unwrap();
+            assert_eq!(text, "OK");
+            let u = u.unwrap();
+            assert_eq!(u.input, 2);
+            assert_eq!(u.cache_write, 3116);
+            assert_eq!(u.cache_read, 3144);
+            assert_eq!(u.output, 4);
+            assert_eq!(u.cost_usd, Some(0.0256448));
+            assert_eq!(u.model.as_deref(), Some("claude-opus-5-5"));
+        }
+    }
+
+    #[test]
+    fn the_costliest_model_is_the_one_reported() {
+        let env = serde_json::json!({"modelUsage": {
+            "claude-haiku-4-5": {"costUSD": 0.001},
+            "claude-opus-5-5": {"costUSD": 0.04},
+        }});
+        assert_eq!(main_model(&env).as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(main_model(&serde_json::json!({})), None);
     }
 
     #[test]

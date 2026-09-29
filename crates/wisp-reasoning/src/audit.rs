@@ -18,7 +18,7 @@ use crate::backend::{
 const CHARS_PER_TOKEN: u64 = 4;
 
 /// One finished model call.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AuditRecord {
     /// When the call started (Unix ms).
     pub at_ms: i64,
@@ -38,10 +38,23 @@ pub struct AuditRecord {
     pub output: String,
     pub error: Option<String>,
     pub elapsed_ms: u64,
+    /// Prompt tokens not read from or written to a cache.
     pub tokens_in: u64,
     pub tokens_out: u64,
     /// The token counts are a character-based estimate, not the backend's own.
     pub tokens_estimated: bool,
+    /// Prompt tokens read from the provider's cache.
+    #[serde(default)]
+    pub cache_read_tokens: u64,
+    /// Prompt tokens written to the provider's cache.
+    #[serde(default)]
+    pub cache_write_tokens: u64,
+    /// The API-price cost the backend reported, in US dollars; `None` when it reported none.
+    #[serde(default)]
+    pub cost_usd: Option<f64>,
+    /// The model that answered, as the backend reported it.
+    #[serde(default)]
+    pub model_reported: Option<String>,
 }
 
 /// Where records go. Called on the calling thread right after each call, so it should be quick.
@@ -93,14 +106,12 @@ impl AuditRecord {
             Ok((output, usage)) => (output, usage, None),
             Err(e) => (String::new(), None, Some(e)),
         };
-        let (tokens_in, tokens_out, tokens_estimated) = match usage {
-            Some(u) => (u.input, u.output, false),
-            None => (
-                estimate_tokens(&info.instructions) + estimate_tokens(&info.context),
-                estimate_tokens(&output),
-                true,
-            ),
-        };
+        let tokens_estimated = usage.is_none();
+        let usage = usage.unwrap_or_else(|| TokenUsage {
+            input: estimate_tokens(&info.instructions) + estimate_tokens(&info.context),
+            output: estimate_tokens(&output),
+            ..TokenUsage::default()
+        });
         Self {
             at_ms,
             task: info.task,
@@ -113,9 +124,13 @@ impl AuditRecord {
             output,
             error,
             elapsed_ms: elapsed.as_millis() as u64,
-            tokens_in,
-            tokens_out,
+            tokens_in: usage.input,
+            tokens_out: usage.output,
             tokens_estimated,
+            cache_read_tokens: usage.cache_read,
+            cache_write_tokens: usage.cache_write,
+            cost_usd: usage.cost_usd,
+            model_reported: usage.model,
         }
     }
 }
@@ -193,7 +208,7 @@ impl ReasoningBackend for AuditingBackend {
                 } else {
                     resp.raw.clone()
                 };
-                (text, resp.usage)
+                (text, resp.usage.clone())
             },
         )
     }
@@ -278,9 +293,19 @@ mod tests {
                 Some(TokenUsage {
                     input: 7,
                     output: 2,
+                    cache_read: 30,
+                    cache_write: 5,
+                    cost_usd: Some(0.0453),
+                    model: Some("gpt-x-2026".into()),
                 }),
             )),
         );
+        assert_eq!(
+            (reported.cache_read_tokens, reported.cache_write_tokens),
+            (30, 5)
+        );
+        assert_eq!(reported.cost_usd, Some(0.0453));
+        assert_eq!(reported.model_reported.as_deref(), Some("gpt-x-2026"));
         assert_eq!(
             (
                 reported.tokens_in,
@@ -299,6 +324,7 @@ mod tests {
             ),
             (100, 2, true)
         );
+        assert_eq!((estimated.cache_read_tokens, estimated.cost_usd), (0, None));
     }
 
     #[test]

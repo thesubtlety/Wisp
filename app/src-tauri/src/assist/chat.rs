@@ -428,9 +428,12 @@ fn chat_once(
         call_info(provider, model, system, user),
         || chat_completion_with_usage(provider, model, key, &req),
         |(text, usage)| {
+            // A model on this machine costs nothing; a cloud provider's price is unknown here.
             let usage = usage.map(|u| TokenUsage {
                 input: u.prompt_tokens,
                 output: u.completion_tokens,
+                cost_usd: is_loopback(&provider.base_url).then_some(0.0),
+                ..TokenUsage::default()
             });
             (text.clone(), usage)
         },

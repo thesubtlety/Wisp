@@ -20,7 +20,7 @@ mod state_log;
 mod store;
 
 pub use embed::Embedder;
-pub use llm_log::LlmCall;
+pub use llm_log::{LlmCall, LlmTotals};
 pub use memory::{MemoryEntry, MemoryInput, ProvenanceRef};
 pub use record::{Note, NoteSummary, Project, SearchHit, Segment, Source};
 pub use retention::{

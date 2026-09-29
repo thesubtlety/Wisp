@@ -4620,6 +4620,7 @@ pub fn run() {
             retention::delete_project_completely,
             assist::realtime::stop_assist_realtime,
             audit::list_ai_activity,
+            audit::ai_activity_totals,
             audit::ai_activity_live_meeting,
             audit::clear_ai_activity,
             assist::realtime::assist_hint_now,
