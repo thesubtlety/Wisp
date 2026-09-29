@@ -3,15 +3,21 @@
 //!     cargo run -p wisp-reasoning --example probe -- codex          # health only
 //!     cargo run -p wisp-reasoning --example probe -- claude --run   # plus one real call
 //!     cargo run -p wisp-reasoning --example probe -- auto --run     # Codex, falling back to Claude
+//!     cargo run -p wisp-reasoning --example probe -- local --run    # Ollama at localhost:11434
+//!     cargo run -p wisp-reasoning --example probe -- claude --run --image shot.png
+//!
+//! `local` reads `WISP_PROBE_LOCAL_URL` (default `http://127.0.0.1:11434/v1`) and
+//! `WISP_PROBE_LOCAL_MODEL` (default `llama3.2:3b`).
 //!
 //! The call uses your logged-in subscription and sends only the made-up context below.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use serde_json::json;
 use wisp_reasoning::{
     CancelToken, ClaudeCodeBackend, ClaudeConfig, CodexCliBackend, CodexConfig, FallbackBackend,
-    ReasoningBackend, ReasoningRequest, TaskKind,
+    LocalConfig, OpenAiCompatBackend, ReasoningBackend, ReasoningRequest, TaskKind,
 };
 
 fn main() {
@@ -19,9 +25,14 @@ fn main() {
     let backend: Box<dyn ReasoningBackend> = match args.first().map(String::as_str) {
         Some("claude") => Box::new(ClaudeCodeBackend::new(ClaudeConfig::default())),
         Some("auto") => Box::new(FallbackBackend::codex_then_claude()),
+        Some("local") => Box::new(OpenAiCompatBackend::new(LocalConfig {
+            base_url: env_or("WISP_PROBE_LOCAL_URL", "http://127.0.0.1:11434/v1"),
+            model: env_or("WISP_PROBE_LOCAL_MODEL", "llama3.2:3b"),
+            api_key: None,
+        })),
         Some("codex") | None => Box::new(CodexCliBackend::new(CodexConfig::default())),
         Some(other) => {
-            eprintln!("unknown backend {other:?}; use codex, claude or auto");
+            eprintln!("unknown backend {other:?}; use codex, claude, auto or local");
             std::process::exit(2);
         }
     };
@@ -32,9 +43,20 @@ fn main() {
         return;
     }
 
+    let image = args
+        .iter()
+        .position(|a| a == "--image")
+        .and_then(|i| args.get(i + 1))
+        .map(PathBuf::from);
+    let instructions = if image.is_some() {
+        "Answer from the context and the attached image. Describe what the image shows in one \
+         sentence, then cite the evidence IDs you used."
+    } else {
+        "Answer from the context only. Cite the evidence IDs you used."
+    };
     let request = ReasoningRequest {
         task: TaskKind::Ask,
-        instructions: "Answer from the context only. Cite the evidence IDs you used.".into(),
+        instructions: instructions.into(),
         context: "[T1] Them: Production has to run in our own Azure tenant.\n\
                   [T2] You: Understood, Azure it is."
             .into(),
@@ -48,7 +70,7 @@ fn main() {
             }
         }),
         timeout: Duration::from_secs(180),
-        images: Vec::new(),
+        images: image.into_iter().collect(),
     };
     match backend.invoke(&request, &CancelToken::new()) {
         Ok(resp) => println!(
@@ -57,4 +79,8 @@ fn main() {
         ),
         Err(e) => println!("failed: {e}"),
     }
+}
+
+fn env_or(key: &str, default: &str) -> String {
+    std::env::var(key).unwrap_or_else(|_| default.to_owned())
 }

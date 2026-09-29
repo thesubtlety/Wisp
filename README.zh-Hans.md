@@ -163,7 +163,7 @@ Wisp 不只是「能在 Mac 上跑」—— 它贴着架构做了优化：
 
 ## 🛠️ 从源码构建
 
-需要 **Rust**（stable）、**Node** 20+，以及各平台的构建工具（macOS 上是 Xcode + `meson`/`ninja`；Windows 上是 MSVC）。
+需要 **Rust**（stable）、**Node** 20+，以及各平台的构建工具（macOS 上是 Xcode 或其命令行工具 + `cmake`/`meson`/`ninja`；Windows 上是 MSVC）。
 
 ```sh
 git clone --recurse-submodules https://github.com/ppXD/Wisp.git

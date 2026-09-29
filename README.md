@@ -163,7 +163,7 @@ Grab the latest build from **[Releases](https://github.com/ppXD/Wisp/releases)**
 
 ## 🛠️ Build from source
 
-Requires **Rust** (stable), **Node** 20+, and platform build tools (Xcode + `meson`/`ninja` on macOS; MSVC on Windows).
+Requires **Rust** (stable), **Node** 20+, and platform build tools (Xcode or its Command Line Tools + `cmake`/`meson`/`ninja` on macOS; MSVC on Windows).
 
 ```sh
 git clone --recurse-submodules https://github.com/ppXD/Wisp.git
