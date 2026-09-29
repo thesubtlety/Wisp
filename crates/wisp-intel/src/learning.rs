@@ -66,7 +66,9 @@ requirements, decisions, people and their roles, and open issues. Not tasks, not
 things only relevant today. One short plain sentence each. status is \"stated\" when someone said it \
 (or a document says it) and \"inferred\" when it follows from the evidence but nobody said it. \
 confidence from 0 to 1. Cite the evidence IDs each rests on, exactly as shown; at least one each. \
-Skip anything the accepted project knowledge already covers. At most 15, most important first.";
+Skip anything the accepted project knowledge already covers. If the context has \"About You and \
+this project\", keep what matters to You there and skip what it says to ignore. At most 15, most \
+important first.";
 
 /// The output schema of a learning pass.
 pub fn learning_schema() -> Value {
@@ -106,6 +108,8 @@ pub struct LearningInput<'a> {
     pub followups: &'a [FollowUp],
     /// How the meeting is named in provenance labels ("Meeting Sept 26").
     pub meeting_label: &'a str,
+    /// What matters to the user here (see [`crate::about_you`]).
+    pub about: Option<&'a str>,
     pub timeout: Duration,
 }
 
@@ -128,7 +132,8 @@ pub fn prepare_learning(input: &LearningInput) -> (ReasoningRequest, EvidencePac
         "The meeting",
         &input.transcript[start..],
     );
-    let mut context = render_memory(&mut packet, input.memory);
+    let mut context = crate::about::render_about(input.about);
+    context.push_str(&render_memory(&mut packet, input.memory));
     context.push_str(&crate::ask::render_items_for(input.state, &packet));
     context.push_str(&lines);
     (
@@ -332,6 +337,7 @@ mod tests {
             memory: &known,
             followups: &followups,
             meeting_label: "Meeting Sept 26",
+            about: Some("About You: Solutions engineer."),
             timeout: Duration::from_secs(9),
         };
         let out = propose_learning(&backend, &CancelToken::new(), &input).unwrap();
@@ -370,6 +376,9 @@ mod tests {
         assert_eq!(req.task, TaskKind::ProjectLearning);
         assert!(req
             .context
+            .starts_with("## About You and this project\n\nAbout You: Solutions engineer.\n\n"));
+        assert!(req
+            .context
             .contains("[P3] fact (stated): The customer is Acme Corp"));
         let m = out[1].to_memory("m1");
         assert_eq!(
@@ -391,6 +400,7 @@ mod tests {
             memory: &[],
             followups: &[],
             meeting_label: "Meeting",
+            about: None,
             timeout: Duration::from_secs(9),
         };
         assert!(propose_learning(&backend, &CancelToken::new(), &input).is_err());

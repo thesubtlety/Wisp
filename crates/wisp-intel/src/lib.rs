@@ -8,6 +8,7 @@
 //! - [`reducer`] — validates proposed ops against that packet and the state, applies the valid
 //!   ones deterministically, and says why the rest were rejected.
 //! - [`ops`] — the op format, its JSON Schema, and the replayable log of applied ops.
+//! - [`about`] — what matters to You: "About me" plus the project's instructions, for prompts.
 //! - [`analyze`] — "Analyze Now": one observer pass through a
 //!   [`wisp_reasoning::ReasoningBackend`].
 //! - [`ask`] — questions about the meeting, answered with checked citations.
@@ -24,6 +25,7 @@
 //!
 //! Nothing here knows about Tauri, audio or the UI. The model proposes; the reducer decides.
 
+pub mod about;
 pub mod analyze;
 pub mod ask;
 pub mod endgame;
@@ -39,6 +41,7 @@ pub mod review;
 pub mod runtime;
 pub mod screenshot;
 
+pub use about::{about_you, ABOUT_HEADING};
 pub use analyze::{
     analyze_now, prepare_observe, retrieval_text, AnalyzeInput, AnalyzeOutcome, IntelError,
     PreparedPass,

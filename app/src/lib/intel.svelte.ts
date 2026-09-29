@@ -472,18 +472,23 @@ export async function setFollowUpClass(n: number, cls: FollowUpClass) {
   }
 }
 
-/** Applies the reviewed follow-ups to the meeting's state. */
+/** Applies the reviewed follow-ups to the meeting's state. Any marked "Save to project" then go
+ *  straight to the project-knowledge step, since applying alone stores nothing for them. */
 export async function applyReview() {
+  const toProject = intel.review?.followups.some((f) => f.class === "project_memory") ?? false;
   intel.reviewBusy = true;
+  let applied = false;
   try {
     intel.reviewApplied = await invoke<number>("intel_review_apply");
     intel.review = null;
     intel.reviewUnderstood = [];
+    applied = true;
   } catch (e) {
     intel.reviewError = String(e);
   } finally {
     intel.reviewBusy = false;
   }
+  if (applied && toProject && intel.savedProjectId && !intel.proposals) await proposeLearning();
 }
 
 /** Wrapping Up: enter endgame and audit what's still open. Recording goes on. */

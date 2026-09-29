@@ -164,10 +164,11 @@
     localEndpoint: string | null;
     localModel: string | null;
     localForLive: boolean;
+    aboutMe: string;
   };
   type EndpointChoice = { id: string; name: string; model: string; local: boolean };
   const REASONING_MODES: ReasoningMode[] = ["auto", "codex", "claude", "local"];
-  let reasoning = $state<ReasoningSettings>({ mode: "auto", localEndpoint: null, localModel: null, localForLive: true });
+  let reasoning = $state<ReasoningSettings>({ mode: "auto", localEndpoint: null, localModel: null, localForLive: true, aboutMe: "" });
   let reasoningEndpoints = $state<EndpointChoice[]>([]);
   let reasoningError = $state("");
   let reasoningHealth = $state<{ which: string; ready: boolean; detail: string }[]>([]);
@@ -519,6 +520,17 @@
               <p class="set-intro">{i18n.t.settings.localHint}</p>
             {/if}
             <p class="set-intro">{i18n.t.settings.reasoningNote}</p>
+            <label class="set-row about-me-row">
+              <span class="set-label">{i18n.t.settings.aboutMe}</span>
+              <textarea
+                class="set-input about-me"
+                rows="3"
+                placeholder={i18n.t.settings.aboutMePlaceholder}
+                value={reasoning.aboutMe}
+                onchange={(e) => saveReasoning({ ...reasoning, aboutMe: e.currentTarget.value.trim() })}
+              ></textarea>
+            </label>
+            <p class="set-intro">{i18n.t.settings.aboutMeNote}</p>
             <div class="set-row">
               <span class="set-label">{i18n.t.settings.checkReasoningLabel}</span>
               <button class="set-btn check-reasoning" onclick={checkReasoning}>{i18n.t.settings.checkReasoning}</button>
@@ -869,6 +881,13 @@
 
   .set-input:disabled {
     opacity: 0.5;
+  }
+
+  .about-me {
+    width: 320px;
+    max-width: 100%;
+    font-family: inherit;
+    resize: vertical;
   }
 
   .set-select {

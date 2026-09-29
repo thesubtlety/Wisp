@@ -90,6 +90,10 @@
   let renamingProject = $state(false);
   let projectDraft = $state("");
   let projectError = $state("");
+  // The selected project's instructions: what matters to the user there, given to its meetings.
+  let instructions = $state("");
+  let editingInstructions = $state(false);
+  let instructionsDraft = $state("");
 
   // Detail-view editing: the title, and which project the meeting is filed under.
   let editingTitle = $state(false);
@@ -109,6 +113,7 @@
   function setFilter(v: string) {
     projectFilter = v;
     renamingProject = false;
+    editingInstructions = false;
     projectError = "";
     try {
       localStorage.setItem(FILTER_KEY, v);
@@ -128,6 +133,30 @@
       })
       .catch(() => {});
   });
+
+  $effect(() => {
+    const id = filterProject?.id;
+    instructions = "";
+    if (!id) return;
+    invoke<string>("get_project_instructions", { id })
+      .then((text) => {
+        if (projectFilter === id) instructions = text;
+      })
+      .catch(() => {});
+  });
+
+  async function saveInstructions() {
+    const id = filterProject?.id;
+    if (!id) return;
+    try {
+      await invoke("set_project_instructions", { id, instructions: instructionsDraft });
+      instructions = instructionsDraft.trim();
+      editingInstructions = false;
+      projectError = "";
+    } catch (e) {
+      projectError = String(e);
+    }
+  }
 
   // The selected project's screenshots.
   async function loadShots(id: string) {
@@ -477,12 +506,41 @@
           <button class="btn" onclick={() => ((projectDraft = filterProject!.name), (renamingProject = true))}
             >{i18n.t.library.renameProject}</button
           >
+          <button
+            class="btn"
+            title={i18n.t.library.instructionsHelp}
+            onclick={() => ((instructionsDraft = instructions), (editingInstructions = true))}>{i18n.t.library.instructions}</button
+          >
           {#if onNewMeeting && !sessionRunning}
             <button class="btn primary" onclick={() => onNewMeeting(filterProject!.id)}>{i18n.t.library.newMeetingInProject}</button>
           {/if}
         {/if}
         {#if projectError}<span class="err">{projectError}</span>{/if}
       </div>
+      {#if editingInstructions}
+        <div class="instructions">
+          <label for="project-instructions" class="project-label">{i18n.t.library.instructionsHelp}</label>
+          <!-- svelte-ignore a11y_autofocus -->
+          <textarea
+            id="project-instructions"
+            rows="5"
+            bind:value={instructionsDraft}
+            placeholder={i18n.t.library.instructionsPlaceholder}
+            autofocus
+            onkeydown={(e) => {
+              if (e.key === "Escape") editingInstructions = false;
+            }}
+          ></textarea>
+          <div class="project-row">
+            <button class="btn primary" onclick={saveInstructions}>{i18n.t.library.save}</button>
+            <button class="btn" onclick={() => (editingInstructions = false)}>{i18n.t.library.cancel}</button>
+          </div>
+        </div>
+      {:else if instructions}
+        <p class="instructions-preview" title={i18n.t.library.instructionsHelp}>
+          <span class="project-label">{i18n.t.library.instructions}:</span> {instructions}
+        </p>
+      {/if}
       {#if memory.length}
         <details class="knowledge">
           <summary>{i18n.t.library.projectKnowledge} ({memory.length})</summary>
@@ -657,6 +715,28 @@
   }
   .project-name {
     font-weight: 600;
+  }
+  .instructions {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-size: 0.85rem;
+  }
+  .instructions textarea {
+    width: 100%;
+    box-sizing: border-box;
+    font: inherit;
+    resize: vertical;
+  }
+  .instructions-preview {
+    margin: 0;
+    font-size: 0.85rem;
+    white-space: pre-line;
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
   }
   .project-filter {
     flex: none;

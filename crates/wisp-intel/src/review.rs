@@ -122,18 +122,22 @@ pub fn followups_schema() -> Value {
 }
 
 const GENERATE: &str = "\
-The meeting is over. List the potential follow-ups for the participant labelled \"You\": things \
-to do, things the other side will do, questions still open, and facts worth keeping for the \
-project. One short imperative line each (\"Send Sarah the architecture diagram.\"). Suggest a \
-class for each: mine, theirs, open_question, not_a_task, project_memory. Record owner and due \
-only if said. Cite the evidence IDs each rests on, exactly as shown; every follow-up cites at \
-least one. Put the state item id it is about in related_item, if any. Most important first, at \
-most 20.";
+The meeting is over. List the follow-ups that matter to the participant labelled \"You\": what \
+the other side committed to do for You, what You committed to, decisions that affect the project, \
+questions You still need answered, and facts worth keeping for the project. If the context has \
+\"About You and this project\", judge what matters by it. Skip generic chatter, small talk, and \
+anything You would not act on. One short imperative line each (\"Send Sarah the architecture \
+diagram.\"). Suggest a class for each: mine, theirs, open_question, not_a_task, project_memory. \
+Record owner and due only if said. Cite the evidence IDs each rests on, exactly as shown; every \
+follow-up cites at least one. Put the state item id it is about in related_item, if any. Most \
+important first, at most 20; fewer is fine.";
 
-/// Builds the request that proposes follow-ups.
+/// Builds the request that proposes follow-ups. `about` is what matters to the user here (see
+/// [`crate::about_you`]).
 pub fn prepare_followups(
     state: &MeetingState,
     transcript: &[TranscriptLine],
+    about: Option<&str>,
     timeout: Duration,
 ) -> (ReasoningRequest, EvidencePacket) {
     let mut packet = EvidencePacket::default();
@@ -153,7 +157,8 @@ pub fn prepare_followups(
         "The meeting",
         &transcript[start..],
     );
-    let mut context = crate::ask::render_items_for(state, &packet);
+    let mut context = crate::about::render_about(about);
+    context.push_str(&crate::ask::render_items_for(state, &packet));
     context.push_str(&lines);
     (
         ReasoningRequest {
@@ -174,13 +179,14 @@ pub fn generate_followups(
     cancel: &CancelToken,
     state: &MeetingState,
     transcript: &[TranscriptLine],
+    about: Option<&str>,
     timeout: Duration,
 ) -> Result<Vec<FollowUp>, IntelError> {
     #[derive(Deserialize)]
     struct Raw {
         followups: Vec<RawFollowUp>,
     }
-    let (request, packet) = prepare_followups(state, transcript, timeout);
+    let (request, packet) = prepare_followups(state, transcript, about, timeout);
     let response = backend.invoke(&request, cancel)?;
     let raw: Raw = serde_json::from_value(response.output)
         .map_err(|e| IntelError::BadOutput(e.to_string()))?;
@@ -765,6 +771,7 @@ mod tests {
             &CancelToken::new(),
             &s,
             &t,
+            Some("Project: Acme\nYour instructions for this project:\nIgnore billing."),
             Duration::from_secs(9),
         )
         .unwrap();
@@ -774,6 +781,10 @@ mod tests {
         assert_eq!(list[0].due, None, "blank due dropped");
         let req = &backend.requests.lock().unwrap()[0];
         assert_eq!(req.task, TaskKind::PostCall);
+        assert!(req.context.starts_with(
+            "## About You and this project\n\nProject: Acme\nYour instructions for this project:\nIgnore billing.\n\n"
+        ));
+        assert!(req.instructions.contains("judge what matters by it"));
         assert!(req.context.contains("COM-1 [commitment"));
         assert!(req
             .context

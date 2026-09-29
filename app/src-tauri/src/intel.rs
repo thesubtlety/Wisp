@@ -194,6 +194,7 @@ pub(crate) fn start(app: &AppHandle, project_id: Option<String>, meeting_label: 
     let emitter = app.clone();
     let state = app.state::<AppState>();
     let memory = project_memory(&state, project_id.as_deref());
+    let focus = about_you(&state, project_id.as_deref());
     if let Ok(mut slot) = state.intel.project.lock() {
         slot.clone_from(&project_id);
     }
@@ -205,6 +206,7 @@ pub(crate) fn start(app: &AppHandle, project_id: Option<String>, meeting_label: 
         }),
         RuntimeConfig {
             memory,
+            focus,
             ..RuntimeConfig::default()
         },
         Box::new(move |update| {
@@ -626,12 +628,14 @@ pub(crate) async fn intel_review_start(app: AppHandle, id: String) -> Result<Rev
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let (meeting, lines) = saved_meeting(&state, &id)?;
+        let about = about_you(&state, meeting_project(&state, &id).as_deref());
         let backend = crate::reasoning::backend_for(&state, Some(id.clone()));
         let (followups, source, note) = match generate_followups(
             backend.as_ref(),
             &CancelToken::new(),
             &meeting,
             &lines,
+            about.as_deref(),
             std::time::Duration::from_secs(180),
         ) {
             Ok(list) => (list, "model", None),
@@ -796,6 +800,26 @@ fn project_memory(state: &AppState, project_id: Option<&str>) -> Vec<MemoryEntry
         .unwrap_or_default()
 }
 
+/// What matters to the user in `project_id` (see [`wisp_intel::about_you`]): "About me" from
+/// Settings plus the project's name and instructions, read fresh each time.
+fn about_you(state: &AppState, project_id: Option<&str>) -> Option<String> {
+    let about_me = state.reasoning.about_me();
+    let (name, instructions) = project_id
+        .and_then(|id| {
+            let library = state.library.lock().ok()?;
+            let instructions = library.project_instructions(id).ok().flatten()?;
+            Some((project_name(&library, Some(id)), instructions))
+        })
+        .unwrap_or_default();
+    wisp_intel::about_you(&about_me, name.as_deref(), &instructions)
+}
+
+/// The project a saved meeting belongs to, if any.
+fn meeting_project(state: &AppState, id: &str) -> Option<String> {
+    let library = state.library.lock().ok()?;
+    library.get_note(id).ok()??.0.project_id
+}
+
 /// Every project, for the project selector.
 #[tauri::command]
 pub(crate) fn list_projects(state: State<'_, AppState>) -> Result<Vec<Project>, String> {
@@ -853,6 +877,36 @@ pub(crate) fn rename_project(
                 e.to_string()
             }
         })
+}
+
+/// A project's instructions: what matters to the user there. Empty when none were written.
+#[tauri::command]
+pub(crate) fn get_project_instructions(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<String, String> {
+    state
+        .library
+        .lock()
+        .map_err(|_| "library lock poisoned".to_owned())?
+        .project_instructions(&id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "no such project".to_owned())
+}
+
+/// Replaces a project's instructions (trimmed; empty clears them). Used from the next meeting on.
+#[tauri::command]
+pub(crate) fn set_project_instructions(
+    state: State<'_, AppState>,
+    id: String,
+    instructions: String,
+) -> Result<bool, String> {
+    state
+        .library
+        .lock()
+        .map_err(|_| "library lock poisoned".to_owned())?
+        .set_project_instructions(&id, &instructions)
+        .map_err(|e| e.to_string())
 }
 
 /// Retitles a saved meeting. With `if_title`, only while its title is still that (for automatic
@@ -975,6 +1029,7 @@ pub(crate) async fn intel_learning_propose(
         };
         let (meeting, lines) = saved_meeting(&state, &id)?;
         let memory = project_memory(&state, Some(&project));
+        let about = about_you(&state, Some(&project));
         let followups = state
             .intel
             .review_project
@@ -990,6 +1045,7 @@ pub(crate) async fn intel_learning_propose(
                 memory: &memory,
                 followups: &followups,
                 meeting_label: &note.title,
+                about: about.as_deref(),
                 timeout: std::time::Duration::from_secs(180),
             },
         )

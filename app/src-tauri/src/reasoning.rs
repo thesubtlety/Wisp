@@ -48,6 +48,9 @@ pub(crate) struct ReasoningSettings {
     /// In Automatic, send live state updates to the local model first.
     #[serde(default = "yes")]
     pub(crate) local_for_live: bool,
+    /// A few lines about the user (role, what they care about), given to every meeting's prompts.
+    #[serde(default)]
+    pub(crate) about_me: String,
 }
 
 impl Default for ReasoningSettings {
@@ -57,6 +60,7 @@ impl Default for ReasoningSettings {
             local_endpoint: None,
             local_model: None,
             local_for_live: true,
+            about_me: String::new(),
         }
     }
 }
@@ -81,6 +85,11 @@ impl ReasoningState {
 
     fn get(&self) -> ReasoningSettings {
         self.settings.lock().map(|s| s.clone()).unwrap_or_default()
+    }
+
+    /// The user's "About me" text (may be empty).
+    pub(crate) fn about_me(&self) -> String {
+        self.get().about_me
     }
 }
 
@@ -328,6 +337,7 @@ mod tests {
             local_endpoint: Some("custom-ollama".into()),
             local_model: None,
             local_for_live,
+            about_me: String::new(),
         }
     }
 
@@ -343,6 +353,11 @@ mod tests {
         let s = ReasoningState::load(path.clone()).get();
         assert_eq!(s.mode, Mode::Local);
         assert!(s.local_for_live, "missing fields take their defaults");
+        assert_eq!(s.about_me, "");
+        std::fs::write(&path, r#"{"aboutMe":"Solutions engineer"}"#).unwrap();
+        let s = ReasoningState::load(path.clone());
+        assert_eq!(s.about_me(), "Solutions engineer");
+        assert_eq!(s.get().mode, Mode::Auto);
         std::fs::write(&path, "garbage").unwrap();
         assert_eq!(
             ReasoningState::load(path).get(),

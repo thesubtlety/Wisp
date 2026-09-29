@@ -227,6 +227,7 @@ slipped\"), and text: one short, plain sentence with the full point.
 - Cite the evidence IDs each gap rests on, exactly as shown. A \"missing\" gap is about something \
 nobody said, so it may cite nothing; every other gap cites at least one ID.
 - List related state item ids in related_items when a gap is about an item.
+- If the context has \"About You and this project\", list only gaps that matter to You there.
 - Most important first. If nothing is outstanding, return {\"gaps\": []}.";
 
 /// The output schema of an audit.
@@ -267,6 +268,7 @@ pub struct AuditInput<'a> {
     pub retrieved: &'a [Snippet],
     /// The project's accepted knowledge.
     pub memory: &'a [wisp_library::MemoryEntry],
+    /// What matters to the user here (see [`crate::about_you`]).
     pub focus: Option<&'a str>,
     pub timeout: Duration,
 }
@@ -302,10 +304,7 @@ pub fn prepare_audit(input: &AuditInput) -> (ReasoningRequest, EvidencePacket) {
         render_snippets(&mut packet, input.retrieved)
     );
 
-    let mut context = String::new();
-    if let Some(focus) = input.focus.map(str::trim).filter(|f| !f.is_empty()) {
-        let _ = writeln!(context, "## What You wanted from this meeting\n\n{focus}\n");
-    }
+    let mut context = crate::about::render_about(input.focus);
     context.push_str(&crate::ask::render_items_for(input.state, &packet));
     context.push_str(&project);
     context.push_str(&transcript);
@@ -485,7 +484,7 @@ mod tests {
         assert!(item["properties"]["headline"].is_object());
         assert!(req
             .context
-            .contains("## What You wanted from this meeting\n\nScope the migration"));
+            .contains("## About You and this project\n\nScope the migration"));
         assert!(req.context.contains("COM-1 [commitment"));
         assert!(req
             .context
