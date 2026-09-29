@@ -107,6 +107,9 @@ export const zhHans: Messages = {
   },
 
   live: {
+    more: "更多",
+    openAssist: "打开 AI 助手",
+    hideAssist: "关闭 AI 助手",
     loadingModels: "正在加载模型…",
 
     // 删除模型确认对话框（Live + File 选择器共用）。

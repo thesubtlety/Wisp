@@ -113,6 +113,9 @@ export const en = {
 
   // Live transcription screen.
   live: {
+    more: "More",
+    openAssist: "Open AI assist",
+    hideAssist: "Close AI assist",
     loadingModels: "Loading models…",
 
     // Delete-model confirmation dialog (shared by the Live + File pickers).

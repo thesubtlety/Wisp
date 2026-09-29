@@ -10,7 +10,6 @@
   import Modal from "$lib/Modal.svelte";
   import ParamsPanel from "$lib/ParamsPanel.svelte";
   import AiNotes from "$lib/AiNotes.svelte";
-  import AssistLauncher from "$lib/AssistLauncher.svelte";
   import AssistPanel, { savedAssistWidth } from "$lib/AssistPanel.svelte";
   import IntelPanel from "$lib/IntelPanel.svelte";
   import {
@@ -1070,6 +1069,8 @@
   // Live AI assist: a right-side drawer running the same LLM tasks over the live transcript (finals
   // only), on demand. Auto-rolling refresh is a later refinement.
   let liveAssistOpen = $state(false);
+  // The "⋯" menu that holds the AI assist (it sits behind meeting intelligence, not beside it).
+  let moreOpen = $state(false);
   // Whether the transcript's compact "Export ▾" menu is open (collapses MD/TXT/SRT into one control).
   let exportMenuOpen = $state(false);
   let liveBodyEl = $state<HTMLElement | null>(null);
@@ -1693,6 +1694,33 @@
 
   <div class="workspace" class:is-hidden={mode === "library"}>
 
+  {#snippet moreMenu(assistOn: boolean, toggleAssist: () => void)}
+    <span class="more-menu">
+      <button
+        class="more-btn"
+        class:on={assistOn}
+        aria-haspopup="menu"
+        aria-expanded={moreOpen}
+        title={i18n.t.live.more}
+        aria-label={i18n.t.live.more}
+        onclick={() => (moreOpen = !moreOpen)}>⋯</button
+      >
+      {#if moreOpen}
+        <button class="picker-backdrop" aria-label={i18n.t.common.close} onclick={() => (moreOpen = false)}
+        ></button>
+        <div class="more-pop" role="menu" transition:fly={{ y: -6, duration: 120 }}>
+          <button
+            role="menuitem"
+            onclick={() => {
+              toggleAssist();
+              moreOpen = false;
+            }}>{assistOn ? i18n.t.live.hideAssist : i18n.t.live.openAssist}</button
+          >
+        </div>
+      {/if}
+    </span>
+  {/snippet}
+
   {#snippet modelPicker()}
     {#if models.length}
       <div class="picker">
@@ -1872,8 +1900,9 @@
         {#if running}
           <span class="active-model">{liveRunningLabel}</span>
         {:else}
-          <div class="engine-group">
-            <span class="source-prefix">{i18n.t.common.transcribeWith}</span>
+          <!-- A small chip: the model is set once, so it shouldn't take the header. It opens the
+               full picker. -->
+          <div class="engine-group compact" title={i18n.t.common.transcribeWith}>
             {@render modelPicker()}
           </div>
         {/if}
@@ -2159,15 +2188,10 @@
                 >
               {/if}
               {#if running || liveSegments.length}
-                <AssistLauncher
-                  on={liveAssistOpen}
-                  label="Assist"
-                  title="AI Assist — live hints, notes & summary"
-                  onclick={() => {
-                    liveAssistOpen = !liveAssistOpen;
-                    if (liveAssistOpen) liveIntelOpen = false;
-                  }}
-                />
+                {@render moreMenu(liveAssistOpen, () => {
+                  liveAssistOpen = !liveAssistOpen;
+                  if (liveAssistOpen) liveIntelOpen = false;
+                })}
               {/if}
             </span>
           </div>
@@ -2474,12 +2498,7 @@
               </button>
             {/if}
             {#if fileSegments.length && !fileTranscribing}
-              <AssistLauncher
-                on={fileAssistOpen}
-                label={i18n.t.fileResult.aiNotes}
-                title={i18n.t.fileResult.aiNotes}
-                onclick={() => (fileAssistOpen = !fileAssistOpen)}
-              />
+              {@render moreMenu(fileAssistOpen, () => (fileAssistOpen = !fileAssistOpen))}
             {/if}
           </span>
         </div>
@@ -4982,6 +5001,82 @@
     gap: 10px;
     min-width: 0;
     flex: 1;
+  }
+
+  .engine-group.compact {
+    flex: 0 1 auto;
+  }
+
+  .engine-group.compact .picker {
+    flex: 0 1 auto;
+  }
+
+  /* The full-width menu opens from the chip's left edge rather than centred on it. */
+  .engine-group.compact .picker-menu.wide {
+    left: 0;
+    margin-left: 0;
+  }
+
+  .engine-group.compact .picker-trigger {
+    width: auto;
+    max-width: 16rem;
+    font-size: 12px;
+    color: var(--muted);
+    padding: 3px 10px;
+    border-radius: 999px;
+  }
+
+  .more-menu {
+    position: relative;
+  }
+
+  .more-btn {
+    font: inherit;
+    font-size: 15px;
+    line-height: 1;
+    color: var(--muted);
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 3px 9px;
+    cursor: pointer;
+  }
+
+  .more-btn:hover,
+  .more-btn.on {
+    color: var(--text);
+    border-color: var(--border-strong);
+  }
+
+  .more-pop {
+    position: absolute;
+    right: 0;
+    top: calc(100% + 4px);
+    z-index: 21;
+    min-width: 11rem;
+    padding: 4px;
+    background: var(--surface, var(--bg));
+    border: 1px solid var(--border-strong);
+    border-radius: 9px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.12);
+  }
+
+  .more-pop button {
+    display: block;
+    width: 100%;
+    text-align: left;
+    font: inherit;
+    font-size: 13px;
+    color: var(--text);
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+    padding: 6px 10px;
+    cursor: pointer;
+  }
+
+  .more-pop button:hover {
+    background: var(--bg);
   }
 
   /* Quick mic/system toggles in the Live bar — "You" (your mic) and "Them" (system/meeting audio). */

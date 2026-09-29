@@ -107,6 +107,9 @@ export const zhHant: Messages = {
   },
 
   live: {
+    more: "更多",
+    openAssist: "開啟 AI 助理",
+    hideAssist: "關閉 AI 助理",
     loadingModels: "正在載入模型…",
 
     // 刪除模型確認對話框（Live + File 選擇器共用）。
