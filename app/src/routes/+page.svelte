@@ -790,10 +790,10 @@
   const TITLE_FIRST_MS = 180_000;
   const TITLE_MIN_CHARS = 200;
 
-  async function fetchTitle(text: string): Promise<string | null> {
+  async function fetchTitle(text: string, id: string): Promise<string | null> {
     if (text.trim().length < TITLE_MIN_CHARS) return null;
     try {
-      return await invoke<string>("suggest_title", { transcript: text });
+      return await invoke<string>("suggest_title", { transcript: text, meetingId: id || null });
     } catch {
       return null; // no local model set, or it failed: the date title stands
     }
@@ -801,7 +801,7 @@
 
   async function suggestLiveTitle() {
     if (meetingTitle.trim() && !titleIsSuggestion) return;
-    const t = await fetchTitle(liveTranscriptText);
+    const t = await fetchTitle(liveTranscriptText, meetingId);
     if (t && running && (!meetingTitle.trim() || titleIsSuggestion)) {
       meetingTitle = t;
       titleIsSuggestion = true;
@@ -937,7 +937,7 @@
         // never waits on the model.
         if (!meetingTitle.trim() || titleIsSuggestion) {
           const savedId = meetingId;
-          void fetchTitle(liveTranscriptText).then((t) => {
+          void fetchTitle(liveTranscriptText, savedId).then((t) => {
             if (t) invoke("rename_note", { id: savedId, title: t }).catch(() => {});
           });
         }

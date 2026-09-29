@@ -414,14 +414,22 @@ const TITLE_MAX_WORDS: usize = 8;
 const TITLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Suggests a short title for a meeting from its transcript, using the local model only (Settings ›
-/// Storage › Reasoning › local model). Errors when no local model is set.
+/// Storage › Reasoning › local model). Errors when no local model is set. The call is logged under
+/// `meeting_id`.
 #[tauri::command]
-pub(crate) async fn suggest_title(app: AppHandle, transcript: String) -> Result<String, String> {
+pub(crate) async fn suggest_title(
+    app: AppHandle,
+    transcript: String,
+    meeting_id: Option<String>,
+) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let settings = state.reasoning.get();
         let local = local_config(&state, &settings).ok_or("no local model is set")?;
-        let backend = OpenAiCompatBackend::new(local);
+        let backend = AuditingBackend::new(
+            Box::new(OpenAiCompatBackend::new(local)),
+            crate::audit::sink(&state, meeting_id),
+        );
         let request = ReasoningRequest {
             task: TaskKind::Title,
             instructions:
