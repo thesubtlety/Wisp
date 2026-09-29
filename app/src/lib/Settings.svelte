@@ -15,8 +15,15 @@
     open = $bindable(false),
     autoSave = $bindable(false),
     intel = $bindable(false),
-  }: { open?: boolean; autoSave?: boolean; intel?: boolean } =
-    $props();
+    detectMeetings = $bindable(true),
+    detectMeetingsSupported = true,
+  }: {
+    open?: boolean;
+    autoSave?: boolean;
+    intel?: boolean;
+    detectMeetings?: boolean;
+    detectMeetingsSupported?: boolean;
+  } = $props();
 
   type Section = "models" | "search" | "downloads" | "dictation" | "storage" | "activity";
   const sections = $derived<{ id: Section; label: string }[]>([
@@ -474,6 +481,21 @@
               </button>
             </div>
             <p class="set-intro">{i18n.t.settings.meetingIntelNote}</p>
+
+            <div class="set-row">
+              <span class="set-label">{i18n.t.settings.detectMeetings}</span>
+              <button
+                class="set-btn"
+                class:on={detectMeetings && detectMeetingsSupported}
+                disabled={!detectMeetingsSupported}
+                onclick={() => (detectMeetings = !detectMeetings)}
+              >
+                {detectMeetings && detectMeetingsSupported ? i18n.t.settings.on : i18n.t.settings.off}
+              </button>
+            </div>
+            <p class="set-intro">
+              {detectMeetingsSupported ? i18n.t.settings.detectMeetingsNote : i18n.t.settings.detectMeetingsUnsupported}
+            </p>
 
             <label class="set-row">
               <span class="set-label">{i18n.t.settings.reasoning}</span>

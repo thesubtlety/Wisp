@@ -837,6 +837,59 @@
   $effect(() => {
     localStorage.setItem("wisp.intel", String(intelEnabled));
   });
+  // Meeting detection (macOS): the backend watches which app uses the microphone and offers to start
+  // (or, when the meeting ends, to stop). It never starts or stops by itself. Defaults on.
+  let detectMeetings = $state(localStorage.getItem("wisp.detectMeetings") !== "false");
+  let detectMeetingsSupported = $state(true);
+  $effect(() => {
+    localStorage.setItem("wisp.detectMeetings", String(detectMeetings));
+    invoke<{ supported: boolean }>("set_meeting_detection", { enabled: detectMeetings })
+      .then((status) => (detectMeetingsSupported = status.supported))
+      .catch(() => {});
+  });
+  type MeetingInfo = { app: string; service: string | null; lowConfidence: boolean };
+  let meetingOffer = $state<{ kind: "detected" | "ended"; meeting: MeetingInfo } | null>(null);
+  function meetingOfferText(offer: { kind: "detected" | "ended"; meeting: MeetingInfo }): string {
+    const m = offer.meeting;
+    if (offer.kind === "ended") return i18n.t.meeting.ended(m.service ?? m.app);
+    if (m.lowConfidence) return i18n.t.meeting.browserMic(m.app);
+    return i18n.t.meeting.detected(m.service ? `${m.app} (${m.service})` : m.app);
+  }
+  // Keep the menu bar in step with the session; starting retires a "start" offer, stopping an "end" one.
+  $effect(() => {
+    const recording = running;
+    invoke("set_tray_recording", { recording }).catch(() => {});
+    if (meetingOffer && (meetingOffer.kind === "detected") === recording) meetingOffer = null;
+  });
+  function startFromOffer() {
+    meetingOffer = null;
+    if (running || starting) return;
+    mode = "live";
+    void start();
+  }
+  function stopFromOffer() {
+    meetingOffer = null;
+    if (running && !stopping) void stop();
+  }
+  onMount(() => {
+    const listeners = [
+      listen("tray://start", startFromOffer),
+      listen("tray://stop", stopFromOffer),
+      listen("tray://capture", () => {
+        if (running) void captureContext();
+      }),
+      listen<MeetingInfo>("meeting://detected", (e) => {
+        if (!running) meetingOffer = { kind: "detected", meeting: e.payload };
+      }),
+      listen<MeetingInfo>("meeting://ended", (e) => {
+        if (running) meetingOffer = { kind: "ended", meeting: e.payload };
+      }),
+      listen("meeting://gone", () => {
+        if (meetingOffer?.kind === "detected") meetingOffer = null;
+      }),
+    ];
+    return () => listeners.forEach((l) => l.then((unlisten) => unlisten()));
+  });
   let meetingId = $state("");
   let meetingStartedAt = $state(0);
 
@@ -1827,7 +1880,30 @@
     </button>
   </nav>
 
-  <Settings bind:open={cloudState.endpointsOpen} bind:autoSave bind:intel={intelEnabled} />
+  <Settings
+    bind:open={cloudState.endpointsOpen}
+    bind:autoSave
+    bind:intel={intelEnabled}
+    bind:detectMeetings
+    {detectMeetingsSupported}
+  />
+
+  {#if meetingOffer}
+    <div class="meeting-offer-wrap">
+      <div class="notice meeting-offer" role="status" transition:fly={{ y: -8, duration: 150 }}>
+        <span class="notice-text"><strong>{meetingOfferText(meetingOffer)}</strong></span>
+        <span class="notice-actions">
+          {#if meetingOffer.kind === "detected"}
+            <button class="btn outline sm" onclick={startFromOffer} disabled={starting}>{i18n.t.meeting.start}</button>
+            <button class="btn ghost sm" onclick={() => (meetingOffer = null)}>{i18n.t.meeting.notNow}</button>
+          {:else}
+            <button class="btn outline sm" onclick={stopFromOffer} disabled={stopping}>{i18n.t.meeting.stop}</button>
+            <button class="btn ghost sm" onclick={() => (meetingOffer = null)}>{i18n.t.meeting.keepGoing}</button>
+          {/if}
+        </span>
+      </div>
+    </div>
+  {/if}
 
   <div class="workspace" class:is-hidden={mode === "library"}>
 
@@ -4320,6 +4396,26 @@
     padding: 9px 12px;
     font-size: 13px;
     line-height: 1.45;
+  }
+
+  /* The meeting-detection offer floats over whichever view is open. */
+  .meeting-offer-wrap {
+    position: fixed;
+    top: 12px;
+    left: 0;
+    right: 0;
+    z-index: 60;
+    display: flex;
+    justify-content: center;
+    padding: 0 16px;
+    pointer-events: none;
+  }
+
+  .meeting-offer {
+    pointer-events: auto;
+    max-width: 620px;
+    background: var(--bg);
+    box-shadow: 0 6px 24px rgb(0 0 0 / 0.14);
   }
 
   .notice-text {
