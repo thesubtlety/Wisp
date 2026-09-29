@@ -21,6 +21,7 @@ pub mod export;
 pub mod model;
 pub mod params;
 pub mod perf;
+pub mod speakers;
 pub mod task;
 pub mod transcript;
 
@@ -40,10 +41,12 @@ pub use engine::{
 };
 pub use error::{Result, WispError};
 pub use export::{
-    format_markdown, format_transcript, group_paragraphs, ExportFormat, MeetingMeta, Paragraph,
+    format_markdown, format_markdown_named, format_transcript, format_transcript_named,
+    group_paragraphs, ExportFormat, MeetingMeta, Paragraph,
 };
 pub use model::{ModelDescriptor, ModelFamily, ModelFile, ModelId, ModelStore, Quant};
 pub use params::{EnumOption, ParamKind, ParamSpec, ParamValue, ParamValues};
+pub use speakers::{line_speaker, speaker_display, speaker_name, SpeakerNames};
 pub use transcript::{
     AudioSourceKind, SegmentStatus, SpeakerId, TranscriptEvent, TranscriptSegment, Word,
 };

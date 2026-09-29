@@ -12,6 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
+use wisp_core::speakers::{line_speaker, SpeakerNames};
 use wisp_core::transcript::{AudioSourceKind, TranscriptSegment};
 use wisp_intel::{
     apply_edits, ask, fallback_followups, generate_followups, interpret_reply, parse_reply,
@@ -236,24 +237,36 @@ pub(crate) fn start(app: &AppHandle, project_id: Option<String>, meeting_label: 
     *slot = Some(runtime);
 }
 
-/// The speaker label a line carries into the reasoning context.
-fn speaker_label(segment: &TranscriptSegment) -> String {
-    match (segment.source, segment.speaker) {
-        (AudioSourceKind::Microphone, _) => "You".to_owned(),
-        (_, Some(s)) => format!("Speaker {}", s.0 + 1),
-        _ => "Them".to_owned(),
-    }
+/// The speaker label a line carries into the reasoning context: the name the user gave the speaker
+/// when set (see [`line_speaker`] for the mic rule), else You / Them / Speaker N. A rename applies to
+/// lines from then on; lines the runtime already holds keep the label they arrived with.
+fn speaker_label(segment: &TranscriptSegment, names: &SpeakerNames) -> String {
+    line_speaker(
+        segment.source == AudioSourceKind::Microphone,
+        segment.speaker,
+        names,
+    )
+}
+
+/// The names the user gave the live session's speakers so far.
+pub(crate) fn live_speaker_names(state: &AppState) -> SpeakerNames {
+    state
+        .live_speaker_names
+        .lock()
+        .map(|n| n.clone())
+        .unwrap_or_default()
 }
 
 /// Hands one admitted final to the running runtime, if any. Never blocks on a model.
 pub(crate) fn route_final(app: &AppHandle, segment: &TranscriptSegment) {
     let state = app.state::<AppState>();
+    let speaker = speaker_label(segment, &live_speaker_names(&state));
     let Ok(guard) = state.intel.runtime.lock() else {
         return;
     };
     if let Some(runtime) = guard.as_ref() {
         runtime.push_final(
-            speaker_label(segment),
+            speaker,
             segment.start.as_millis() as i64,
             segment.text.clone(),
         );
@@ -262,7 +275,7 @@ pub(crate) fn route_final(app: &AppHandle, segment: &TranscriptSegment) {
 
 /// The live transcript as the runtime numbers it: admitted finals in arrival order, blank lines
 /// dropped, so `T<n>` means the same line to Ask as to the state's evidence.
-fn live_lines(retained: &[TranscriptSegment]) -> Vec<TranscriptLine> {
+fn live_lines(retained: &[TranscriptSegment], names: &SpeakerNames) -> Vec<TranscriptLine> {
     retained
         .iter()
         .filter(|s| !s.text.trim().is_empty())
@@ -270,7 +283,7 @@ fn live_lines(retained: &[TranscriptSegment]) -> Vec<TranscriptLine> {
         .map(|(i, s)| TranscriptLine {
             idx: i as i64,
             start_ms: s.start.as_millis() as i64,
-            speaker: speaker_label(s),
+            speaker: speaker_label(s, names),
             text: s.text.clone(),
         })
         .collect()
@@ -403,10 +416,11 @@ fn persist_parked(
 
 /// The live transcript so far, numbered as the runtime numbers it.
 pub(crate) fn recent_lines(state: &AppState) -> Vec<TranscriptLine> {
+    let names = live_speaker_names(state);
     state
         .live_segments
         .lock()
-        .map(|s| live_lines(&s))
+        .map(|s| live_lines(&s, &names))
         .unwrap_or_default()
 }
 
@@ -499,11 +513,13 @@ pub(crate) async fn intel_ask(
                 previous.cancel();
             }
         }
+        let names = live_speaker_names(&state);
         let transcript = live_lines(
             &state
                 .live_segments
                 .lock()
                 .map_err(|_| "state lock poisoned".to_owned())?,
+            &names,
         );
         let meeting = current_state(&state);
         let project_id = state.intel.project.lock().ok().and_then(|p| p.clone());
@@ -593,10 +609,16 @@ fn saved_meeting(
         .map_err(|_| "library lock poisoned".to_owned())?;
     let log = stored_log(&library, id)?;
     let meeting = MeetingState::replay(id, &log).map_err(|e| e.to_string())?;
+    let names = library.speaker_names(id).map_err(|e| e.to_string())?;
     let lines = library
         .get_note(id)
         .map_err(|e| e.to_string())?
-        .map(|(_, segments)| segments.iter().map(TranscriptLine::from_segment).collect())
+        .map(|(_, segments)| {
+            segments
+                .iter()
+                .map(|s| TranscriptLine::from_segment_named(s, &names))
+                .collect()
+        })
         .unwrap_or_default();
     Ok((meeting, lines))
 }
@@ -1141,11 +1163,13 @@ fn export_source(
                 .and_then(|f| f.as_ref().map(|f| (f.state.clone(), f.log.clone())))
                 .ok_or("no meeting intelligence to export")?,
         };
+        let names = live_speaker_names(state);
         let lines = live_lines(
             &state
                 .live_segments
                 .lock()
                 .map_err(|_| "state lock poisoned".to_owned())?,
+            &names,
         );
         let project = state.intel.project.lock().ok().and_then(|p| p.clone());
         let memory = project_memory(state, project.as_deref());
@@ -1179,7 +1203,11 @@ fn export_source(
             .map_err(|e| e.to_string())?
             .ok_or("no such meeting")?;
         let log = stored_log(&library, id)?;
-        let lines = segments.iter().map(TranscriptLine::from_segment).collect();
+        let names = library.speaker_names(id).map_err(|e| e.to_string())?;
+        let lines = segments
+            .iter()
+            .map(|s| TranscriptLine::from_segment_named(s, &names))
+            .collect();
         let project = project_name(&library, note.project_id.as_deref());
         (note, log, lines, project)
     };
@@ -1385,7 +1413,7 @@ mod tests {
             seg(AudioSourceKind::System, 5500, "  "),
             seg(AudioSourceKind::Microphone, 3000, "Where do you host?"),
         ];
-        let lines = live_lines(&retained);
+        let lines = live_lines(&retained, &SpeakerNames::new());
         assert_eq!(lines.len(), 2);
         assert_eq!((lines[1].idx, lines[1].start_ms), (1, 3000));
         assert_eq!(lines[1].speaker, "You");
@@ -1394,12 +1422,19 @@ mod tests {
 
     #[test]
     fn speaker_labels_follow_the_source_and_diarization() {
+        let none = SpeakerNames::new();
         let mut s = seg(AudioSourceKind::Microphone, 0, "x");
-        assert_eq!(speaker_label(&s), "You");
+        assert_eq!(speaker_label(&s, &none), "You");
         s.source = AudioSourceKind::System;
-        assert_eq!(speaker_label(&s), "Them");
+        assert_eq!(speaker_label(&s, &none), "Them");
         s.speaker = Some(SpeakerId(1));
-        assert_eq!(speaker_label(&s), "Speaker 2");
+        assert_eq!(speaker_label(&s, &none), "Speaker 2");
+        let names: SpeakerNames = [(1, "Bob".to_owned())].into_iter().collect();
+        assert_eq!(speaker_label(&s, &names), "Bob");
+        // A diarized, named mic speaker (a shared room mic) reads as its name; unnamed stays "You".
+        s.source = AudioSourceKind::Microphone;
+        assert_eq!(speaker_label(&s, &names), "Bob");
+        assert_eq!(speaker_label(&s, &none), "You");
     }
 
     #[test]
@@ -1432,7 +1467,10 @@ mod tests {
             },
             state: MeetingState::replay(LIVE_MEETING_ID, &log).unwrap(),
             log,
-            lines: live_lines(&[seg(AudioSourceKind::System, 65_000, "It has to be Azure.")]),
+            lines: live_lines(
+                &[seg(AudioSourceKind::System, 65_000, "It has to be Azure.")],
+                &SpeakerNames::new(),
+            ),
             memory: vec![MemoryEntry {
                 id: 7,
                 project_id: "p".into(),

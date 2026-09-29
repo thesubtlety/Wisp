@@ -8,6 +8,7 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+wisp-core = { path = "../wisp-core" }
 wisp-library = { path = "../wisp-library" }
 wisp-reasoning = { path = "../wisp-reasoning" }
 serde = { version = "1", features = ["derive"] }

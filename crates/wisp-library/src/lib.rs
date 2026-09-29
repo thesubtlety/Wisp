@@ -15,6 +15,7 @@ mod memory;
 mod record;
 mod retention;
 mod retrieve;
+mod speakers;
 mod state_log;
 mod store;
 
