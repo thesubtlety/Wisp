@@ -18,11 +18,14 @@ use crate::ops::{output_schema, OpBatch};
 use crate::reducer::{reduce, ApplyReport, RejectReason};
 
 /// Lines already analyzed that are shown again before the new ones, for continuity.
-pub const CONTEXT_LINES: usize = 30;
+pub const CONTEXT_LINES: usize = 10;
 /// Most transcript characters in one pass. New lines past this wait for the next pass.
 pub const MAX_TRANSCRIPT_CHARS: usize = 24_000;
 /// Most characters of new text handed to retrieval.
 pub const RETRIEVAL_CHARS: usize = 1_500;
+/// Most accepted project knowledge entries in one pass: those sharing the most words with the new
+/// lines, most recent first on ties.
+pub const MAX_MEMORY_ENTRIES: usize = 20;
 
 const INSTRUCTIONS: &str = "\
 You keep the structured state of a live meeting for one participant, labelled \"You\". \
@@ -45,6 +48,8 @@ question is answered or a risk is dealt with, \"uncertain\" when it is now in do
 - Record a commitment's owner and due date only if they were said.
 - For a conflict, list the conflicting item ids in related_items.
 - One fact per item, short, in plain words. Skip small talk and pleasantries.
+- If the context has \"About You and this project\", judge relevance by it: record what matters \
+to You there, skip what it says to ignore, and raise candidates only on what matters to You.
 - If nothing new is worth recording, return no ops.
 
 Candidates: things worth interrupting You for now, while the people are still present, because \
@@ -73,7 +78,8 @@ pub struct AnalyzeInput<'a> {
     pub transcript: &'a [TranscriptLine],
     /// Project context retrieved for this pass (see [`retrieval_text`]).
     pub retrieved: &'a [Snippet],
-    /// What the user wants from this meeting, if they said.
+    /// What matters to the user here (see [`crate::about_you`]), rendered as
+    /// [`crate::ABOUT_HEADING`].
     pub focus: Option<&'a str>,
     /// Whether the meeting is wrapping up: candidates then focus on unresolved gaps.
     pub endgame: bool,
@@ -178,16 +184,14 @@ pub fn prepare_observe(
 
     let mut packet = EvidencePacket::default();
     let transcript = render_transcript(&mut packet, &state.meeting_id, earlier, new);
+    let memory = relevant_memory(input.memory, new, MAX_MEMORY_ENTRIES);
     let project = format!(
         "{}{}",
-        crate::evidence::render_memory(&mut packet, input.memory),
+        crate::evidence::render_memory(&mut packet, &memory),
         render_snippets(&mut packet, input.retrieved)
     );
 
-    let mut context = String::new();
-    if let Some(focus) = input.focus.map(str::trim).filter(|f| !f.is_empty()) {
-        let _ = writeln!(context, "## What You want from this meeting\n\n{focus}\n");
-    }
+    let mut context = crate::about::render_about(input.focus);
     if input.endgame {
         context.push_str(
             "## The meeting is wrapping up\n\nFocus candidates on what must be resolved before \
@@ -212,6 +216,40 @@ pub fn prepare_observe(
         through: new.last().map(|l| l.idx),
         new_lines: new.len(),
     })
+}
+
+/// Up to `cap` memory entries, kept in their stored order: all of them when they fit, else those
+/// sharing the most distinct words (four letters or more) with `lines`, most recently updated first
+/// on ties (so with no overlap, the most recent).
+fn relevant_memory(
+    memory: &[wisp_library::MemoryEntry],
+    lines: &[TranscriptLine],
+    cap: usize,
+) -> Vec<wisp_library::MemoryEntry> {
+    if memory.len() <= cap {
+        return memory.to_vec();
+    }
+    let words = |t: &str| -> std::collections::BTreeSet<String> {
+        t.split(|c: char| !c.is_alphanumeric())
+            .filter(|w| w.chars().count() >= 4)
+            .map(str::to_lowercase)
+            .collect()
+    };
+    let spoken: std::collections::BTreeSet<String> =
+        lines.iter().flat_map(|l| words(&l.text)).collect();
+    let mut ranked: Vec<(usize, usize)> = memory
+        .iter()
+        .enumerate()
+        .map(|(i, m)| (i, words(&m.text).intersection(&spoken).count()))
+        .collect();
+    ranked.sort_by(|(a, sa), (b, sb)| {
+        sb.cmp(sa)
+            .then(memory[*b].updated_at_ms.cmp(&memory[*a].updated_at_ms))
+            .then(memory[*b].id.cmp(&memory[*a].id))
+    });
+    let mut keep: Vec<usize> = ranked.into_iter().take(cap).map(|(i, _)| i).collect();
+    keep.sort_unstable();
+    keep.into_iter().map(|i| memory[i].clone()).collect()
 }
 
 /// Runs one observer pass and reduces its ops into `state`. On failure `state` is untouched.
@@ -403,7 +441,7 @@ mod tests {
         assert_eq!(req.output_schema, output_schema());
         assert_eq!(req.timeout, Duration::from_secs(60));
         let ctx = &req.context;
-        assert!(ctx.contains("## What You want from this meeting\n\nScope the hosting model"));
+        assert!(ctx.contains("## About You and this project\n\nScope the hosting model"));
         assert!(ctx.contains("## Current state\n\n(empty)"));
         assert!(
             ctx.contains("[D5:C0] security.md, line 12\nAll customer data must stay in the EU.")
@@ -604,5 +642,58 @@ mod tests {
                 .count(),
             RETRIEVAL_CHARS
         );
+    }
+
+    fn memory(id: i64, text: &str, updated_at_ms: i64) -> wisp_library::MemoryEntry {
+        wisp_library::MemoryEntry {
+            id,
+            project_id: "p".into(),
+            kind: "fact".into(),
+            text: text.into(),
+            status: "stated".into(),
+            confidence: 1.0,
+            provenance: vec![],
+            meeting_id: None,
+            created_at_ms: 0,
+            updated_at_ms,
+        }
+    }
+
+    #[test]
+    fn a_pass_sends_only_the_most_relevant_project_knowledge() {
+        // 25 unrelated entries, newest last, plus two that match what was just said.
+        let mut all: Vec<_> = (1..=25)
+            .map(|i| memory(i, &format!("Unrelated fact number {i}"), i))
+            .collect();
+        all.push(memory(26, "Production runs in Azure", 0));
+        all.push(memory(27, "The Azure region must be in the EU", 0));
+        let lines = [line(0, "Them", "Our Azure tenant is in US East.")];
+
+        let kept = relevant_memory(&all, &lines, MAX_MEMORY_ENTRIES);
+        let ids: Vec<i64> = kept.iter().map(|m| m.id).collect();
+        // The two matches, then the 18 most recent others; stored order is kept.
+        let mut expected: Vec<i64> = (8..=25).collect();
+        expected.extend([26, 27]);
+        assert_eq!(ids, expected);
+
+        // Nothing matches: the most recent. Few enough: all of them, untouched.
+        let quiet = [line(0, "Them", "Hello there.")];
+        let ids: Vec<i64> = relevant_memory(&all[..25], &quiet, 20)
+            .iter()
+            .map(|m| m.id)
+            .collect();
+        assert_eq!(ids, (6..=25).collect::<Vec<_>>());
+        assert_eq!(relevant_memory(&all[..3], &quiet, 20).len(), 3);
+
+        // The pass itself renders at most the cap.
+        let backend = ScriptedBackend::named("scripted");
+        backend.push_ok(json!({"ops": [], "candidates": []}));
+        let mut state = MeetingState::new("live");
+        let mut inp = input(&lines, &[]);
+        inp.memory = &all;
+        analyze_now(&backend, &CancelToken::new(), &mut state, &inp, 1).unwrap();
+        let ctx = backend.requests.lock().unwrap()[0].context.clone();
+        assert!(ctx.contains("[P27]") && ctx.contains("[P26]") && ctx.contains("[P8]"));
+        assert!(!ctx.contains("[P7]"), "{ctx}");
     }
 }

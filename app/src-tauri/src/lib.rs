@@ -4487,6 +4487,8 @@ pub fn run() {
             intel::list_project_memory,
             intel::delete_project_memory,
             intel::rename_project,
+            intel::get_project_instructions,
+            intel::set_project_instructions,
             reasoning::suggest_title,
             intel::rename_note,
             intel::set_note_project,

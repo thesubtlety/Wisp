@@ -221,6 +221,29 @@ impl Library {
         Ok(n > 0)
     }
 
+    /// A project's instructions: what matters to the user there. `None` when the project doesn't
+    /// exist; empty when none were written.
+    pub fn project_instructions(&self, project_id: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT instructions FROM project WHERE id = ?1",
+                [project_id],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Replaces a project's instructions (trimmed; empty clears them). Returns whether the project
+    /// exists.
+    pub fn set_project_instructions(&self, project_id: &str, text: &str) -> Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE project SET instructions = ?2 WHERE id = ?1",
+            rusqlite::params![project_id, text.trim()],
+        )?;
+        Ok(n > 0)
+    }
+
     /// Retitles a meeting (trimmed). Search reads titles from the meeting row, so hits follow.
     /// Returns whether the meeting exists.
     pub fn rename_meeting(&self, meeting_id: &str, title: &str) -> Result<bool> {
@@ -713,6 +736,32 @@ mod tests {
 
         let taken = lib.rename_project("p2", "Acme Corp").unwrap_err();
         assert!(taken.to_string().contains("UNIQUE"), "{taken}");
+    }
+
+    #[test]
+    fn a_project_keeps_its_instructions() {
+        let lib = Library::open_in_memory().unwrap();
+        lib.create_project("p1", "Acme", T0).unwrap();
+        assert_eq!(lib.project_instructions("p1").unwrap().as_deref(), Some(""));
+        assert_eq!(lib.project_instructions("nope").unwrap(), None);
+
+        assert!(lib
+            .set_project_instructions("p1", "  I own the migration. Ignore billing.\n")
+            .unwrap());
+        assert_eq!(
+            lib.project_instructions("p1").unwrap().as_deref(),
+            Some("I own the migration. Ignore billing.")
+        );
+        assert!(!lib.set_project_instructions("nope", "x").unwrap());
+        // A rename keeps them.
+        assert!(lib.rename_project("p1", "Acme Corp").unwrap());
+        assert_eq!(
+            lib.project_instructions("p1").unwrap().as_deref(),
+            Some("I own the migration. Ignore billing.")
+        );
+        // Empty clears them.
+        assert!(lib.set_project_instructions("p1", "  ").unwrap());
+        assert_eq!(lib.project_instructions("p1").unwrap().as_deref(), Some(""));
     }
 
     #[test]

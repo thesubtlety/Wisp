@@ -53,9 +53,9 @@ pub struct TriggerPolicy {
 impl Default for TriggerPolicy {
     fn default() -> Self {
         Self {
-            min_new_chars: 400,
+            min_new_chars: 1_200,
             min_interval: Duration::from_secs(20),
-            max_wait: Duration::from_secs(60),
+            max_wait: Duration::from_secs(90),
         }
     }
 }
@@ -125,7 +125,8 @@ pub enum IntelUpdate {
 #[derive(Debug, Clone)]
 pub struct RuntimeConfig {
     pub policy: TriggerPolicy,
-    /// What the user wants from this meeting.
+    /// What matters to the user here: "About me" and the project's instructions (see
+    /// [`crate::about_you`]). Given to every pass and the audit.
     pub focus: Option<String>,
     /// Longest a single pass may take.
     pub timeout: Duration,
@@ -730,15 +731,15 @@ mod tests {
         let p = TriggerPolicy::default();
         let s = Duration::from_secs;
         assert!(!p.should_run(0, None, s(999)), "nothing new");
-        assert!(!p.should_run(100, None, s(5)), "too little, too soon");
-        assert!(p.should_run(400, None, s(0)), "enough text, first pass");
+        assert!(!p.should_run(1_199, None, s(89)), "too little, too soon");
+        assert!(p.should_run(1_200, None, s(0)), "enough text, first pass");
         assert!(
             !p.should_run(5000, Some(s(10)), s(30)),
             "inside the interval"
         );
         assert!(p.should_run(5000, Some(s(20)), s(0)), "interval passed");
         assert!(
-            p.should_run(10, Some(s(30)), s(60)),
+            p.should_run(10, Some(s(30)), s(90)),
             "small but waited long enough"
         );
     }
