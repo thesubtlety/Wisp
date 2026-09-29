@@ -12,7 +12,7 @@ use wisp_library::Snippet;
 use wisp_reasoning::{CancelToken, ReasoningBackend, ReasoningError, ReasoningRequest, TaskKind};
 
 use crate::evidence::{render_snippets, render_transcript, EvidencePacket, TranscriptLine};
-use crate::intervene::{validate_candidate, Candidate, MAX_CANDIDATES_PER_PASS};
+use crate::intervene::{validate_candidate_in_batch, Candidate, MAX_CANDIDATES_PER_PASS};
 use crate::model::MeetingState;
 use crate::ops::{output_schema, OpBatch};
 use crate::reducer::{reduce, ApplyReport, RejectReason};
@@ -268,7 +268,7 @@ pub fn analyze_now(
     let mut candidates = Vec::new();
     let mut rejected_candidates = Vec::new();
     for raw in batch.candidates.iter().take(MAX_CANDIDATES_PER_PASS) {
-        match validate_candidate(raw, &pass.packet, state) {
+        match validate_candidate_in_batch(raw, &pass.packet, state, &report.temp_ids) {
             Ok(c) => candidates.push(c),
             Err(reason) => rejected_candidates.push((raw.title.clone(), reason)),
         }
@@ -376,6 +376,50 @@ mod tests {
             "superseded_by": null, "owner": null, "due": null,
             "source_refs": refs, "related_items": []
         })
+    }
+
+    #[test]
+    fn a_card_can_point_at_an_item_the_same_reply_created() {
+        let transcript = vec![line(
+            0,
+            "Them",
+            "Then there was a second round, worse than the first.",
+        )];
+        let backend = ScriptedBackend::named("scripted");
+        let mut risk = model_add(
+            "risk",
+            "A second ransomware round suggests incomplete recovery",
+            "inferred",
+            &["T0"],
+        );
+        risk["temp_id"] = json!("t_rounds");
+        backend.push_ok(json!({"ops": [risk], "candidates": [
+            {"kind": "conflict", "headline": "Recovery may be incomplete",
+             "title": "A second, worse round points to incomplete containment",
+             "detail": "", "suggested_question": "What changed between the two rounds?",
+             "source_refs": ["T0"], "related_items": ["t_rounds", "t_never_made"],
+             "importance": 0.9, "urgency": 0.8, "confidence": 0.8, "future_work_risk": 0.9}
+        ]}));
+        let mut state = MeetingState::new("live");
+        let out = analyze_now(
+            &backend,
+            &CancelToken::new(),
+            &mut state,
+            &input(&transcript, &[]),
+            42,
+        )
+        .unwrap();
+        assert!(
+            out.rejected_candidates.is_empty(),
+            "{:?}",
+            out.rejected_candidates
+        );
+        assert_eq!(out.candidates.len(), 1);
+        assert_eq!(
+            out.candidates[0].related_items,
+            ["RISK-1"],
+            "temp id resolved, dangling link dropped"
+        );
     }
 
     #[test]
