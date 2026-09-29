@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { copyText } from "$lib/clipboard";
   // The AI activity log: every call Wisp made to a model — on this machine or a remote service —
   // with the full text sent and the reply, newest first. Shown in Settings and from the intelligence
   // panel. The backend caps the list; each entry can hold a whole transcript, so bodies render only
@@ -26,12 +27,30 @@
     tokensIn: number;
     tokensOut: number;
     tokensEstimated: boolean;
+    cacheReadTokens: number;
+    cacheWriteTokens: number;
+    // API-price cost the backend reported; null when it reported none (Codex, cloud HTTP).
+    costUsd: number | null;
+    // The model that actually answered, when the backend said.
+    modelReported: string | null;
+  };
+
+  type Totals = {
+    calls: number;
+    tokensIn: number;
+    cacheReadTokens: number;
+    cacheWriteTokens: number;
+    tokensOut: number;
+    estimatedCalls: number;
+    costUsd: number;
+    uncostedCalls: number;
   };
 
   // Matches MAX_LISTED in the backend.
   const CAP = 200;
 
   let calls = $state<LlmCall[]>([]);
+  let totals = $state<Totals | null>(null);
   let scope = $state<"all" | "meeting">("all");
   let liveId = $state<string | null>(null);
   let open = $state<number | null>(null);
@@ -47,7 +66,15 @@
     try {
       liveId = await invoke<string | null>("ai_activity_live_meeting");
       const filter = scope === "meeting" ? current : null;
-      calls = scope === "meeting" && !filter ? [] : await invoke<LlmCall[]>("list_ai_activity", { meetingId: filter });
+      if (scope === "meeting" && !filter) {
+        calls = [];
+        totals = null;
+      } else {
+        [calls, totals] = await Promise.all([
+          invoke<LlmCall[]>("list_ai_activity", { meetingId: filter }),
+          invoke<Totals>("ai_activity_totals", { meetingId: filter }),
+        ]);
+      }
       error = "";
     } catch (e) {
       error = String(e);
@@ -68,7 +95,7 @@
 
   async function copy(key: string, text: string) {
     try {
-      await navigator.clipboard.writeText(text);
+      await copyText(text);
       copied = key;
       setTimeout(() => {
         if (copied === key) copied = "";
@@ -84,6 +111,15 @@
 
   function when(ms: number): string {
     return new Date(ms).toLocaleString();
+  }
+
+  function usd(n: number): string {
+    return n.toFixed(n < 1 ? 4 : 2);
+  }
+
+  // A local model's cost is a known zero; only a real cost is worth a label.
+  function cost(c: LlmCall): string {
+    return c.costUsd ? i18n.t.audit.apiCost(usd(c.costUsd)) : "";
   }
 
   function seconds(ms: number): string {
@@ -137,6 +173,25 @@
   {:else if !calls.length && !loading}
     <p class="empty">{i18n.t.audit.empty}</p>
   {:else}
+    {#if totals && totals.calls}
+      <p class="totals">
+        <span>{i18n.t.audit.totals(totals.calls)}</span>
+        <span title={i18n.t.audit.cacheSplit(totals.cacheReadTokens, totals.cacheWriteTokens)}>
+          {i18n.t.audit.tokens(
+            totals.tokensIn,
+            totals.cacheReadTokens + totals.cacheWriteTokens,
+            totals.tokensOut,
+            totals.estimatedCalls === totals.calls,
+          )}
+        </span>
+        {#if totals.uncostedCalls < totals.calls && totals.costUsd > 0}
+          <span title={i18n.t.audit.apiCostNote}>
+            {i18n.t.audit.apiCost(usd(totals.costUsd))}{#if totals.uncostedCalls}
+              ({i18n.t.audit.partialCost(totals.uncostedCalls)}){/if}
+          </span>
+        {/if}
+      </p>
+    {/if}
     {#if calls.length >= CAP}<p class="empty">{i18n.t.audit.capped(CAP)}</p>{/if}
     <ul class="calls">
       {#each calls as c (c.id)}
@@ -145,12 +200,23 @@
             <span class="where" class:local={c.local}>{c.local ? i18n.t.audit.local : i18n.t.audit.remote}</span>
             <span class="what">
               <span class="task">{taskName(c.task)}</span>
-              <span class="via">{c.backend} · {c.model ?? i18n.t.audit.defaultModel}</span>
+              <span class="via">{c.backend} · {c.modelReported ?? c.model ?? i18n.t.audit.defaultModel}</span>
             </span>
             <span class="meta">
-              <span>{when(c.atMs)}</span>
               <span>
-                {i18n.t.audit.tokens(c.tokensIn, c.tokensOut, c.tokensEstimated)} · {seconds(c.elapsedMs)} ·
+                {#if cost(c)}<span title={i18n.t.audit.apiCostNote}>{cost(c)}</span> ·{/if}
+                {when(c.atMs)}
+              </span>
+              <span>
+                <span title={c.tokensEstimated ? "" : i18n.t.audit.cacheSplit(c.cacheReadTokens, c.cacheWriteTokens)}>
+                  {i18n.t.audit.tokens(
+                    c.tokensIn,
+                    c.cacheReadTokens + c.cacheWriteTokens,
+                    c.tokensOut,
+                    c.tokensEstimated,
+                  )}
+                </span>
+                · {seconds(c.elapsedMs)} ·
                 <span class="status">{c.error ? i18n.t.audit.failed : i18n.t.audit.ok}</span>
               </span>
             </span>
@@ -203,11 +269,19 @@
 
   .intro,
   .empty,
-  .note {
+  .note,
+  .totals {
     margin: 0;
     font-size: 12.5px;
     line-height: 1.5;
     color: var(--muted);
+  }
+
+  .totals {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 12px;
+    color: var(--text);
   }
 
   .bar,

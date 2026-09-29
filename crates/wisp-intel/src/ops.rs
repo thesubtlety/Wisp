@@ -48,6 +48,9 @@ pub struct OpBatch {
     /// Possible interventions; the local filter decides which are shown.
     #[serde(default)]
     pub candidates: Vec<crate::intervene::RawCandidate>,
+    /// Names the transcript gives unnamed speakers; checked before anything is shown.
+    #[serde(default)]
+    pub speaker_names: Vec<crate::speakers::RawSpeakerName>,
 }
 
 /// A validated change with canonical refs and real ids. This is what the log stores.
@@ -261,9 +264,10 @@ pub fn output_schema() -> Value {
     json!({
         "type": "object",
         "additionalProperties": false,
-        "required": ["ops", "candidates"],
+        "required": ["ops", "candidates", "speaker_names"],
         "properties": {
             "candidates": crate::intervene::candidates_schema(),
+            "speaker_names": crate::speakers::speaker_names_schema(),
             "ops": {
                 "type": "array",
                 "items": {

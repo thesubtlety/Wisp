@@ -25,8 +25,8 @@ use crate::reducer::RejectReason;
 pub const WRAP_WINDOW: usize = 12;
 /// Probability at which the wrap-up signal suggests endgame.
 pub const WRAP_SUGGEST_AT: f64 = 0.7;
-/// How long before the scheduled end endgame is suggested.
-pub const SCHEDULED_LEAD_MS: i64 = 5 * 60 * 1000;
+/// How long before the scheduled end endgame is suggested: enough to still ask the open questions.
+pub const SCHEDULED_LEAD_MS: i64 = 10 * 60 * 1000;
 /// Most transcript characters sent to the audit (the latest lines).
 pub const AUDIT_TRANSCRIPT_CHARS: usize = 30_000;
 /// Most gaps taken from one audit.

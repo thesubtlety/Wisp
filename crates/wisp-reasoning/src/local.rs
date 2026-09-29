@@ -123,13 +123,25 @@ fn message_text(body: &str) -> Result<String, ReasoningError> {
         .ok_or_else(|| ReasoningError::BadOutput(truncate(body, 400)))
 }
 
-/// The `usage` a chat-completions response reports, if any.
-fn message_usage(body: &str) -> Option<TokenUsage> {
+/// The `usage` a chat-completions response reports, if any, and the model it names. `prompt_tokens`
+/// includes any cached ones, which some servers report under `prompt_tokens_details`. A model on
+/// this machine (`local`) costs nothing; a remote endpoint's price is unknown.
+fn message_usage(body: &str, local: bool) -> Option<TokenUsage> {
     let v: Value = serde_json::from_str(body).ok()?;
     let usage = v.get("usage")?;
+    let prompt = usage.get("prompt_tokens")?.as_u64()?;
+    let cached = usage
+        .pointer("/prompt_tokens_details/cached_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        .min(prompt);
     Some(TokenUsage {
-        input: usage.get("prompt_tokens")?.as_u64()?,
+        input: prompt - cached,
         output: usage.get("completion_tokens")?.as_u64()?,
+        cache_read: cached,
+        cache_write: 0,
+        cost_usd: local.then_some(0.0),
+        model: v.get("model").and_then(Value::as_str).map(str::to_owned),
     })
 }
 
@@ -228,7 +240,7 @@ impl ReasoningBackend for OpenAiCompatBackend {
             message_text(&body)?,
             None,
             start.elapsed(),
-            message_usage(&body),
+            message_usage(&body, is_loopback(&self.config.base_url)),
         )
     }
 }
@@ -298,6 +310,21 @@ mod tests {
         }
     }
 
+    #[test]
+    fn usage_splits_cached_prompt_tokens_and_names_the_model() {
+        let body = json!({
+            "model": "qwen3:8b-q4",
+            "usage": {"prompt_tokens": 100, "completion_tokens": 5,
+                      "prompt_tokens_details": {"cached_tokens": 60}},
+        })
+        .to_string();
+        let u = message_usage(&body, false).unwrap();
+        assert_eq!((u.input, u.cache_read, u.output), (40, 60, 5));
+        assert_eq!(u.model.as_deref(), Some("qwen3:8b-q4"));
+        assert_eq!(u.cost_usd, None, "a remote endpoint's price is unknown");
+        assert_eq!(message_usage(&body, true).unwrap().cost_usd, Some(0.0));
+    }
+
     fn reply(content: &str) -> String {
         json!({
             "choices": [{"message": {"role": "assistant", "content": content}}],
@@ -324,7 +351,9 @@ mod tests {
             r.usage,
             Some(TokenUsage {
                 input: 120,
-                output: 7
+                output: 7,
+                cost_usd: Some(0.0),
+                ..Default::default()
             })
         );
         let sent = seen.lock().unwrap()[0].clone();

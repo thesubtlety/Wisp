@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use crate::backend::{
     check_images, finish, truncate, CancelToken, Capabilities, Health, ReasoningBackend,
-    ReasoningError, ReasoningRequest, ReasoningResponse,
+    ReasoningError, ReasoningRequest, ReasoningResponse, TokenUsage,
 };
 use crate::runner::{run_command, CommandSpec, SUBSCRIPTION_STRIPPED_ENV};
 use crate::workspace::Workspace;
@@ -55,7 +55,8 @@ impl CodexCliBackend {
         for image in images {
             spec = spec.arg(format!("--image={}", image.display()));
         }
-        spec = spec.args(["--sandbox", "read-only", "--color", "never"]);
+        // `--json` prints events as JSONL, the only place the CLI reports token usage.
+        spec = spec.args(["--sandbox", "read-only", "--color", "never", "--json"]);
         if c.ignore_user_config {
             spec = spec.args(["--ignore-user-config", "--ignore-rules"]);
         }
@@ -142,15 +143,104 @@ impl ReasoningBackend for CodexCliBackend {
         let ws = Workspace::create(req)?;
         let spec = self.command(&ws, crate::render_prompt(req), &req.images);
         let out = run_command(&spec, req.timeout, cancel)?;
-        if out.code != Some(0) {
-            return Err(ReasoningError::Process {
-                code: out.code,
-                stderr: truncate(&out.stderr, 800),
-            });
-        }
-        let raw = std::fs::read_to_string(ws.last_message_path()).unwrap_or(out.stdout);
-        finish(self.name(), req, raw, None, out.elapsed, None)
+        let events = Events::parse(&out.stdout);
+        let usage = events.usage.clone();
+        let message = std::fs::read_to_string(ws.last_message_path()).ok();
+        let raw = reply_or_error(out.code, &out.stdout, &out.stderr, events, message)?;
+        finish(self.name(), req, raw, None, out.elapsed, usage)
     }
+}
+
+/// The reply text from a finished `codex exec`, or why it failed. A failed turn is an error even
+/// when codex exits 0, and its own error event says more than stderr (which also carries routine
+/// notices). `message` is the last-message file, if codex wrote one.
+fn reply_or_error(
+    code: Option<i32>,
+    stdout: &str,
+    stderr: &str,
+    events: Events,
+    message: Option<String>,
+) -> Result<String, ReasoningError> {
+    let message = message.or(events.last_message);
+    if code != Some(0) || (message.is_none() && events.error.is_some()) {
+        let detail = events
+            .error
+            .or_else(|| Some(stderr.to_owned()).filter(|s| !s.trim().is_empty()))
+            .unwrap_or_else(|| stdout.to_owned());
+        return Err(ReasoningError::Process {
+            code,
+            stderr: truncate(&detail, 800),
+        });
+    }
+    Ok(message.unwrap_or_else(|| stdout.to_owned()))
+}
+
+/// What `codex exec --json` printed: one JSON event per line.
+#[derive(Debug, Default)]
+struct Events {
+    /// Summed over every `turn.completed`; `None` when no turn reported usage.
+    usage: Option<TokenUsage>,
+    /// The text of the last `agent_message` item.
+    last_message: Option<String>,
+    /// The message of the last `error` or `turn.failed` event.
+    error: Option<String>,
+}
+
+impl Events {
+    /// Reads the event stream. Lines that are not JSON events are skipped, so a CLI that prints
+    /// something else just reports no usage.
+    fn parse(stdout: &str) -> Self {
+        let mut events = Self::default();
+        for line in stdout.lines() {
+            let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            match event.get("type").and_then(|t| t.as_str()) {
+                Some("turn.completed") => {
+                    if let Some(turn) = event.get("usage").and_then(turn_usage) {
+                        let sum = events.usage.get_or_insert_with(TokenUsage::default);
+                        sum.input += turn.input;
+                        sum.output += turn.output;
+                        sum.cache_read += turn.cache_read;
+                        sum.cache_write += turn.cache_write;
+                    }
+                }
+                Some("item.completed") => {
+                    let item = &event["item"];
+                    if item["type"] == "agent_message" {
+                        if let Some(text) = item["text"].as_str() {
+                            events.last_message = Some(text.to_owned());
+                        }
+                    }
+                }
+                Some("error") => {
+                    events.error = event["message"].as_str().map(str::to_owned);
+                }
+                Some("turn.failed") => {
+                    events.error = event["error"]["message"].as_str().map(str::to_owned);
+                }
+                _ => {}
+            }
+        }
+        events
+    }
+}
+
+/// One turn's `usage`. OpenAI counts cached tokens inside `input_tokens`; they are split out here
+/// so `input` means uncached input, as it does for every backend.
+fn turn_usage(usage: &serde_json::Value) -> Option<TokenUsage> {
+    let n = |k: &str| usage.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+    let input = usage.get("input_tokens")?.as_u64()?;
+    let cache_read = n("cached_input_tokens").min(input);
+    let cache_write = n("cache_write_input_tokens").min(input - cache_read);
+    Some(TokenUsage {
+        input: input - cache_read - cache_write,
+        output: usage.get("output_tokens")?.as_u64()?,
+        cache_read,
+        cache_write,
+        cost_usd: None,
+        model: None,
+    })
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -220,6 +310,7 @@ mod tests {
         let a = spec.args.join(" ");
         assert!(a.starts_with("exec --ephemeral --skip-git-repo-check --sandbox read-only"));
         assert!(a.contains("--ignore-user-config --ignore-rules"));
+        assert!(a.contains("--color never --json"));
         assert!(a.contains(&format!("--output-schema {}", ws.schema_path().display())));
         assert!(a.contains(&format!("-C {}", ws.path().display())));
         assert!(a.contains("-m gpt-x"));
@@ -262,6 +353,79 @@ mod tests {
         );
         assert_eq!(a[5], "--sandbox");
         assert_eq!(a.last().unwrap(), "-");
+    }
+
+    /// A real `codex exec --json` run of "Reply OK" (thread id zeroed).
+    const EVENTS_FIXTURE: &str = include_str!("../fixtures/codex_exec.jsonl");
+
+    #[test]
+    fn real_events_report_usage_with_cached_input_split_out() {
+        let e = Events::parse(EVENTS_FIXTURE);
+        let u = e.usage.unwrap();
+        assert_eq!(
+            (u.input, u.cache_read, u.cache_write),
+            (14693 - 12288, 12288, 0)
+        );
+        assert_eq!(u.output, 5);
+        assert_eq!(u.total_input(), 14693);
+        assert_eq!((u.cost_usd, u.model), (None, None), "codex reports neither");
+        assert_eq!(e.last_message.as_deref(), Some("OK"));
+        assert_eq!(e.error, None);
+    }
+
+    #[test]
+    fn a_failed_turn_is_an_error_and_says_why() {
+        let failed = r#"{"type":"turn.failed","error":{"message":"usage limit reached"}}"#;
+        let err = |code, stdout: &str, stderr: &str| match reply_or_error(
+            code,
+            stdout,
+            stderr,
+            Events::parse(stdout),
+            None,
+        ) {
+            Err(ReasoningError::Process { stderr, .. }) => stderr,
+            other => panic!("expected a process error, got {other:?}"),
+        };
+        // The event's message wins over stderr's routine notices, whatever the exit code.
+        assert_eq!(
+            err(Some(1), failed, "Reading prompt from stdin..."),
+            "usage limit reached"
+        );
+        assert_eq!(
+            err(Some(0), failed, "Reading prompt from stdin..."),
+            "usage limit reached"
+        );
+        // Without an event, stderr, then stdout.
+        assert_eq!(err(Some(2), "", "boom"), "boom");
+
+        // A written reply is used even if an earlier turn reported an error.
+        let ok = reply_or_error(
+            Some(0),
+            failed,
+            "",
+            Events::parse(failed),
+            Some("{}".into()),
+        );
+        assert_eq!(ok.unwrap(), "{}");
+        // With no file, the agent_message from the events.
+        let msg = r#"{"type":"item.completed","item":{"type":"agent_message","text":"{\"a\":1}"}}"#;
+        assert_eq!(
+            reply_or_error(Some(0), msg, "", Events::parse(msg), None).unwrap(),
+            r#"{"a":1}"#
+        );
+    }
+
+    #[test]
+    fn events_sum_turns_and_tolerate_noise() {
+        let out = "not json\n\
+            {\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":10,\"cached_input_tokens\":4,\"output_tokens\":2}}\n\
+            {\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":20,\"output_tokens\":3}}\n\
+            {\"type\":\"turn.failed\",\"error\":{\"message\":\"usage limit\"}}\n";
+        let e = Events::parse(out);
+        let u = e.usage.unwrap();
+        assert_eq!((u.input, u.cache_read, u.output), (26, 4, 5));
+        assert_eq!(e.error.as_deref(), Some("usage limit"));
+        assert!(Events::parse("plain text").usage.is_none());
     }
 
     #[test]
@@ -379,7 +543,7 @@ mod tests {
         let fake = dir.path().join("codex");
         std::fs::write(
             &fake,
-            "#!/bin/sh\ncat >/dev/null\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = --output-last-message ]; then echo '{\"ok\": true}' > \"$2\"; fi\n  shift\ndone\n",
+            "#!/bin/sh\ncat >/dev/null\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = --output-last-message ]; then echo '{\"ok\": true}' > \"$2\"; fi\n  shift\ndone\necho '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":9,\"output_tokens\":3}}'\n",
         )
         .unwrap();
         use std::os::unix::fs::PermissionsExt;
@@ -391,5 +555,6 @@ mod tests {
         let resp = b.invoke(&req(), &CancelToken::new()).unwrap();
         assert_eq!(resp.output, serde_json::json!({"ok": true}));
         assert_eq!(resp.backend, "codex");
+        assert_eq!(resp.usage.unwrap().output, 3);
     }
 }

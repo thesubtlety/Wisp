@@ -12,10 +12,11 @@ use wisp_library::Snippet;
 use wisp_reasoning::{CancelToken, ReasoningBackend, ReasoningError, ReasoningRequest, TaskKind};
 
 use crate::evidence::{render_snippets, render_transcript, EvidencePacket, TranscriptLine};
-use crate::intervene::{validate_candidate, Candidate, MAX_CANDIDATES_PER_PASS};
+use crate::intervene::{validate_candidate_in_batch, Candidate, MAX_CANDIDATES_PER_PASS};
 use crate::model::MeetingState;
 use crate::ops::{output_schema, OpBatch};
 use crate::reducer::{reduce, ApplyReport, RejectReason};
+use crate::speakers::{validate_speaker_name, SpeakerReject, SpeakerSuggestion};
 
 /// Lines already analyzed that are shown again before the new ones, for continuity.
 pub const CONTEXT_LINES: usize = 10;
@@ -64,7 +65,17 @@ one-sentence title with the full point, a short detail, a suggested question if 
 evidence IDs, existing item ids in related_items, and honest scores from 0 to 1: importance (later work saved), \
 urgency (why now), confidence (that the issue is real), future_work_risk (chance of rework if left).
 
-If nothing is worth recording or raising, return {\"ops\": [], \"candidates\": []}.
+Speaker names: the transcript labels unnamed speakers \"Speaker 1\", \"Speaker 2\" and so on. In \
+speaker_names, propose a name for such a speaker only when the transcript gives real evidence: \
+the speaker introduces themself (\"I'm Laurie\", \"this is Laurie\"), someone addresses them by \
+name and they answer, or others refer to them by name. A greeting names the person addressed, not \
+the speaker: when Speaker 1 says \"Good afternoon Laurie\", Speaker 1 is not Laurie; Laurie is \
+whoever is being greeted, usually the one who answers. Prefer self-introductions. Never guess. \
+Never propose a name for \"You\", \"Them\" or a speaker already shown by name. Cite the lines as \
+evidence and give a confidence from 0 to 1. Most passes propose none.
+
+If nothing is worth recording or raising, return {\"ops\": [], \"candidates\": [], \
+\"speaker_names\": []}.
 
 Fields: an add sets kind, text, epistemic_status, confidence, source_refs, and temp_id if a later \
 op refers to it. An update sets id and only the fields that change, plus source_refs for the new \
@@ -106,6 +117,10 @@ pub struct AnalyzeOutcome {
     pub candidates: Vec<Candidate>,
     /// Proposed interventions that failed the check: title and reason.
     pub rejected_candidates: Vec<(String, RejectReason)>,
+    /// Proposed speaker names whose speaker, name and evidence checked out.
+    pub speaker_names: Vec<SpeakerSuggestion>,
+    /// Proposed speaker names that failed the check: the proposal and why.
+    pub rejected_speaker_names: Vec<(String, SpeakerReject)>,
     pub new_lines: usize,
     /// New lines left for the next pass because this one was full.
     pub remaining_lines: usize,
@@ -268,9 +283,23 @@ pub fn analyze_now(
     let mut candidates = Vec::new();
     let mut rejected_candidates = Vec::new();
     for raw in batch.candidates.iter().take(MAX_CANDIDATES_PER_PASS) {
-        match validate_candidate(raw, &pass.packet, state) {
+        match validate_candidate_in_batch(raw, &pass.packet, state, &report.temp_ids) {
             Ok(c) => candidates.push(c),
             Err(reason) => rejected_candidates.push((raw.title.clone(), reason)),
+        }
+    }
+    let mut speaker_names = Vec::new();
+    let mut rejected_speaker_names = Vec::new();
+    for raw in batch
+        .speaker_names
+        .iter()
+        .take(crate::speakers::MAX_PER_PASS)
+    {
+        match validate_speaker_name(raw, &pass.packet, input.transcript) {
+            Ok(s) => speaker_names.push(s),
+            Err(reason) => {
+                rejected_speaker_names.push((format!("{} → {}", raw.speaker, raw.name), reason))
+            }
         }
     }
     state.analyzed_through = pass.through.or(state.analyzed_through);
@@ -279,6 +308,8 @@ pub fn analyze_now(
         report,
         candidates,
         rejected_candidates,
+        speaker_names,
+        rejected_speaker_names,
         new_lines: pass.new_lines,
         remaining_lines,
         backend: response.backend,
@@ -376,6 +407,50 @@ mod tests {
             "superseded_by": null, "owner": null, "due": null,
             "source_refs": refs, "related_items": []
         })
+    }
+
+    #[test]
+    fn a_card_can_point_at_an_item_the_same_reply_created() {
+        let transcript = vec![line(
+            0,
+            "Them",
+            "Then there was a second round, worse than the first.",
+        )];
+        let backend = ScriptedBackend::named("scripted");
+        let mut risk = model_add(
+            "risk",
+            "A second ransomware round suggests incomplete recovery",
+            "inferred",
+            &["T0"],
+        );
+        risk["temp_id"] = json!("t_rounds");
+        backend.push_ok(json!({"ops": [risk], "candidates": [
+            {"kind": "conflict", "headline": "Recovery may be incomplete",
+             "title": "A second, worse round points to incomplete containment",
+             "detail": "", "suggested_question": "What changed between the two rounds?",
+             "source_refs": ["T0"], "related_items": ["t_rounds", "t_never_made"],
+             "importance": 0.9, "urgency": 0.8, "confidence": 0.8, "future_work_risk": 0.9}
+        ]}));
+        let mut state = MeetingState::new("live");
+        let out = analyze_now(
+            &backend,
+            &CancelToken::new(),
+            &mut state,
+            &input(&transcript, &[]),
+            42,
+        )
+        .unwrap();
+        assert!(
+            out.rejected_candidates.is_empty(),
+            "{:?}",
+            out.rejected_candidates
+        );
+        assert_eq!(out.candidates.len(), 1);
+        assert_eq!(
+            out.candidates[0].related_items,
+            ["RISK-1"],
+            "temp id resolved, dangling link dropped"
+        );
     }
 
     #[test]
@@ -532,6 +607,57 @@ mod tests {
         let schema = crate::ops::output_schema();
         let required = &schema["properties"]["candidates"]["items"]["required"];
         assert!(required.as_array().unwrap().contains(&json!("headline")));
+    }
+
+    #[test]
+    fn the_instructions_say_a_greeting_names_the_person_addressed() {
+        let flat = INSTRUCTIONS
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(flat.contains("A greeting names the person addressed, not the speaker"));
+        assert!(flat.contains("Good afternoon Laurie"));
+        assert!(flat.contains("Prefer self-introductions. Never guess."));
+        assert!(flat.contains("Never propose a name for \"You\""));
+    }
+
+    #[test]
+    fn speaker_names_are_optional_in_the_schema_and_checked_in_the_pass() {
+        let schema = output_schema();
+        assert!(schema["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("speaker_names")));
+        assert_eq!(
+            schema["properties"]["speaker_names"][wisp_reasoning::OPTIONAL_MARK],
+            json!(true)
+        );
+        assert!(wisp_reasoning::validate(&schema, &json!({"ops": [], "candidates": []})).is_ok());
+        assert!(!wisp_reasoning::for_model(&schema)
+            .to_string()
+            .contains(wisp_reasoning::OPTIONAL_MARK));
+
+        let transcript = vec![
+            line(0, "Speaker 1", "Good afternoon Laurie."),
+            line(1, "Speaker 2", "Afternoon! Glad to be here."),
+        ];
+        let backend = ScriptedBackend::named("scripted");
+        backend.push_ok(json!({"ops": [], "candidates": [], "speaker_names": [
+            {"speaker": "Speaker 2", "name": "Laurie", "evidence": ["T0", "T1"], "confidence": 0.8},
+            {"speaker": "You", "name": "Sam", "evidence": ["T0"], "confidence": 0.9}
+        ]}));
+        let mut state = MeetingState::new("live");
+        let out = analyze_now(
+            &backend,
+            &CancelToken::new(),
+            &mut state,
+            &input(&transcript, &[]),
+            1,
+        )
+        .unwrap();
+        assert_eq!(out.speaker_names.len(), 1);
+        assert_eq!(out.speaker_names[0].name, "Laurie");
+        assert_eq!(out.rejected_speaker_names.len(), 1);
     }
 
     #[test]

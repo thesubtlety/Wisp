@@ -15,6 +15,21 @@ pub fn paste_text(text: &str) -> Result<(), String> {
     mac::paste_text(text)
 }
 
+/// Puts `text` on the system clipboard. Used instead of the web clipboard API, which WebKit refuses
+/// once an `await` has passed since the click.
+#[cfg(target_os = "macos")]
+pub fn copy_text(text: &str) -> Result<(), String> {
+    arboard::Clipboard::new()
+        .and_then(|mut c| c.set_text(text.to_owned()))
+        .map_err(|e| format!("clipboard unavailable: {e}"))
+}
+
+/// Native clipboard writes are macOS-only for now.
+#[cfg(not(target_os = "macos"))]
+pub fn copy_text(_text: &str) -> Result<(), String> {
+    Err("copying is only implemented on macOS".to_owned())
+}
+
 /// Text injection is macOS-only for now; every other platform reports it unimplemented.
 #[cfg(not(target_os = "macos"))]
 pub fn paste_text(_text: &str) -> Result<(), String> {

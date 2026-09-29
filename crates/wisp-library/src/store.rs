@@ -13,7 +13,7 @@ use crate::retention::RetentionPolicy;
 use crate::Result;
 
 /// On-disk schema version, bumped on schema changes (drives migration via `PRAGMA user_version`).
-const SCHEMA_VERSION: i64 = 9;
+const SCHEMA_VERSION: i64 = 10;
 
 /// Characters of transcript kept as a list preview.
 const PREVIEW_CHARS: usize = 160;
@@ -249,6 +249,16 @@ CREATE TABLE speaker_name (
 ALTER TABLE project ADD COLUMN instructions TEXT NOT NULL DEFAULT '';
 ";
 
+/// Schema v10 — what each logged model call used and cost: prompt-cache reads and writes (split out
+/// of `tokens_in`, which now counts uncached input), the API-price cost the backend reported, and
+/// the model that actually answered. Rows logged before v10 read as zero cache tokens and no cost.
+pub(crate) const SCHEMA_V10: &str = "\
+ALTER TABLE llm_call ADD COLUMN cache_read_tokens INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE llm_call ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE llm_call ADD COLUMN cost_usd REAL;
+ALTER TABLE llm_call ADD COLUMN model_reported TEXT;
+";
+
 /// A handle to the meeting knowledge base. Open once and reuse across queries. With no embedder it
 /// is full-text only; configure one via [`Library::set_embedder`] to enable semantic and hybrid
 /// search.
@@ -313,7 +323,7 @@ impl Library {
             .pragma_query_value(None, "user_version", |r| r.get(0))?;
         // Each step commits with its version, so a failed step leaves the database at the previous
         // version rather than half-migrated (a re-run ALTER TABLE would fail on the duplicate column).
-        let steps: [(i64, &str); 9] = [
+        let steps: [(i64, &str); 10] = [
             (1, SCHEMA_V1),
             (2, SCHEMA_V2),
             (3, SCHEMA_V3),
@@ -323,6 +333,7 @@ impl Library {
             (7, SCHEMA_V7),
             (8, SCHEMA_V8),
             (9, SCHEMA_V9),
+            (10, SCHEMA_V10),
         ];
         for (step, sql) in steps {
             if version >= step {

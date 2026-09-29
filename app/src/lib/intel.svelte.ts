@@ -1,3 +1,4 @@
+import { copyText } from "$lib/clipboard";
 // Meeting intelligence on the webview side: the live state as `intel://update` reports it, and the
 // Ask conversation. Module-level, so nothing is lost while the panel is closed; reset per session.
 import { invoke } from "@tauri-apps/api/core";
@@ -132,7 +133,18 @@ type IntelUpdate =
       cards: Card[];
     }
   | { kind: "nothingNew" }
+  | { kind: "speakerNames"; suggestions: SpeakerSuggestion[] }
   | { kind: "failed"; message: string };
+
+/** "Speaker 2 is probably Laurie", from the transcript. `speakerId` is 0-based. */
+export type SpeakerSuggestion = {
+  speaker: string;
+  speakerId: number;
+  name: string;
+  confidence: number;
+  evidence: string[];
+  quote: string | null;
+};
 
 export type Citation = { id: string; label: string; text: string; sourceRef: string | null; itemId: string | null };
 export type AskAnswer = {
@@ -190,11 +202,32 @@ export const intel = $state({
   auditing: false,
   audit: null as null | { gaps: Gap[]; rejected: number; markdown: string },
   scheduledEnd: "",
+  // Whether the user typed `scheduledEnd` (vs. the assumed slot). Only a typed time carries into
+  // the next Start, and Stop clears it.
+  scheduledEndTyped: false,
   /** Screenshots attached to this meeting. */
   context: [] as ContextShot[],
   contextBusy: false,
   contextError: "",
+  /** Live speaker-name suggestions, one per speaker at most. */
+  speakerSuggestions: [] as SpeakerSuggestion[],
 });
+
+/** Suggestions dismissed this meeting, so one already in flight doesn't come back. */
+let dismissedSpeakerNames = new Set<string>();
+const speakerKey = (s: { speaker: string; name: string }) => `${s.speaker}\u0000${s.name.toLowerCase()}`;
+
+/** Drops a speaker-name suggestion and tells the runtime not to offer it again this meeting. */
+export async function dismissSpeakerSuggestion(s: SpeakerSuggestion) {
+  dismissedSpeakerNames.add(speakerKey(s));
+  intel.speakerSuggestions = intel.speakerSuggestions.filter((x) => x.speaker !== s.speaker);
+  await invoke("intel_dismiss_speaker_name", { speaker: s.speaker, name: s.name }).catch(() => {});
+}
+
+/** Drops the suggestion for a speaker the user just named. */
+export function clearSpeakerSuggestion(speakerId: number) {
+  intel.speakerSuggestions = intel.speakerSuggestions.filter((x) => x.speakerId !== speakerId);
+}
 
 export type ContextShot = {
   sourceId: number;
@@ -245,7 +278,7 @@ function exportArgs(kind: ExportKind, running: boolean, liveTitle: (when: string
 export async function copyExport(kind: ExportKind, running: boolean, liveTitle: (when: string) => string) {
   try {
     const text = await invoke<string>("intel_export", exportArgs(kind, running, liveTitle));
-    await navigator.clipboard.writeText(text);
+    await copyText(text);
     intel.exportNote = "copied";
   } catch (e) {
     intel.exportNote = `error:${e}`;
@@ -285,6 +318,8 @@ export function ensureIntelListener(): Promise<unknown> {
       intel.note = "";
     } else if (u.kind === "nothingNew") {
       intel.note = "nothingNew";
+    } else if (u.kind === "speakerNames") {
+      intel.speakerSuggestions = u.suggestions.filter((s) => !dismissedSpeakerNames.has(speakerKey(s)));
     } else if (u.kind === "wrapSuggested") {
       if (!intel.endgame) {
         intel.wrapSuggested = u.trigger;
@@ -322,6 +357,8 @@ export function resetIntel() {
   intel.exportNote = "";
   intel.context = [];
   intel.contextError = "";
+  intel.speakerSuggestions = [];
+  dismissedSpeakerNames = new Set();
   intel.review = null;
   intel.reviewBusy = false;
   intel.reviewError = "";
@@ -516,9 +553,38 @@ export function setScheduledEnd(hhmm: string) {
   if (m) {
     const d = new Date();
     d.setHours(Number(m[1]), Number(m[2]), 0, 0);
+    // A time well before now means tomorrow (a meeting running past midnight).
+    if (d.getTime() < Date.now() - 12 * 60 * 60 * 1000) d.setDate(d.getDate() + 1);
     endMs = d.getTime();
   }
   invoke("intel_set_scheduled_end", { endMs }).catch(() => {});
+}
+
+const MEETING_MINUTES_KEY = "wisp.meetingMinutes";
+
+/** The assumed meeting length when no end time is given: 30 or 60 minutes (default 60). */
+export function meetingMinutes(): 30 | 60 {
+  try {
+    return localStorage.getItem(MEETING_MINUTES_KEY) === "30" ? 30 : 60;
+  } catch {
+    return 60;
+  }
+}
+
+export function setMeetingMinutes(minutes: 30 | 60) {
+  try {
+    localStorage.setItem(MEETING_MINUTES_KEY, String(minutes));
+  } catch {
+    // per-device convenience only
+  }
+}
+
+/** A guess at when a meeting that started at `startMs` ends, as "HH:MM": the start rounded to the
+ *  nearest :00 or :30 (calendar slots; people join a little early or late), plus `minutes`. */
+export function defaultMeetingEnd(startMs: number, minutes: number = meetingMinutes()): string {
+  const half = 30 * 60 * 1000;
+  const d = new Date(Math.round(startMs / half) * half + minutes * 60 * 1000);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
 /** Hides a card and tells the filter, so it holds back repeats. */

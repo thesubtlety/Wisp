@@ -102,8 +102,17 @@ export const en = {
     ok: "OK",
     failed: "Error",
     defaultModel: "default model",
-    tokens: (input: number, output: number, estimated: boolean) =>
-      `${estimated ? "≈" : ""}${input.toLocaleString()} in / ${estimated ? "≈" : ""}${output.toLocaleString()} out`,
+    tokens: (input: number, cached: number, output: number, estimated: boolean) =>
+      estimated
+        ? `≈${input.toLocaleString()} in / ≈${output.toLocaleString()} out`
+        : `${input.toLocaleString()} in / ${cached.toLocaleString()} cached / ${output.toLocaleString()} out`,
+    cacheSplit: (read: number, written: number) =>
+      `${read.toLocaleString()} read from the prompt cache, ${written.toLocaleString()} written to it`,
+    apiCost: (usd: string) => `$${usd} API-equivalent`,
+    apiCostNote:
+      "What the call would cost at API prices, as the backend reported it. On a subscription you pay the plan, not this.",
+    totals: (calls: number) => (calls === 1 ? "1 call" : `${calls.toLocaleString()} calls`),
+    partialCost: (n: number) => `partial: ${n.toLocaleString()} ${n === 1 ? "call" : "calls"} reported no cost`,
     estimatedNote: "The backend reported no token counts, so they are estimated from the text (about 4 characters per token).",
     sent: "Sent",
     instructions: "Instructions",
@@ -148,6 +157,10 @@ export const en = {
     them: "Them",
     speakerTip: "Click to name this speaker",
     speakerName: "Speaker name",
+    speakerSuggest: (label: string, name: string): string => `${label} → ${name}?`,
+    speakerSuggestTip: (quote: string): string => `From the transcript: “${quote}”`,
+    speakerSuggestAccept: "Accept",
+    speakerSuggestDismiss: "Dismiss suggestion",
     // Tooltip for the You/Them capture toggles — depends on whether the source is on and whether a
     // session is running (running → mute/unmute; idle → include/exclude from transcription).
     youTip: (on: boolean, running: boolean): string =>
@@ -366,6 +379,9 @@ export const en = {
 
   // Dictation settings (Settings.svelte). "Apple" / "macOS" stay English.
   settings: {
+    meetingLength: "Default meeting length",
+    minutes: (n: number): string => `${n} minutes`,
+    meetingLengthNote: "When a meeting has no end time, Wisp rounds its start to the nearest :00 or :30 and adds this, then suggests wrapping up 10 minutes before.",
     installedModels: "Installed models",
     noInstalledModels: "No downloaded models.",
     kindTranscription: "Transcription",

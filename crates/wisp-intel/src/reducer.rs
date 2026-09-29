@@ -88,6 +88,9 @@ pub struct ApplyReport {
     /// How many of the applied ops are `add`s merged into an existing item.
     pub merged: usize,
     pub rejected: Vec<Rejection>,
+    /// The real id each `temp_id` in the batch got, so other parts of the same reply (candidate
+    /// cards) can refer to items it created.
+    pub temp_ids: HashMap<String, String>,
 }
 
 /// Validates and applies `batch` to `state`. Ops apply one at a time, in order, so a later op can
@@ -141,6 +144,7 @@ pub fn reduce(
             Err(reason) => report.rejected.push(Rejection { index, reason }),
         }
     }
+    report.temp_ids = temps;
     report
 }
 
@@ -481,6 +485,7 @@ mod tests {
             &OpBatch {
                 ops,
                 candidates: vec![],
+                speaker_names: vec![],
             },
             &packet(),
             NOW,

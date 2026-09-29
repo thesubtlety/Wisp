@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { copyText } from "$lib/clipboard";
   // The meeting intelligence panel's body: Ask (questions answered with cited evidence, each answer
   // copyable) and State (the structured meeting state, with Analyze now). Lives inside AssistPanel.
   import { i18n } from "$lib/i18n.svelte";
@@ -94,7 +95,7 @@
 
   async function copy(i: number, text: string) {
     try {
-      await navigator.clipboard.writeText(text);
+      await copyText(text);
       copiedAt = i;
       setTimeout(() => copiedAt === i && (copiedAt = -1), 1500);
     } catch {
@@ -150,7 +151,10 @@
         <input
           type="time"
           value={intel.scheduledEnd}
-          onchange={(e) => setScheduledEnd(e.currentTarget.value)}
+          onchange={(e) => {
+            intel.scheduledEndTyped = true;
+            setScheduledEnd(e.currentTarget.value);
+          }}
         />
       </label>
       {#if intel.wrapSuggested && !intel.endgame}

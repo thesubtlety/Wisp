@@ -20,7 +20,7 @@ use crate::reducer::RejectReason;
 
 /// Most candidates taken from one pass.
 pub const MAX_CANDIDATES_PER_PASS: usize = 5;
-const MAX_TITLE_CHARS: usize = 160;
+const MAX_TITLE_CHARS: usize = 240;
 const MAX_DETAIL_CHARS: usize = 600;
 
 /// What kind of intervention a candidate is.
@@ -115,6 +115,30 @@ pub struct Candidate {
 
 /// Checks a candidate: text present and bounded, scores in range, at least one piece of evidence
 /// and all of it from the packet, related items known.
+/// Like [`validate_candidate`], for a card from the same reply as a batch of ops: items the batch
+/// created by `temp_id` resolve to their real ids, and a related item that still doesn't exist is
+/// dropped from the card rather than sinking it (the links are context; the evidence is what counts).
+pub fn validate_candidate_in_batch(
+    raw: &RawCandidate,
+    packet: &EvidencePacket,
+    state: &MeetingState,
+    temp_ids: &std::collections::HashMap<String, String>,
+) -> Result<Candidate, RejectReason> {
+    let mut resolved = raw.clone();
+    resolved.related_items = raw
+        .related_items
+        .iter()
+        .map(|id| {
+            temp_ids
+                .get(id.trim())
+                .cloned()
+                .unwrap_or_else(|| id.trim().to_owned())
+        })
+        .filter(|id| state.item(id).is_some())
+        .collect();
+    validate_candidate(&resolved, packet, state)
+}
+
 pub fn validate_candidate(
     raw: &RawCandidate,
     packet: &EvidencePacket,
@@ -219,8 +243,9 @@ pub fn candidates_schema() -> Value {
     })
 }
 
-/// The knobs of the local policy. The defaults are deliberately strict: missing a moderately useful
-/// insight is better than showing five mediocre ones.
+/// The knobs of the local policy. The defaults are strict: missing a moderately useful insight is
+/// better than showing five mediocre ones. They were loosened one step after a 53-minute call in
+/// which all 19 well-formed candidates fell just under the old 0.7 / 0.35 bar.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InterventionPolicy {
     /// Candidates below this confidence are never shown.
@@ -240,8 +265,8 @@ pub struct InterventionPolicy {
 impl Default for InterventionPolicy {
     fn default() -> Self {
         Self {
-            min_confidence: 0.7,
-            threshold: 0.35,
+            min_confidence: 0.6,
+            threshold: 0.28,
             interruption_cost: 0.1,
             cooldown_ms: 4 * 60 * 1000,
             max_per_hour: 5,
