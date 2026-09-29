@@ -383,6 +383,8 @@ export const en = {
   // AI assist / notes panel (AiNotes.svelte). "✦ Models" / "AI" / "API" / provider names stay
   // English; the template PROMPTS (LLM instructions) are not here — only their menu labels are.
   assist: {
+    subscriptionName: "Subscription (Codex / Claude Code)",
+    subscriptionModel: "As set in Settings › Storage › Reasoning",
     emptyText: "Add an AI model for notes and live hints — your gateway, a local Ollama, or OpenAI.",
     manageInModels: "Manage in ✦ Models",
     needsKey: (name: string): string => `⚠ ${name} needs an API key — add it`,

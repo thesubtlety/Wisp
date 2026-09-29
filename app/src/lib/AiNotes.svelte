@@ -14,6 +14,9 @@
     changedParamValues,
     loadParamValues,
     saveParamValues,
+    assistNeedsKey,
+    SUBSCRIPTION_PROVIDER,
+    type CloudProvider,
     type ParamSpec,
     type ParamValue,
   } from "$lib/cloud.svelte";
@@ -96,19 +99,35 @@
 
   // Providers that can host the assist, each with its assist models (catalog chat/realtime, or a
   // custom endpoint's own model).
+  // The subscription comes first: it needs no key and follows Settings › Reasoning.
+  const subscription = $derived<CloudProvider>({
+    id: SUBSCRIPTION_PROVIDER,
+    name: i18n.t.assist.subscriptionName,
+    keySet: true,
+    keyHint: null,
+    keysUrl: "",
+    custom: false,
+    baseUrl: "",
+    protocol: "",
+    assist: {} as CloudProvider["assist"],
+    models: [],
+  });
+  const allProviders = $derived([subscription, ...cloudState.providers]);
   const providerAssist = $derived(
-    cloudState.providers
+    allProviders
       .map((p) => ({
         provider: p,
         models:
-          ASSIST_CATALOG[p.id] ??
+          p.id === SUBSCRIPTION_PROVIDER
+            ? [{ id: "auto", label: i18n.t.assist.subscriptionModel, kind: "chat" as const }]
+            : ASSIST_CATALOG[p.id] ??
           (p.custom
             ? p.models.map((m) => ({ id: m.id, label: m.name, kind: "chat" as const }))
             : []),
       }))
       .filter((g) => g.models.length > 0),
   );
-  const provider = $derived(cloudState.providers.find((p) => p.id === providerId));
+  const provider = $derived(allProviders.find((p) => p.id === providerId));
   const assistModels = $derived(providerAssist.find((g) => g.provider.id === providerId)?.models ?? []);
   const model = $derived(assistModels.find((m) => m.id === modelId));
   const selectedKind = $derived(model?.kind ?? "chat");
@@ -299,7 +318,7 @@ in the meeting's language, no preamble.";
     const p = providerId,
       m = modelId,
       kind = selectedKind;
-    if (!p || !m) {
+    if (!p || !m || p === SUBSCRIPTION_PROVIDER) {
       assistParamSpecs = [];
       assistParamValues = {};
       return;
@@ -409,7 +428,7 @@ in the meeting's language. Output only the summary.";
   // when busy or unconfigured. On error, closes any half-streamed entry so it doesn't dangle.
   async function call(text: string) {
     if (!provider || !model || running) return;
-    if (!provider.keySet) {
+    if (assistNeedsKey(provider)) {
       error = `Add an API key for ${provider.name} first.`;
       liveOn = false;
       return;
@@ -460,7 +479,7 @@ in the meeting's language. Output only the summary.";
   // `running` busy flag for the whole pass so the timer can't re-enter it mid-flight.
   async function rollOnce() {
     if (!provider || !model || running || !prompt.trim()) return;
-    if (!provider.keySet) {
+    if (assistNeedsKey(provider)) {
       error = `Add an API key for ${provider.name} first.`;
       liveOn = false;
       return;
@@ -506,7 +525,7 @@ in the meeting's language. Output only the summary.";
   // during a live session (option A), or runs a single pass over a finished transcript. While Start is
   // establishing the first response it shows "Connecting…"; only on success does it switch to Stop.
   async function start() {
-    if (connecting || running || !provider?.keySet || !model || !prompt.trim()) return;
+    if (connecting || running || (!provider || assistNeedsKey(provider)) || !model || !prompt.trim()) return;
     error = "";
     // A real-time model opens the official WebSocket and listens to the live audio (option B); a chat
     // model rolls by polling the transcript (option A). One button, dispatched by the model's kind.
@@ -718,7 +737,7 @@ in the meeting's language. Output only the summary.";
                   onclick={() => (mpProvider = g.provider.id)}
                 >
                   <span class="mp-cat-name">{g.provider.name}</span>
-                  {#if !g.provider.keySet}<span class="mp-cat-dot" title={i18n.t.assist.apiKeyNeeded}></span>{/if}
+                  {#if assistNeedsKey(g.provider)}<span class="mp-cat-dot" title={i18n.t.assist.apiKeyNeeded}></span>{/if}
                 </button>
               {/each}
             </div>
@@ -758,7 +777,7 @@ in the meeting's language. Output only the summary.";
        instead, so its newest-at-bottom auto-scroll still works. -->
   <div class="body" class:scroll={!collapsed}>
     {#if !collapsed}
-    {#if provider && !provider.keySet}
+    {#if provider && assistNeedsKey(provider)}
       <button class="keyrow" onclick={openEndpointsModal}>{i18n.t.assist.needsKey(provider.name)}</button>
     {/if}
 
@@ -809,7 +828,7 @@ in the meeting's language. Output only the summary.";
     <div class="actions">
       <button
         class="run"
-        disabled={connecting || running || !provider?.keySet || !model || !prompt.trim() || realtimeNeedsSession}
+        disabled={connecting || running || (!provider || assistNeedsKey(provider)) || !model || !prompt.trim() || realtimeNeedsSession}
         onclick={start}
       >
         {#if connecting || running}<span class="btn-spin"></span>{connecting ? i18n.t.assist.connecting : i18n.t.assist.working}{:else}{selectedKind === "realtime" ? `⚡ ${i18n.t.assist.start}` : `▸ ${i18n.t.assist.start}`}{/if}

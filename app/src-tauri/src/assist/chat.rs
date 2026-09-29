@@ -4,6 +4,8 @@
 //! the endpoint's context window is map-reduced rather than truncated.
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
@@ -11,9 +13,33 @@ use tauri::{AppHandle, Emitter, Manager};
 use wisp_core::cloud::CloudProvider;
 use wisp_core::params::ParamValues;
 use wisp_engine_cloud::{assist_param_specs, chat_completion, chat_completion_stream, ChatRequest};
+use wisp_reasoning::{is_loopback, CancelToken, ReasoningBackend, ReasoningRequest, TaskKind};
 
 use super::{ASSIST_DELTA_EVENT, ASSIST_TEXT_EVENT};
 use crate::{build_param_values, param_spec_dto, resolve_cloud_provider, AppState, ParamSpecDto};
+
+/// The assist provider id that runs on Settings › Reasoning (the user's Codex / Claude Code
+/// subscription, or the local model) instead of an API key.
+pub(crate) const SUBSCRIPTION_PROVIDER: &str = "subscription";
+
+/// The subscription backends take far more than this; it keeps a normal meeting in one call and
+/// map-reduces only a very long one.
+const SUBSCRIPTION_CONTEXT_TOKENS: u32 = 200_000;
+
+/// How long one subscription assist call may run (a CLI call takes seconds to a minute).
+const SUBSCRIPTION_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Where an assist call goes.
+enum AssistTarget {
+    /// An OpenAI-compatible `/chat/completions` endpoint.
+    Http {
+        provider: Box<CloudProvider>,
+        model: String,
+        key: String,
+    },
+    /// The reasoning backend from Settings › Reasoning. Replies arrive whole, not streamed.
+    Subscription(Arc<dyn ReasoningBackend>),
+}
 
 /// The AI notes/assist tuning a custom endpoint carries (its chat model's knobs). All optional —
 /// an empty/`None` field falls back to a built-in default and is never sent to the provider. Used
@@ -104,22 +130,35 @@ fn run_llm_task_blocking(
     }
 
     let state = app.state::<AppState>();
-    let (provider, key, assist) = resolve_assist_target(&state, provider_id)?;
+    let (target, assist) = resolve_assist_target(&state, provider_id, model)?;
     let assist = overlay_assist_params(assist, &build_param_values(&assist_param_specs(), params));
 
     // Prepend the endpoint's standing instruction (persona / language / style) to the task prompt.
     let system = combine_system(&assist.system_prompt, system_prompt);
 
-    run_assist(&provider, model, &key, &system, transcript, &assist)
+    run_assist(&target, &system, transcript, &assist)
 }
 
-/// Resolves the cloud `provider` (catalog or custom endpoint), its on-device key, and its assist tuning
-/// — the common preamble for every assist call. A catalog provider uses default tuning; a custom
-/// endpoint carries its own (temperature, context size, system prompt, …).
+/// Resolves where an assist call goes and its tuning — the common preamble for every assist call.
+/// [`SUBSCRIPTION_PROVIDER`] goes to the reasoning backend. Otherwise it's the cloud provider
+/// (catalog or custom endpoint) with its on-device key: a catalog provider uses default tuning; a
+/// custom endpoint carries its own (temperature, context size, system prompt, …).
 fn resolve_assist_target(
     state: &AppState,
     provider_id: &str,
-) -> Result<(CloudProvider, String, AssistParams), String> {
+    model: &str,
+) -> Result<(AssistTarget, AssistParams), String> {
+    if provider_id == SUBSCRIPTION_PROVIDER {
+        let assist = AssistParams {
+            context_tokens: Some(SUBSCRIPTION_CONTEXT_TOKENS),
+            ..AssistParams::default()
+        };
+        return Ok((
+            AssistTarget::Subscription(crate::reasoning::backend(state)),
+            assist,
+        ));
+    }
+
     let endpoints = state
         .cloud_custom_endpoints
         .lock()
@@ -128,14 +167,13 @@ fn resolve_assist_target(
     let provider = resolve_cloud_provider(provider_id, &endpoints)
         .ok_or_else(|| format!("unknown provider {provider_id}"))?;
 
-    let key = state
+    let saved = state
         .cloud_keys
         .lock()
         .map_err(|_| "state lock poisoned".to_owned())?
         .get(provider_id)
-        .filter(|k| !k.trim().is_empty())
-        .cloned()
-        .ok_or_else(|| format!("no API key saved for {provider_id}"))?;
+        .cloned();
+    let key = assist_key(&provider, saved)?;
 
     let assist = endpoints
         .iter()
@@ -143,7 +181,22 @@ fn resolve_assist_target(
         .map(|e| e.assist.clone())
         .unwrap_or_default();
 
-    Ok((provider, key, assist))
+    let target = AssistTarget::Http {
+        provider: Box::new(provider),
+        model: model.to_owned(),
+        key,
+    };
+    Ok((target, assist))
+}
+
+/// The key to send: the saved one, or none for an endpoint on this machine (Ollama, LM Studio),
+/// which needs none. Any other endpoint without a saved key is an error.
+fn assist_key(provider: &CloudProvider, saved: Option<String>) -> Result<String, String> {
+    match saved.filter(|k| !k.trim().is_empty()) {
+        Some(key) => Ok(key),
+        None if is_loopback(&provider.base_url) => Ok(String::new()),
+        None => Err(format!("no API key saved for {}", provider.id)),
+    }
 }
 
 /// Overlays the user's advanced assist params (from the settings panel) onto the resolved endpoint
@@ -211,18 +264,27 @@ fn run_assist_stream_blocking(
     }
 
     let state = app.state::<AppState>();
-    let (provider, key, assist) = resolve_assist_target(&state, provider_id)?;
+    let (target, assist) = resolve_assist_target(&state, provider_id, model)?;
     let assist = overlay_assist_params(assist, &build_param_values(&assist_param_specs(), params));
 
     let system = combine_system(&assist.system_prompt, system_prompt);
 
     // A transcript that fits one call streams token-by-token; one too long map-reduces (each chunk
-    // whole, no per-token stream) and the combined result is emitted as the single final reply.
-    let text = match input_char_budget(assist.context_tokens) {
-        Some(budget) if transcript.chars().count() > budget => {
-            map_reduce_assist(&provider, model, &key, &system, transcript, &assist, budget)?
+    // whole, no per-token stream) and the combined result is emitted as the single final reply. The
+    // subscription backends don't stream, so their reply is emitted whole too.
+    let text = match (&target, input_char_budget(assist.context_tokens)) {
+        (_, Some(budget)) if transcript.chars().count() > budget => {
+            map_reduce_assist(&target, &system, transcript, &assist, budget)?
         }
-        _ => {
+        (AssistTarget::Subscription(_), _) => chat_once(&target, &system, transcript, &assist)?,
+        (
+            AssistTarget::Http {
+                provider,
+                model,
+                key,
+            },
+            _,
+        ) => {
             let app_delta = app.clone();
             let req = ChatRequest {
                 system: &system,
@@ -233,7 +295,7 @@ fn run_assist_stream_blocking(
                 frequency_penalty: assist.frequency_penalty,
                 presence_penalty: assist.presence_penalty,
             };
-            chat_completion_stream(&provider, model, &key, &req, |chunk| {
+            chat_completion_stream(provider, model, key, &req, |chunk| {
                 let _ = app_delta.emit(ASSIST_DELTA_EVENT, chunk.to_owned());
             })
             .map_err(|e| e.to_string())?
@@ -294,31 +356,38 @@ fn combine_system(standing: &str, task: &str) -> String {
 /// Runs an assist task, transparently map-reducing when `context_tokens` is set and the transcript
 /// would overflow it: split into chunks, run the task on each, then combine the partial results.
 fn run_assist(
-    provider: &CloudProvider,
-    model: &str,
-    key: &str,
+    target: &AssistTarget,
     system: &str,
     transcript: &str,
     assist: &AssistParams,
 ) -> Result<String, String> {
     match input_char_budget(assist.context_tokens) {
         Some(budget) if transcript.chars().count() > budget => {
-            map_reduce_assist(provider, model, key, system, transcript, assist, budget)
+            map_reduce_assist(target, system, transcript, assist, budget)
         }
-        _ => chat_once(provider, model, key, system, transcript, assist),
+        _ => chat_once(target, system, transcript, assist),
     }
 }
 
-/// One chat-completion call with the endpoint's tuning — temperature / max_tokens / top_p are each
-/// sent only when set, so a model that rejects a non-default temperature isn't sent one.
+/// One assist call. Over HTTP it carries the endpoint's tuning — temperature / max_tokens / top_p are
+/// each sent only when set, so a model that rejects a non-default temperature isn't sent one. The
+/// subscription backends take no tuning.
 fn chat_once(
-    provider: &CloudProvider,
-    model: &str,
-    key: &str,
+    target: &AssistTarget,
     system: &str,
     user: &str,
     assist: &AssistParams,
 ) -> Result<String, String> {
+    let (provider, model, key) = match target {
+        AssistTarget::Http {
+            provider,
+            model,
+            key,
+        } => (provider, model, key),
+        AssistTarget::Subscription(backend) => {
+            return subscription_once(backend.as_ref(), system, user)
+        }
+    };
     chat_completion(
         provider,
         model,
@@ -340,9 +409,7 @@ fn chat_once(
 /// then combine the partials under the original instruction (reduce). Covers the whole transcript
 /// rather than truncating it.
 fn map_reduce_assist(
-    provider: &CloudProvider,
-    model: &str,
-    key: &str,
+    target: &AssistTarget,
     system: &str,
     transcript: &str,
     assist: &AssistParams,
@@ -352,7 +419,7 @@ fn map_reduce_assist(
 
     let mut partials = Vec::with_capacity(chunks.len());
     for (i, chunk) in chunks.iter().enumerate() {
-        let part = chat_once(provider, model, key, system, chunk, assist)?;
+        let part = chat_once(target, system, chunk, assist)?;
         partials.push(format!(
             "=== Part {}/{} ===\n{}",
             i + 1,
@@ -367,14 +434,48 @@ fn map_reduce_assist(
          merging duplicates and keeping it faithful:\n\n{system}"
     );
 
-    chat_once(
-        provider,
-        model,
-        key,
-        &reduce_system,
-        &partials.join("\n\n"),
-        assist,
-    )
+    chat_once(target, &reduce_system, &partials.join("\n\n"), assist)
+}
+
+/// One assist call on the reasoning backend: the task prompt as instructions, the transcript as
+/// context, and the reply as a single `text` field.
+fn subscription_once(
+    backend: &dyn ReasoningBackend,
+    system: &str,
+    transcript: &str,
+) -> Result<String, String> {
+    let resp = backend
+        .invoke(&assist_request(system, transcript), &CancelToken::new())
+        .map_err(|e| e.to_string())?;
+    assist_text(&resp.output)
+}
+
+fn assist_request(system: &str, transcript: &str) -> ReasoningRequest {
+    ReasoningRequest {
+        task: TaskKind::Assist,
+        instructions: system.to_owned(),
+        context: transcript.to_owned(),
+        output_schema: serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["text"],
+            "properties": {"text": {"type": "string"}}
+        }),
+        timeout: SUBSCRIPTION_TIMEOUT,
+        images: Vec::new(),
+    }
+}
+
+/// The reply text from a validated `{ "text": … }` output. An empty reply is an error, so the feed
+/// never shows a blank answer.
+fn assist_text(output: &serde_json::Value) -> Result<String, String> {
+    output
+        .get("text")
+        .and_then(|t| t.as_str())
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| "the assist returned no text".to_owned())
 }
 
 #[cfg(test)]
@@ -477,5 +578,76 @@ mod tests {
         let mut zero = ParamValues::new();
         zero.set("max_tokens", ParamValue::Int(0));
         assert_eq!(overlay_assist_params(base, &zero).max_tokens, None);
+    }
+
+    fn provider_at(base_url: &str) -> CloudProvider {
+        let mut p = crate::cloud_provider_by_id("openai").unwrap();
+        p.base_url = base_url.to_owned();
+        p
+    }
+
+    #[test]
+    fn a_key_is_needed_except_on_this_machine() {
+        let remote = provider_at("https://api.openai.com/v1");
+        assert_eq!(assist_key(&remote, Some("sk-1".into())).unwrap(), "sk-1");
+        assert!(assist_key(&remote, None).is_err());
+        assert!(
+            assist_key(&remote, Some("  ".into())).is_err(),
+            "a blank key is no key"
+        );
+
+        let ollama = provider_at("http://127.0.0.1:11434/v1");
+        assert_eq!(assist_key(&ollama, None).unwrap(), "");
+        assert_eq!(
+            assist_key(&provider_at("http://localhost:1234/v1"), None).unwrap(),
+            ""
+        );
+        assert_eq!(
+            assist_key(&ollama, Some("k".into())).unwrap(),
+            "k",
+            "a saved key is still sent"
+        );
+
+        // A host that only starts with "localhost" is not this machine.
+        assert!(assist_key(&provider_at("http://localhost.evil.example/v1"), None).is_err());
+    }
+
+    #[test]
+    fn the_subscription_reply_is_the_text_field() {
+        assert_eq!(
+            assist_text(&serde_json::json!({"text": "  hi  "})).unwrap(),
+            "hi"
+        );
+        assert!(assist_text(&serde_json::json!({"text": " "})).is_err());
+        assert!(assist_text(&serde_json::json!({})).is_err());
+
+        let req = assist_request("Summarize.", "You: hello");
+        assert_eq!(req.task, TaskKind::Assist);
+        assert_eq!(req.instructions, "Summarize.");
+        assert_eq!(req.context, "You: hello");
+        assert!(req.images.is_empty());
+    }
+
+    #[test]
+    fn a_long_transcript_map_reduces_on_the_subscription() {
+        use std::sync::Mutex;
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = seen.clone();
+        let backend = wisp_reasoning::ScriptedBackend::with_responder("scripted", move |req| {
+            log.lock().unwrap().push(req.context.clone());
+            Ok(serde_json::json!({"text": format!("part of {} chars", req.context.len())}))
+        });
+        let target = AssistTarget::Subscription(Arc::new(backend));
+        let assist = AssistParams {
+            context_tokens: Some(10), // an 18-char budget
+            ..AssistParams::default()
+        };
+
+        let out = run_assist(&target, "Summarize.", "aaaaaaaaaa\nbbbbbbbbbb", &assist).unwrap();
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 3, "two parts, then one combine: {seen:?}");
+        assert!(seen[2].contains("=== Part 1/2 ===") && seen[2].contains("=== Part 2/2 ==="));
+        assert!(out.starts_with("part of"));
     }
 }

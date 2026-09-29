@@ -1304,7 +1304,7 @@ struct CloudProviderDto {
 }
 
 /// The cloud provider with `id` from the built-in catalog, if any.
-fn cloud_provider_by_id(id: &str) -> Option<CloudProvider> {
+pub(crate) fn cloud_provider_by_id(id: &str) -> Option<CloudProvider> {
     cloud_catalog().into_iter().find(|p| p.id == id)
 }
 

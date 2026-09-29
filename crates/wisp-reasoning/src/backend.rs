@@ -16,6 +16,8 @@ pub enum TaskKind {
     ProjectLearning,
     /// Describe a screenshot the user attached as context.
     ScreenshotContext,
+    /// A free-text assist task over a transcript (summary, action items, a custom prompt).
+    Assist,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

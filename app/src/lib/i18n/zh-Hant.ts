@@ -345,6 +345,8 @@ export const zhHant: Messages = {
   },
 
   assist: {
+    subscriptionName: "訂閱（Codex / Claude Code）",
+    subscriptionModel: "依「設定 › 儲存空間 › 推理」中的選擇",
     emptyText: "新增一個 AI 模型用於筆記和即時提示 —— 你的閘道、本地 Ollama，或 OpenAI。",
     manageInModels: "在 ✦ Models 中管理",
     needsKey: (name) => `⚠ ${name} 需要 API 金鑰 —— 點此新增`,

@@ -222,6 +222,26 @@ export function saveParamValues(
 }
 
 /** The provider with `id`, if present in the catalog. */
+/** The assist provider that runs on Settings › Reasoning (Codex / Claude Code / the local model). */
+export const SUBSCRIPTION_PROVIDER = "subscription";
+
+/** Whether `url`'s host is this machine (mirrors `wisp_reasoning::is_loopback`). */
+export function isLoopbackUrl(url: string): boolean {
+  let host: string;
+  try {
+    host = new URL(url).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  return host === "localhost" || host === "[::1]" || host === "::1" || /^127(\.\d{1,3}){3}$/.test(host);
+}
+
+/** Whether the assist needs a key saved for `p` first: not for the subscription, nor for an
+ *  endpoint on this machine (Ollama, LM Studio). */
+export function assistNeedsKey(p: CloudProvider): boolean {
+  return !p.keySet && p.id !== SUBSCRIPTION_PROVIDER && !isLoopbackUrl(p.baseUrl);
+}
+
 export function cloudProvider(id: string): CloudProvider | undefined {
   return cloudState.providers.find((p) => p.id === id);
 }
