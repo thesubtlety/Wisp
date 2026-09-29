@@ -128,7 +128,9 @@ pub struct RuntimeConfig {
     /// What matters to the user here: "About me" and the project's instructions (see
     /// [`crate::about_you`]). Given to every pass and the audit.
     pub focus: Option<String>,
-    /// Longest a single pass may take.
+    /// Longest a live pass may take. Short, so a hung backend falls back to the next one quickly
+    /// instead of leaving the meeting unanalyzed for minutes. The wrap-up audit, which the user
+    /// waits on and which reads more, has its own [`AUDIT_TIMEOUT`].
     pub timeout: Duration,
     /// Which proposed interventions reach the user.
     pub interventions: InterventionPolicy,
@@ -138,12 +140,15 @@ pub struct RuntimeConfig {
     pub memory: Vec<wisp_library::MemoryEntry>,
 }
 
+/// Longest the wrap-up audit may take.
+pub const AUDIT_TIMEOUT: Duration = Duration::from_secs(180);
+
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
             policy: TriggerPolicy::default(),
             focus: None,
-            timeout: Duration::from_secs(180),
+            timeout: Duration::from_secs(60),
             interventions: InterventionPolicy::default(),
             scheduled_end_ms: None,
             memory: Vec::new(),
@@ -528,7 +533,7 @@ impl Worker {
                 retrieved: &retrieved,
                 memory: &self.config.memory,
                 focus: self.config.focus.as_deref(),
-                timeout: self.config.timeout,
+                timeout: AUDIT_TIMEOUT.max(self.config.timeout),
             },
         );
         let update = match result {
