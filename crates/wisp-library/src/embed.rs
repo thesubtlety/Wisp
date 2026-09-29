@@ -25,6 +25,12 @@ pub trait Embedder: Send + Sync {
 
     /// Embeds a single search query into a `dim()`-length L2-normalized vector.
     fn embed_query(&self, text: &str) -> Result<Vec<f32>>;
+
+    /// The lowest query–passage similarity semantic search counts as a match. Models differ a lot:
+    /// some score unrelated text well above zero, so a zero floor would match everything.
+    fn min_score(&self) -> f32 {
+        0.0
+    }
 }
 
 /// Dot product of two equal-length vectors — cosine similarity when both are L2-normalized. Returns

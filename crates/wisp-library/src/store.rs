@@ -691,9 +691,10 @@ impl Library {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
-        // Drop non-matches (orthogonal / negatively-correlated chunks), then rank by similarity
-        // (higher is better, unlike BM25) and keep the best chunk per note.
-        hits.retain(|h| h.score > 0.0);
+        // Drop non-matches (below the model's floor, and never at or under zero), then rank by
+        // similarity (higher is better, unlike BM25) and keep the best chunk per note.
+        let floor = f64::from(embedder.min_score().max(0.0));
+        hits.retain(|h| h.score > floor);
         hits.sort_by(|a, b| {
             b.score
                 .partial_cmp(&a.score)
@@ -1430,6 +1431,56 @@ mod tests {
         }
         let lib = Library::open(&path).unwrap(); // second open: already at the current user_version, schema skipped
         assert_eq!(lib.count().unwrap(), 1);
+    }
+
+    /// [`HashingEmbedder`] with a similarity floor, like a model that scores unrelated text high.
+    struct FlooredEmbedder(HashingEmbedder, f32);
+
+    impl Embedder for FlooredEmbedder {
+        fn dim(&self) -> usize {
+            self.0.dim()
+        }
+        fn embed_passages(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+            self.0.embed_passages(texts)
+        }
+        fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
+            self.0.embed_query(text)
+        }
+        fn min_score(&self) -> f32 {
+            self.1
+        }
+    }
+
+    #[test]
+    fn semantic_search_drops_hits_below_the_model_floor() {
+        let notes = |floor: f32| {
+            let mut lib = Library::open_in_memory().unwrap();
+            lib.set_embedder(Some(Box::new(FlooredEmbedder(
+                HashingEmbedder { dim: 256 },
+                floor,
+            ))));
+            let s = |t| seg(1, 0, 100, t, AudioSourceKind::Microphone);
+            lib.save_note("m1", &meta("A"), 0, &[s("budget review")])
+                .unwrap();
+            lib.save_note(
+                "m2",
+                &meta("B"),
+                0,
+                &[s("budget travel lunch dinner offsite plans")],
+            )
+            .unwrap();
+            let mut ids: Vec<String> = lib
+                .search_semantic("budget review", 10)
+                .unwrap()
+                .into_iter()
+                .map(|h| h.meeting_id)
+                .collect();
+            ids.sort();
+            ids
+        };
+        // A weak partial overlap (~0.29) counts at a zero floor but not above the model's floor.
+        assert_eq!(notes(0.0), ["m1", "m2"]);
+        assert_eq!(notes(0.6), ["m1"]);
     }
 
     #[test]
