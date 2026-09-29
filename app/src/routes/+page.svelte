@@ -18,6 +18,8 @@
     pasteContext,
     CAPTURE_SHORTCUT,
     resetIntel,
+    setScheduledEnd,
+    defaultMeetingEnd,
     intel,
     wrapUp,
     loadProjects,
@@ -926,6 +928,8 @@
         await applyLiveDecode();
       }
       await ensureListener();
+      // An end time typed before Start survives the reset below.
+      const presetEnd = intel.scheduledEnd;
       if (intelEnabled) {
         resetIntel();
         await ensureIntelListener();
@@ -955,10 +959,12 @@
       meetingStartedAt = Date.now();
       clearTimeout(titleTimer);
       titleTimer = setTimeout(suggestLiveTitle, TITLE_FIRST_MS);
-      // Insights open with the meeting, so what it finds is on screen without a click.
+      // Insights open with the meeting, so what it finds is on screen without a click. With no end
+      // time given, assume the calendar slot so the wrap-up nudge still comes (shown, editable).
       if (intelEnabled) {
         liveIntelOpen = true;
         liveAssistOpen = false;
+        setScheduledEnd(presetEnd || defaultMeetingEnd(meetingStartedAt));
       }
       intel.startedAt = meetingStartedAt;
       // Both streams start unmuted; the live You/Them chips flip these mid-session.

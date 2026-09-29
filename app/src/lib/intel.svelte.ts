@@ -517,9 +517,21 @@ export function setScheduledEnd(hhmm: string) {
   if (m) {
     const d = new Date();
     d.setHours(Number(m[1]), Number(m[2]), 0, 0);
+    // A time well before now means tomorrow (a meeting running past midnight).
+    if (d.getTime() < Date.now() - 12 * 60 * 60 * 1000) d.setDate(d.getDate() + 1);
     endMs = d.getTime();
   }
   invoke("intel_set_scheduled_end", { endMs }).catch(() => {});
+}
+
+/** A guess at when a meeting that started at `startMs` ends, as "HH:MM": the first :00 or :30 at
+ *  least 45 minutes in, so an hour-long slot is assumed (a 3:00 start ends 4:00). Used when the
+ *  user set no end time; shorter meetings still get the spoken wrap-up trigger. */
+export function defaultMeetingEnd(startMs: number): string {
+  const d = new Date(startMs + 45 * 60 * 1000);
+  const extra = d.getMinutes() === 0 || d.getMinutes() === 30 ? 0 : d.getMinutes() < 30 ? 30 - d.getMinutes() : 60 - d.getMinutes();
+  d.setMinutes(d.getMinutes() + extra, 0, 0);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
 /** Hides a card and tells the filter, so it holds back repeats. */
