@@ -42,6 +42,8 @@
   // ── Dictation category ──────────────────────────────────────────────────────────────────────────
   type DictationStatus = {
     available: boolean;
+    engineKind: "apple" | "local" | null;
+    engineName: string | null;
     accessibilityOk: boolean;
     enabled: boolean;
     hotkey: string;
@@ -418,6 +420,12 @@
             {#if dictation && !dictation.available}
               <p class="set-note">{i18n.t.settings.dictationNote}</p>
             {:else if dictation}
+              <p class="set-note">
+                {dictation.engineKind === "local" && dictation.engineName
+                  ? i18n.t.settings.dictationUsesModel(dictation.engineName)
+                  : i18n.t.settings.dictationUsesApple}
+              </p>
+
               <div class="set-row">
                 <span class="set-label">{i18n.t.settings.pushToTalk}</span>
                 <button

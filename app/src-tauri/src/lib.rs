@@ -114,6 +114,8 @@ struct AppState {
     sessions: Mutex<Vec<Session>>,
     /// The push-to-talk dictation session, while the hotkey is held; `None` otherwise.
     dictation: Mutex<Option<dictation::Dictation>>,
+    /// The loaded local batch model dictation decodes with (when Apple speech isn't available).
+    dictation_engine: dictation::EngineCache,
     /// The configured dictation hotkey, and whether it's currently registered.
     dictation_hotkey: Mutex<String>,
     dictation_enabled: Mutex<bool>,
@@ -2570,6 +2572,8 @@ fn select_model(state: State<'_, AppState>, id: String) -> Result<(), String> {
         .active
         .lock()
         .map_err(|_| "state lock poisoned".to_owned())? = Some(model_id);
+    // Dictation prefers the active model, so its loaded engine may be stale now.
+    dictation::drop_cached_engine(&state);
     Ok(())
 }
 
@@ -2594,6 +2598,7 @@ fn remove_model(state: State<'_, AppState>, id: String) -> Result<(), String> {
     state.store.remove(&model_id).map_err(|e| e.to_string())?;
 
     clear_active_if_removed(state.inner(), &model_id)?;
+    dictation::drop_cached_engine(&state);
 
     Ok(())
 }
@@ -4350,6 +4355,7 @@ pub fn run() {
                 download_settings_path,
                 sessions: Mutex::new(Vec::new()),
                 dictation: Mutex::new(None),
+                dictation_engine: Mutex::new(None),
                 dictation_hotkey: Mutex::new(dictation::DEFAULT_DICTATION_HOTKEY.to_owned()),
                 dictation_enabled: Mutex::new(false),
                 active: Mutex::new(active),
