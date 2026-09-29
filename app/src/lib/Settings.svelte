@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { meetingMinutes, setMeetingMinutes } from "$lib/intel.svelte";
   // The app's Settings dialog: a left sidebar of categories, a right content panel — Claude-style.
   // Categories are self-contained (the AI-models manager, dictation); add more by extending `sections`.
   import { fade, scale } from "svelte/transition";
@@ -177,6 +178,7 @@
   };
   type EndpointChoice = { id: string; name: string; model: string; local: boolean };
   const REASONING_MODES: ReasoningMode[] = ["auto", "codex", "claude", "local"];
+  let meetingLength = $state(meetingMinutes());
   let reasoning = $state<ReasoningSettings>({ mode: "auto", localEndpoint: null, localModel: null, localForLive: true, aboutMe: "" });
   let reasoningEndpoints = $state<EndpointChoice[]>([]);
   let reasoningError = $state("");
@@ -608,6 +610,21 @@
               ></textarea>
             </label>
             <p class="set-intro">{i18n.t.settings.aboutMeNote}</p>
+            <label class="set-row">
+              <span class="set-label">{i18n.t.settings.meetingLength}</span>
+              <select
+                class="set-input"
+                value={String(meetingLength)}
+                onchange={(e) => {
+                  meetingLength = e.currentTarget.value === "30" ? 30 : 60;
+                  setMeetingMinutes(meetingLength);
+                }}
+              >
+                <option value="30">{i18n.t.settings.minutes(30)}</option>
+                <option value="60">{i18n.t.settings.minutes(60)}</option>
+              </select>
+            </label>
+            <p class="set-intro">{i18n.t.settings.meetingLengthNote}</p>
             <div class="set-row">
               <span class="set-label">{i18n.t.settings.checkReasoningLabel}</span>
               <button class="set-btn check-reasoning" onclick={checkReasoning}>{i18n.t.settings.checkReasoning}</button>

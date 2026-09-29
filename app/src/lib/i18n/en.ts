@@ -366,6 +366,9 @@ export const en = {
 
   // Dictation settings (Settings.svelte). "Apple" / "macOS" stay English.
   settings: {
+    meetingLength: "Default meeting length",
+    minutes: (n: number): string => `${n} minutes`,
+    meetingLengthNote: "When a meeting has no end time, Wisp rounds its start to the nearest :00 or :30 and adds this, then suggests wrapping up 10 minutes before.",
     installedModels: "Installed models",
     noInstalledModels: "No downloaded models.",
     kindTranscription: "Transcription",

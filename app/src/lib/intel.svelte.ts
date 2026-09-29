@@ -524,13 +524,30 @@ export function setScheduledEnd(hhmm: string) {
   invoke("intel_set_scheduled_end", { endMs }).catch(() => {});
 }
 
-/** A guess at when a meeting that started at `startMs` ends, as "HH:MM": the first :00 or :30 at
- *  least 45 minutes in, so an hour-long slot is assumed (a 3:00 start ends 4:00). Used when the
- *  user set no end time; shorter meetings still get the spoken wrap-up trigger. */
-export function defaultMeetingEnd(startMs: number): string {
-  const d = new Date(startMs + 45 * 60 * 1000);
-  const extra = d.getMinutes() === 0 || d.getMinutes() === 30 ? 0 : d.getMinutes() < 30 ? 30 - d.getMinutes() : 60 - d.getMinutes();
-  d.setMinutes(d.getMinutes() + extra, 0, 0);
+const MEETING_MINUTES_KEY = "wisp.meetingMinutes";
+
+/** The assumed meeting length when no end time is given: 30 or 60 minutes (default 60). */
+export function meetingMinutes(): 30 | 60 {
+  try {
+    return localStorage.getItem(MEETING_MINUTES_KEY) === "30" ? 30 : 60;
+  } catch {
+    return 60;
+  }
+}
+
+export function setMeetingMinutes(minutes: 30 | 60) {
+  try {
+    localStorage.setItem(MEETING_MINUTES_KEY, String(minutes));
+  } catch {
+    // per-device convenience only
+  }
+}
+
+/** A guess at when a meeting that started at `startMs` ends, as "HH:MM": the start rounded to the
+ *  nearest :00 or :30 (calendar slots; people join a little early or late), plus `minutes`. */
+export function defaultMeetingEnd(startMs: number, minutes: number = meetingMinutes()): string {
+  const half = 30 * 60 * 1000;
+  const d = new Date(Math.round(startMs / half) * half + minutes * 60 * 1000);
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 

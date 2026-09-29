@@ -331,6 +331,9 @@ export const zhHans: Messages = {
   },
 
   settings: {
+    meetingLength: "默认会议时长",
+    minutes: (n: number): string => `${n} 分钟`,
+    meetingLengthNote: "会议未设结束时间时，Wisp 会把开始时间取整到最近的整点或半点，再加上此时长，并在结束前 10 分钟提示收尾。",
     installedModels: "已安装的模型",
     noInstalledModels: "没有已下载的模型。",
     kindTranscription: "转写",
