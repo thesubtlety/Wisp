@@ -497,7 +497,8 @@ impl Library {
         let mut stmt = self.conn.prepare(
             "SELECT m.id, m.title, m.started_at_ms, m.duration_ms, m.language, m.engine,
                     (SELECT group_concat(text, ' ')
-                       FROM (SELECT text FROM segment WHERE meeting_id = m.id ORDER BY idx LIMIT 6))
+                       FROM (SELECT text FROM segment WHERE meeting_id = m.id ORDER BY idx LIMIT 6)),
+                    m.project_id
              FROM meeting m
              ORDER BY m.started_at_ms DESC",
         )?;
@@ -512,6 +513,7 @@ impl Library {
                     language: r.get(4)?,
                     engine: r.get(5)?,
                     preview: truncate_chars(&preview.unwrap_or_default(), PREVIEW_CHARS),
+                    project_id: r.get(7)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;

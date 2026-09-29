@@ -79,6 +79,8 @@ pub struct NoteSummary {
     pub engine: Option<String>,
     /// First stretch of transcript, for the list card.
     pub preview: String,
+    /// The project this meeting belongs to, if any.
+    pub project_id: Option<String>,
 }
 
 /// A full-text search result — one per matching meeting.

@@ -26,6 +26,22 @@ export const en = {
   },
 
   library: {
+    meetingTitle: "Meeting title (optional)",
+    renameMeeting: "Rename",
+    project: "Project",
+    noProject: "No project",
+    newProject: "New project…",
+    projectName: "Project name",
+    create: "Create",
+    save: "Save",
+    allMeetings: "All meetings",
+    renameProject: "Rename project",
+    meetingCount: (n: number): string => (n === 1 ? "1 meeting" : `${n} meetings`),
+    newMeetingInProject: "New meeting in this project",
+    projectKnowledge: "Project knowledge",
+    emptyProject: "No meetings here yet.",
+    movedKeepsKnowledge: (from: string): string =>
+      `Moved. Knowledge already learned from this meeting stays in ${from}.`,
     title: "Library",
     newNoteTitle: (date: string): string => `Note · ${date}`,
     searchPlaceholder: "Search notes…",

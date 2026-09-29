@@ -6,6 +6,10 @@
   import { invoke } from "@tauri-apps/api/core";
   import { i18n } from "$lib/i18n.svelte";
   import Modal from "$lib/Modal.svelte";
+  import { intel, loadProjects, createProject, renameProject, type MemoryItem } from "$lib/intel.svelte";
+
+  // "New meeting in this project": the page switches to Live with the project selected.
+  let { onNewMeeting }: { onNewMeeting?: (projectId: string) => void } = $props();
 
   type NoteSummary = {
     id: string;
@@ -15,6 +19,7 @@
     language: string | null;
     engine: string | null;
     preview: string;
+    project_id: string | null;
   };
   type SearchHit = {
     meeting_id: string;
@@ -32,6 +37,7 @@
     engine: string | null;
     summary: string | null;
     segment_count: number;
+    project_id: string | null;
   };
   type Segment = {
     idx: number;
@@ -54,6 +60,128 @@
   let searching = $state(false); // a search invoke is in flight
   let searchMode = $state("fulltext"); // the active search logic (mirrors Settings → Notes search)
 
+  // Which meetings the list shows: "" all, NO_PROJECT the unfiled ones, else one project's.
+  const NO_PROJECT = "__none";
+  const FILTER_KEY = "wisp.libraryProject";
+  let projectFilter = $state(readFilter());
+  const shown = $derived(
+    projectFilter === ""
+      ? notes
+      : notes.filter((n) => (projectFilter === NO_PROJECT ? !n.project_id : n.project_id === projectFilter)),
+  );
+  const shownIds = $derived(new Set(shown.map((n) => n.id)));
+  const shownHits = $derived((hits ?? []).filter((h) => projectFilter === "" || shownIds.has(h.meeting_id)));
+  const filterProject = $derived(intel.projects.find((p) => p.id === projectFilter));
+  let memory = $state<MemoryItem[]>([]);
+  let renamingProject = $state(false);
+  let projectDraft = $state("");
+  let projectError = $state("");
+
+  // Detail-view editing: the title, and which project the meeting is filed under.
+  let editingTitle = $state(false);
+  let titleDraft = $state("");
+  let newProjectOpen = $state(false);
+  let newProjectName = $state("");
+  let moveNote = $state("");
+
+  function readFilter(): string {
+    try {
+      return localStorage.getItem(FILTER_KEY) ?? "";
+    } catch {
+      return "";
+    }
+  }
+
+  function setFilter(v: string) {
+    projectFilter = v;
+    renamingProject = false;
+    projectError = "";
+    try {
+      localStorage.setItem(FILTER_KEY, v);
+    } catch {
+      // per-device convenience only
+    }
+  }
+
+  // The selected project's knowledge, shown above its meetings.
+  $effect(() => {
+    const id = filterProject?.id;
+    memory = [];
+    if (!id) return;
+    invoke<MemoryItem[]>("list_project_memory", { projectId: id })
+      .then((m) => {
+        if (projectFilter === id) memory = m;
+      })
+      .catch(() => {});
+  });
+
+  function projectName(id: string | null): string {
+    return (id && intel.projects.find((p) => p.id === id)?.name) || "";
+  }
+
+  async function saveProjectName() {
+    if (!filterProject) return;
+    const name = projectDraft.trim();
+    if (!name || name === filterProject.name) {
+      renamingProject = false;
+      return;
+    }
+    projectError = await renameProject(filterProject.id, name);
+    if (!projectError) renamingProject = false;
+  }
+
+  function startTitleEdit() {
+    if (!detail) return;
+    titleDraft = detail.meeting.title;
+    editingTitle = true;
+  }
+
+  async function saveTitle() {
+    if (!detail || !editingTitle) return;
+    editingTitle = false;
+    const title = titleDraft.trim();
+    if (!title || title === detail.meeting.title) return;
+    try {
+      await invoke<boolean>("rename_note", { id: detail.meeting.id, title });
+      detail.meeting.title = title;
+      await loadList();
+      if (query.trim()) onSearchInput();
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  async function moveTo(projectId: string) {
+    if (!detail) return;
+    if (projectId === "__new") {
+      newProjectOpen = true;
+      return;
+    }
+    const from = detail.meeting.project_id;
+    try {
+      await invoke<boolean>("set_note_project", { id: detail.meeting.id, projectId: projectId || null });
+      detail.meeting.project_id = projectId || null;
+      moveNote = from ? i18n.t.library.movedKeepsKnowledge(projectName(from)) : "";
+      await loadList();
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  async function createAndMove() {
+    const name = newProjectName.trim();
+    if (!name) return;
+    const err = await createProject(name, false);
+    if (err) {
+      error = err;
+      return;
+    }
+    newProjectOpen = false;
+    newProjectName = "";
+    const created = intel.projects.find((p) => p.name === name);
+    if (created) await moveTo(created.id);
+  }
+
   async function loadList() {
     try {
       notes = await invoke<NoteSummary[]>("list_library_notes");
@@ -64,7 +192,12 @@
     }
   }
 
-  onMount(loadList);
+  onMount(async () => {
+    loadList();
+    await loadProjects();
+    // A remembered filter whose project was deleted falls back to all meetings.
+    if (projectFilter && projectFilter !== NO_PROJECT && !filterProject) setFilter("");
+  });
 
   // Debounced so each keystroke doesn't hit the database.
   function onSearchInput() {
@@ -90,6 +223,10 @@
   }
 
   async function openNote(id: string) {
+    editingTitle = false;
+    newProjectOpen = false;
+    moveNote = "";
+    error = "";
     try {
       detail = await invoke<Detail | null>("get_library_note", { id });
       error = "";
@@ -176,13 +313,59 @@
         </button>
       </div>
       <div class="lib-titles">
-        <h2 class="lib-h2">{detail.meeting.title}</h2>
+        {#if editingTitle}
+          <!-- svelte-ignore a11y_autofocus -->
+          <input
+            class="title-input"
+            aria-label={i18n.t.library.renameMeeting}
+            bind:value={titleDraft}
+            autofocus
+            onkeydown={(e) => {
+              if (e.key === "Enter") saveTitle();
+              if (e.key === "Escape") editingTitle = false;
+            }}
+            onblur={saveTitle}
+          />
+        {:else}
+          <button class="title-btn" title={i18n.t.library.renameMeeting} onclick={startTitleEdit}>
+            <h2 class="lib-h2">{detail.meeting.title}</h2>
+          </button>
+        {/if}
         <span class="lib-meta">
           {fmtDate(detail.meeting.started_at_ms)} · {fmtDuration(detail.meeting.duration_ms)}{detail
             .meeting.engine
             ? ` · ${detail.meeting.engine}`
             : ""}
         </span>
+        <span class="project-row">
+          <span class="project-label">{i18n.t.library.project}</span>
+          {#if newProjectOpen}
+            <!-- svelte-ignore a11y_autofocus -->
+            <input
+              placeholder={i18n.t.library.projectName}
+              bind:value={newProjectName}
+              autofocus
+              onkeydown={(e) => {
+                if (e.key === "Enter") createAndMove();
+                if (e.key === "Escape") newProjectOpen = false;
+              }}
+            />
+            <button class="btn" disabled={!newProjectName.trim()} onclick={createAndMove}>{i18n.t.library.create}</button>
+            <button class="btn" onclick={() => (newProjectOpen = false)}>{i18n.t.library.cancel}</button>
+          {:else}
+            <select
+              aria-label={i18n.t.library.project}
+              value={detail.meeting.project_id ?? ""}
+              onchange={(e) => moveTo(e.currentTarget.value)}
+            >
+              <option value="">{i18n.t.library.noProject}</option>
+              {#each intel.projects as p (p.id)}<option value={p.id}>{p.name}</option>{/each}
+              <option value="__new">{i18n.t.library.newProject}</option>
+            </select>
+          {/if}
+        </span>
+        {#if moveNote}<span class="move-note">{moveNote}</span>{/if}
+        {#if error}<div class="err">{error}</div>{/if}
       </div>
     </header>
 
@@ -212,7 +395,54 @@
         bind:value={query}
         oninput={onSearchInput}
       />
+      <select
+        class="project-filter"
+        aria-label={i18n.t.library.project}
+        value={projectFilter}
+        onchange={(e) => setFilter(e.currentTarget.value)}
+      >
+        <option value="">{i18n.t.library.allMeetings}</option>
+        <option value={NO_PROJECT}>{i18n.t.library.noProject}</option>
+        {#each intel.projects as p (p.id)}<option value={p.id}>{p.name}</option>{/each}
+      </select>
     </header>
+
+    {#if filterProject}
+      <div class="project-bar">
+        {#if renamingProject}
+          <!-- svelte-ignore a11y_autofocus -->
+          <input
+            aria-label={i18n.t.library.renameProject}
+            bind:value={projectDraft}
+            autofocus
+            onkeydown={(e) => {
+              if (e.key === "Enter") saveProjectName();
+              if (e.key === "Escape") renamingProject = false;
+            }}
+          />
+          <button class="btn" onclick={saveProjectName}>{i18n.t.library.save}</button>
+          <button class="btn" onclick={() => ((renamingProject = false), (projectError = ""))}>{i18n.t.library.cancel}</button>
+        {:else}
+          <span class="project-name">{filterProject.name}</span>
+          <span class="lib-meta">{i18n.t.library.meetingCount(shown.length)}</span>
+          <button class="btn" onclick={() => ((projectDraft = filterProject!.name), (renamingProject = true))}
+            >{i18n.t.library.renameProject}</button
+          >
+          {#if onNewMeeting}
+            <button class="btn primary" onclick={() => onNewMeeting(filterProject!.id)}>{i18n.t.library.newMeetingInProject}</button>
+          {/if}
+        {/if}
+        {#if projectError}<span class="err">{projectError}</span>{/if}
+      </div>
+      {#if memory.length}
+        <details class="knowledge">
+          <summary>{i18n.t.library.projectKnowledge} ({memory.length})</summary>
+          <ul>
+            {#each memory as m (m.id)}<li><span class="k-kind">{m.kind}</span> {m.text}</li>{/each}
+          </ul>
+        </details>
+      {/if}
+    {/if}
 
     {#if error}
       <div class="err">{error}</div>
@@ -230,11 +460,11 @@
     {/if}
 
     {#if hits !== null}
-      {#if hits.length === 0}
+      {#if shownHits.length === 0}
         <div class="empty">{searching ? i18n.t.library.searching : i18n.t.library.noResults}</div>
       {:else}
         <ul class="cards" class:loading={searching}>
-          {#each hits as hit (hit.meeting_id)}
+          {#each shownHits as hit (hit.meeting_id)}
             <li>
               <button class="card hit-card" onclick={() => openNote(hit.meeting_id)}>
                 <div class="card-top">
@@ -259,11 +489,11 @@
       {/if}
     {:else if searching}
       <div class="empty">{i18n.t.library.searching}</div>
-    {:else if notes.length === 0}
-      <div class="empty">{i18n.t.library.empty}</div>
+    {:else if shown.length === 0}
+      <div class="empty">{projectFilter ? i18n.t.library.emptyProject : i18n.t.library.empty}</div>
     {:else}
       <ul class="cards">
-        {#each notes as m (m.id)}
+        {#each shown as m (m.id)}
           <li class="row">
             <button class="card card-main" onclick={() => openNote(m.id)}>
               <div class="card-top">
@@ -272,6 +502,7 @@
               </div>
               <div class="card-sub">
                 {fmtDuration(m.duration_ms)}{m.engine ? ` · ${m.engine}` : ""}
+                {#if projectFilter === "" && projectName(m.project_id)}<span class="chip">{projectName(m.project_id)}</span>{/if}
               </div>
               {#if m.preview}<div class="preview">{m.preview}</div>{/if}
             </button>
@@ -313,6 +544,61 @@
 </section>
 
 <style>
+  .title-btn {
+    all: unset;
+    cursor: text;
+    border-radius: 6px;
+  }
+  .title-btn:hover .lib-h2,
+  .title-btn:focus-visible .lib-h2 {
+    text-decoration: underline dotted;
+    text-underline-offset: 4px;
+  }
+  .title-input {
+    font: inherit;
+    font-size: 1.25rem;
+    font-weight: 600;
+    width: 100%;
+  }
+  .project-row,
+  .project-bar {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    font-size: 0.85rem;
+  }
+  .project-label,
+  .move-note,
+  .k-kind {
+    opacity: 0.65;
+    font-size: 0.8rem;
+  }
+  .project-name {
+    font-weight: 600;
+  }
+  .project-filter {
+    flex: none;
+    max-width: 14rem;
+  }
+  .btn.primary {
+    font-weight: 600;
+  }
+  .chip {
+    margin-left: 8px;
+    padding: 1px 7px;
+    border-radius: 999px;
+    border: 1px solid currentColor;
+    opacity: 0.7;
+    font-size: 0.75rem;
+  }
+  .knowledge {
+    font-size: 0.85rem;
+  }
+  .knowledge ul {
+    margin: 6px 0 0;
+    padding-left: 18px;
+  }
   .library {
     flex: 1;
     min-width: 0;

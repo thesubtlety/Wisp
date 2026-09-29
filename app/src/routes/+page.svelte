@@ -781,6 +781,8 @@
   let intelEnabled = $state(localStorage.getItem("wisp.intel") === "true");
   // The intelligence panel shares the assist panel's slot; opening one closes the other.
   let liveIntelOpen = $state(false);
+  // An optional title for the live meeting; empty saves it under the date.
+  let meetingTitle = $state("");
   // Project picker: "new" shows an inline name field.
   let newProjectOpen = $state(false);
   let newProjectName = $state("");
@@ -895,12 +897,13 @@
         await invoke("save_note", {
           id: meetingId,
           meta: meetingMeta(
-            i18n.t.library.newNoteTitle(new Date(meetingStartedAt).toLocaleString()),
+            meetingTitle.trim() || i18n.t.library.newNoteTitle(new Date(meetingStartedAt).toLocaleString()),
           ),
           startedAtMs: meetingStartedAt,
           source: "live",
           projectId: intelEnabled && intel.projectId ? intel.projectId : null,
         });
+        meetingTitle = "";
         // With intelligence on, the meeting ends in a short review of its follow-ups.
         if (intelEnabled) {
           intel.savedMeetingId = meetingId;
@@ -2035,6 +2038,12 @@
         <div class="transcript-pane">
           <div class="pane-head">
             <span class="pane-title">{i18n.t.common.transcript}</span>
+            <input
+              class="meeting-title"
+              aria-label={i18n.t.library.meetingTitle}
+              placeholder={i18n.t.library.meetingTitle}
+              bind:value={meetingTitle}
+            />
             {#if intelEnabled}
               <span class="project-pick">
                 {#if newProjectOpen}
@@ -2717,7 +2726,13 @@
   </div>
 
   {#if mode === "library"}
-    <Library />
+    <Library
+      onNewMeeting={(projectId) => {
+        intelEnabled = true;
+        selectProject(projectId);
+        mode = "live";
+      }}
+    />
   {/if}
 </main>
 
@@ -4207,6 +4222,20 @@
     padding: 10px 14px 6px;
   }
 
+  .meeting-title {
+    min-width: 0;
+    flex: 0 1 16rem;
+    font-size: 12px;
+    padding: 2px 6px;
+    border: 1px solid transparent;
+    border-radius: 5px;
+    background: transparent;
+    color: inherit;
+  }
+  .meeting-title:hover,
+  .meeting-title:focus {
+    border-color: var(--border, currentColor);
+  }
   .pane-title {
     font-size: 11px;
     font-weight: 600;

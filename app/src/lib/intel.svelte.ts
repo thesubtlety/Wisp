@@ -350,12 +350,24 @@ export function selectProject(id: string) {
   }
 }
 
-/** Creates a project and selects it. Returns an error message, or "" on success. */
-export async function createProject(name: string): Promise<string> {
+/** Creates a project and, unless `select` is false, selects it for new meetings. Returns an error
+ *  message, or "" on success. */
+export async function createProject(name: string, select = true): Promise<string> {
   try {
     const p = await invoke<Project>("create_project", { name });
-    intel.projects = [...intel.projects, p];
-    selectProject(p.id);
+    intel.projects = [...intel.projects, p].sort((a, b) => a.name.localeCompare(b.name));
+    if (select) selectProject(p.id);
+    return "";
+  } catch (e) {
+    return String(e);
+  }
+}
+
+/** Renames a project. Returns an error message, or "" on success. */
+export async function renameProject(id: string, name: string): Promise<string> {
+  try {
+    await invoke<boolean>("rename_project", { id, name });
+    await loadProjects();
     return "";
   } catch (e) {
     return String(e);

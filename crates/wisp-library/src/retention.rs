@@ -211,6 +211,26 @@ impl Library {
         Ok(rows)
     }
 
+    /// Renames a project (trimmed). Names stay unique, so a taken name is an error. Returns whether
+    /// the project exists.
+    pub fn rename_project(&self, project_id: &str, name: &str) -> Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE project SET name = ?2 WHERE id = ?1",
+            rusqlite::params![project_id, name.trim()],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Retitles a meeting (trimmed). Search reads titles from the meeting row, so hits follow.
+    /// Returns whether the meeting exists.
+    pub fn rename_meeting(&self, meeting_id: &str, title: &str) -> Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE meeting SET title = ?2 WHERE id = ?1",
+            rusqlite::params![meeting_id, title.trim()],
+        )?;
+        Ok(n > 0)
+    }
+
     /// Moves a meeting into `project_id`, or out of any project with `None`. Returns whether the
     /// meeting exists.
     pub fn set_meeting_project(&self, meeting_id: &str, project_id: Option<&str>) -> Result<bool> {
@@ -615,6 +635,54 @@ mod tests {
         )
         .unwrap();
         lib
+    }
+
+    #[test]
+    fn a_meeting_can_be_retitled_and_moved_between_projects() {
+        let lib = library_with_meeting();
+        lib.create_project("p1", "Acme", T0).unwrap();
+        lib.create_project("p2", "Globex", T0).unwrap();
+
+        assert!(lib.rename_meeting("m1", "  Acme hosting call ").unwrap());
+        assert!(!lib.rename_meeting("nope", "x").unwrap());
+        let (note, _) = lib.get_note("m1").unwrap().unwrap();
+        assert_eq!(note.title, "Acme hosting call");
+        // Search hits carry the new title.
+        let hits = lib.search("azure", 10).unwrap();
+        assert_eq!(hits[0].title, "Acme hosting call");
+
+        assert!(lib.set_meeting_project("m1", Some("p1")).unwrap());
+        assert!(lib.set_meeting_project("m1", Some("p2")).unwrap());
+        assert_eq!(
+            lib.get_note("m1").unwrap().unwrap().0.project_id.as_deref(),
+            Some("p2")
+        );
+        assert!(lib.set_meeting_project("m1", None).unwrap());
+        assert_eq!(lib.get_note("m1").unwrap().unwrap().0.project_id, None);
+
+        // A project that doesn't exist (say, deleted meanwhile) is refused, and the meeting stays put.
+        assert!(lib.set_meeting_project("m1", Some("gone")).is_err());
+        assert_eq!(lib.get_note("m1").unwrap().unwrap().0.project_id, None);
+    }
+
+    #[test]
+    fn a_project_can_be_renamed_but_names_stay_unique() {
+        let lib = Library::open_in_memory().unwrap();
+        lib.create_project("p1", "Acme", T0).unwrap();
+        lib.create_project("p2", "Globex", T0).unwrap();
+
+        assert!(lib.rename_project("p1", " Acme Corp ").unwrap());
+        assert!(!lib.rename_project("nope", "x").unwrap());
+        let names: Vec<String> = lib
+            .list_projects()
+            .unwrap()
+            .into_iter()
+            .map(|p| p.name)
+            .collect();
+        assert_eq!(names, ["Acme Corp", "Globex"]);
+
+        let taken = lib.rename_project("p2", "Acme Corp").unwrap_err();
+        assert!(taken.to_string().contains("UNIQUE"), "{taken}");
     }
 
     #[test]

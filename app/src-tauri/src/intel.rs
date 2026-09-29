@@ -829,6 +829,73 @@ pub(crate) fn create_project(state: State<'_, AppState>, name: String) -> Result
         })
 }
 
+/// Renames a project (trimmed, unique).
+#[tauri::command]
+pub(crate) fn rename_project(
+    state: State<'_, AppState>,
+    id: String,
+    name: String,
+) -> Result<bool, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("a project needs a name".to_owned());
+    }
+    state
+        .library
+        .lock()
+        .map_err(|_| "library lock poisoned".to_owned())?
+        .rename_project(&id, name)
+        .map_err(|e| {
+            if e.to_string().contains("UNIQUE") {
+                format!("a project named \"{name}\" already exists")
+            } else {
+                e.to_string()
+            }
+        })
+}
+
+/// Retitles a saved meeting.
+#[tauri::command]
+pub(crate) fn rename_note(
+    state: State<'_, AppState>,
+    id: String,
+    title: String,
+) -> Result<bool, String> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err("a meeting needs a title".to_owned());
+    }
+    state
+        .library
+        .lock()
+        .map_err(|_| "library lock poisoned".to_owned())?
+        .rename_meeting(&id, title)
+        .map_err(|e| e.to_string())
+}
+
+/// Files a saved meeting under `project_id`, or under no project when it's empty or absent. Project
+/// knowledge already learned from the meeting stays where it was learned.
+#[tauri::command]
+pub(crate) fn set_note_project(
+    state: State<'_, AppState>,
+    id: String,
+    project_id: Option<String>,
+) -> Result<bool, String> {
+    let project = project_id.as_deref().filter(|p| !p.is_empty());
+    state
+        .library
+        .lock()
+        .map_err(|_| "library lock poisoned".to_owned())?
+        .set_meeting_project(&id, project)
+        .map_err(|e| {
+            if e.to_string().contains("FOREIGN KEY") {
+                "that project no longer exists".to_owned()
+            } else {
+                e.to_string()
+            }
+        })
+}
+
 /// A memory entry with whether each piece of its evidence still exists.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
