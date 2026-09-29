@@ -8,7 +8,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
 use tauri::{AppHandle, Manager, State};
-use wisp_library::LlmCall;
+use wisp_library::{LlmCall, LlmTotals};
 use wisp_reasoning::{AuditRecord, AuditSink};
 
 use crate::AppState;
@@ -100,6 +100,10 @@ fn to_call(r: AuditRecord, meeting_id: Option<String>) -> LlmCall {
         tokens_in: i64::try_from(r.tokens_in).unwrap_or(i64::MAX),
         tokens_out: i64::try_from(r.tokens_out).unwrap_or(i64::MAX),
         tokens_estimated: r.tokens_estimated,
+        cache_read_tokens: i64::try_from(r.cache_read_tokens).unwrap_or(i64::MAX),
+        cache_write_tokens: i64::try_from(r.cache_write_tokens).unwrap_or(i64::MAX),
+        cost_usd: r.cost_usd,
+        model_reported: r.model_reported,
     }
 }
 
@@ -114,6 +118,20 @@ pub(crate) fn list_ai_activity(
         .lock()
         .map_err(|_| "library lock poisoned".to_owned())?
         .llm_calls(meeting_id.as_deref(), MAX_LISTED)
+        .map_err(|e| e.to_string())
+}
+
+/// Calls, tokens and reported cost over the whole log, or only `meeting_id`'s when given.
+#[tauri::command]
+pub(crate) fn ai_activity_totals(
+    state: State<'_, AppState>,
+    meeting_id: Option<String>,
+) -> Result<LlmTotals, String> {
+    state
+        .library
+        .lock()
+        .map_err(|_| "library lock poisoned".to_owned())?
+        .llm_call_totals(meeting_id.as_deref())
         .map_err(|e| e.to_string())
 }
 

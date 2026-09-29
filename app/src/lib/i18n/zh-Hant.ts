@@ -97,8 +97,16 @@ export const zhHant: Messages = {
     ok: "成功",
     failed: "出錯",
     defaultModel: "預設模型",
-    tokens: (input: number, output: number, estimated: boolean) =>
-      `輸入 ${estimated ? "≈" : ""}${input.toLocaleString()} / 輸出 ${estimated ? "≈" : ""}${output.toLocaleString()}`,
+    tokens: (input: number, cached: number, output: number, estimated: boolean) =>
+      estimated
+        ? `輸入 ≈${input.toLocaleString()} / 輸出 ≈${output.toLocaleString()}`
+        : `輸入 ${input.toLocaleString()} / 快取 ${cached.toLocaleString()} / 輸出 ${output.toLocaleString()}`,
+    cacheSplit: (read: number, written: number) =>
+      `從提示快取讀取 ${read.toLocaleString()}，寫入 ${written.toLocaleString()}`,
+    apiCost: (usd: string) => `依 API 計價約 $${usd}`,
+    apiCostNote: "後端回報的依 API 價格計算的費用。使用訂閱時，你支付的是訂閱費用，而不是這個金額。",
+    totals: (calls: number) => `${calls.toLocaleString()} 次呼叫`,
+    partialCost: (n: number) => `不完整：${n.toLocaleString()} 次呼叫未回報費用`,
     estimatedNote: "該後端未回報 token 數，因此依文字估算（約 4 個字元 1 個 token）。",
     sent: "傳送內容",
     instructions: "指令",

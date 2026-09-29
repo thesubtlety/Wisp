@@ -102,8 +102,17 @@ export const en = {
     ok: "OK",
     failed: "Error",
     defaultModel: "default model",
-    tokens: (input: number, output: number, estimated: boolean) =>
-      `${estimated ? "≈" : ""}${input.toLocaleString()} in / ${estimated ? "≈" : ""}${output.toLocaleString()} out`,
+    tokens: (input: number, cached: number, output: number, estimated: boolean) =>
+      estimated
+        ? `≈${input.toLocaleString()} in / ≈${output.toLocaleString()} out`
+        : `${input.toLocaleString()} in / ${cached.toLocaleString()} cached / ${output.toLocaleString()} out`,
+    cacheSplit: (read: number, written: number) =>
+      `${read.toLocaleString()} read from the prompt cache, ${written.toLocaleString()} written to it`,
+    apiCost: (usd: string) => `$${usd} API-equivalent`,
+    apiCostNote:
+      "What the call would cost at API prices, as the backend reported it. On a subscription you pay the plan, not this.",
+    totals: (calls: number) => (calls === 1 ? "1 call" : `${calls.toLocaleString()} calls`),
+    partialCost: (n: number) => `partial: ${n.toLocaleString()} ${n === 1 ? "call" : "calls"} reported no cost`,
     estimatedNote: "The backend reported no token counts, so they are estimated from the text (about 4 characters per token).",
     sent: "Sent",
     instructions: "Instructions",

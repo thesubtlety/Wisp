@@ -86,12 +86,37 @@ pub struct ReasoningResponse {
     pub usage: Option<TokenUsage>,
 }
 
-/// Tokens one call used, as the backend reported them.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// Tokens one call used, as the backend reported them, with its cost and model when it reports
+/// those too.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct TokenUsage {
-    /// Prompt tokens, cached ones included.
+    /// Prompt tokens that were not read from or written to a cache.
     pub input: u64,
     pub output: u64,
+    /// Prompt tokens read from the provider's prompt cache.
+    #[serde(default)]
+    pub cache_read: u64,
+    /// Prompt tokens written to the provider's prompt cache.
+    #[serde(default)]
+    pub cache_write: u64,
+    /// What the call would cost at API prices, in US dollars, as the backend reported it.
+    #[serde(default)]
+    pub cost_usd: Option<f64>,
+    /// The model that actually answered, as the backend reported it.
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+impl TokenUsage {
+    /// Every prompt token sent: uncached, cache reads and cache writes.
+    pub fn total_input(&self) -> u64 {
+        self.input + self.cache_read + self.cache_write
+    }
+
+    /// Every token of the call, prompt and reply.
+    pub fn total(&self) -> u64 {
+        self.total_input() + self.output
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
