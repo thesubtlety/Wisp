@@ -39,6 +39,11 @@ export const en = {
     meetingCount: (n: number): string => (n === 1 ? "1 meeting" : `${n} meetings`),
     newMeetingInProject: "New meeting in this project",
     projectKnowledge: "Project knowledge",
+    screenshots: "Screenshots",
+    shotExpires: (date: string): string => `Deleted on ${date}`,
+    shotKept: "Kept until you delete it",
+    deleteShotTitle: "Delete screenshot",
+    deleteShotConfirm: "Delete this screenshot and its description? This can't be undone.",
     emptyProject: "No meetings here yet.",
     movedKeepsKnowledge: (from: string): string =>
       `Moved. Knowledge already learned from this meeting stays in ${from}.`,
@@ -488,6 +493,8 @@ export const en = {
     undescribed: "Not described",
     describeAgain: "Describe again",
     removeShot: "Remove screenshot",
+    enlarge: "Show full size",
+    imageMissing: "The image is gone",
     contextFailed: (msg: string) => `Couldn't attach: ${msg}`,
     endsAt: "Ends at",
     wrapSuggested: {

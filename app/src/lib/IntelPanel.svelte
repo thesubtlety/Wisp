@@ -2,6 +2,7 @@
   // The meeting intelligence panel's body: Ask (questions answered with cited evidence, each answer
   // copyable) and State (the structured meeting state, with Analyze now). Lives inside AssistPanel.
   import { i18n } from "$lib/i18n.svelte";
+  import ShotThumb from "$lib/ShotThumb.svelte";
   import {
     intel,
     askQuestion,
@@ -412,7 +413,9 @@
             <p class="hint">{i18n.t.intel.screenshotsHint}</p>
           {/if}
           {#each intel.context as shot (shot.sourceId)}
-            <div class="item">
+            <div class="item shot">
+              <ShotThumb sourceId={shot.sourceId} title={shot.title ?? shot.label} />
+              <div class="shot-body">
               <p class="itext">{shot.title ?? i18n.t.intel.screenshot}</p>
               <p class="imeta">
                 <span>{shot.label}</span>
@@ -428,6 +431,7 @@
                   >×</button
                 >
               </p>
+              </div>
             </div>
           {/each}
         </section>
@@ -911,6 +915,17 @@
   .item {
     padding: 6px 0;
     border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  }
+
+  .item.shot {
+    display: flex;
+    gap: 8px;
+    align-items: flex-start;
+  }
+
+  .shot-body {
+    flex: 1;
+    min-width: 0;
   }
 
   .item.muted .itext {

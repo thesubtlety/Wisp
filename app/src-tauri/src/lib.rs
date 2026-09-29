@@ -4456,6 +4456,8 @@ pub fn run() {
             context::list_context,
             context::describe_context,
             context::remove_context,
+            context::context_image,
+            context::list_project_screenshots,
             reasoning::get_reasoning_settings,
             reasoning::set_reasoning_settings,
             reasoning::check_reasoning,
