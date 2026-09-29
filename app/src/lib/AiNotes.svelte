@@ -132,8 +132,11 @@
   const model = $derived(assistModels.find((m) => m.id === modelId));
   const selectedKind = $derived(model?.kind ?? "chat");
 
-  // Default to a sensible pick (prefer a custom endpoint), keep the model valid, persist.
+  // Default to a sensible pick (prefer a custom endpoint), keep the model valid, persist. Waits for
+  // the provider list: until then a saved pick only looks missing, and replacing it would send the
+  // next task somewhere the user didn't choose.
   $effect(() => {
+    if (!cloudState.loaded) return;
     if (!provider || !assistModels.length) {
       const fb = providerAssist.find((g) => g.provider.custom) ?? providerAssist[0];
       if (fb) {

@@ -54,14 +54,17 @@ export type CloudProvider = {
 
 // A `$state` object (not a bare primitive) so the proxy is shared across every importer and stays
 // reactive — and so `cloudState.endpointsOpen` is bindable from the Modal.
-export const cloudState = $state<{ providers: CloudProvider[]; endpointsOpen: boolean }>({
+export const cloudState = $state<{ providers: CloudProvider[]; endpointsOpen: boolean; loaded: boolean }>({
   providers: [],
   endpointsOpen: false,
+  // False until the first list arrives, so pickers don't mistake "not loaded" for "gone".
+  loaded: false,
 });
 
 /** Reload the provider catalog and key-status flags from the backend. */
 export async function refreshCloud(): Promise<void> {
   cloudState.providers = await invoke<CloudProvider[]>("list_cloud_providers");
+  cloudState.loaded = true;
 }
 
 /** Save (non-empty `key`) or clear (empty `key`) a provider's API key on this device, then refresh. */

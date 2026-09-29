@@ -2727,6 +2727,7 @@
 
   {#if mode === "library"}
     <Library
+      sessionRunning={running}
       onNewMeeting={(projectId) => {
         intelEnabled = true;
         selectProject(projectId);

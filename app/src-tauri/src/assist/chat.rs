@@ -26,6 +26,10 @@ pub(crate) const SUBSCRIPTION_PROVIDER: &str = "subscription";
 /// map-reduces only a very long one.
 const SUBSCRIPTION_CONTEXT_TOKENS: u32 = 200_000;
 
+/// The window assumed for a local-only model whose endpoint sets none: small, so a long meeting
+/// map-reduces rather than overflowing it.
+const LOCAL_CONTEXT_TOKENS: u32 = 8_192;
+
 /// How long one subscription assist call may run (a CLI call takes seconds to a minute).
 const SUBSCRIPTION_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -57,7 +61,7 @@ pub(crate) struct AssistParams {
     /// The model's context window, in tokens. When set and a transcript would exceed it, the assist
     /// runs map-reduce (summarize chunks, then combine) instead of one over-long request.
     #[serde(default)]
-    context_tokens: Option<u32>,
+    pub(crate) context_tokens: Option<u32>,
     /// Nucleus sampling cutoff (omitted from the request when unset).
     #[serde(default)]
     top_p: Option<f64>,
@@ -149,8 +153,12 @@ fn resolve_assist_target(
     model: &str,
 ) -> Result<(AssistTarget, AssistParams), String> {
     if provider_id == SUBSCRIPTION_PROVIDER {
+        let context_tokens = match crate::reasoning::local_only_context(state) {
+            Some(window) => window.unwrap_or(LOCAL_CONTEXT_TOKENS),
+            None => SUBSCRIPTION_CONTEXT_TOKENS,
+        };
         let assist = AssistParams {
-            context_tokens: Some(SUBSCRIPTION_CONTEXT_TOKENS),
+            context_tokens: Some(context_tokens),
             ..AssistParams::default()
         };
         return Ok((

@@ -9,7 +9,9 @@
   import { intel, loadProjects, createProject, renameProject, type MemoryItem } from "$lib/intel.svelte";
 
   // "New meeting in this project": the page switches to Live with the project selected.
-  let { onNewMeeting }: { onNewMeeting?: (projectId: string) => void } = $props();
+  // Hidden while a session runs: switching projects then would refile the running meeting.
+  let { onNewMeeting, sessionRunning = false }: { onNewMeeting?: (projectId: string) => void; sessionRunning?: boolean } =
+    $props();
 
   type NoteSummary = {
     id: string;
@@ -151,7 +153,7 @@
     }
   }
 
-  async function moveTo(projectId: string) {
+  async function moveTo(projectId: string, select?: HTMLSelectElement) {
     if (!detail) return;
     if (projectId === "__new") {
       newProjectOpen = true;
@@ -165,6 +167,7 @@
       await loadList();
     } catch (e) {
       error = String(e);
+      if (select) select.value = from ?? "";
     }
   }
 
@@ -356,7 +359,7 @@
             <select
               aria-label={i18n.t.library.project}
               value={detail.meeting.project_id ?? ""}
-              onchange={(e) => moveTo(e.currentTarget.value)}
+              onchange={(e) => moveTo(e.currentTarget.value, e.currentTarget)}
             >
               <option value="">{i18n.t.library.noProject}</option>
               {#each intel.projects as p (p.id)}<option value={p.id}>{p.name}</option>{/each}
@@ -428,7 +431,7 @@
           <button class="btn" onclick={() => ((projectDraft = filterProject!.name), (renamingProject = true))}
             >{i18n.t.library.renameProject}</button
           >
-          {#if onNewMeeting}
+          {#if onNewMeeting && !sessionRunning}
             <button class="btn primary" onclick={() => onNewMeeting(filterProject!.id)}>{i18n.t.library.newMeetingInProject}</button>
           {/if}
         {/if}

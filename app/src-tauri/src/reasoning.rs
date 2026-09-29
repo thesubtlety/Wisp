@@ -181,6 +181,20 @@ fn build(settings: &ReasoningSettings, local: Option<LocalConfig>) -> Arc<dyn Re
     }
 }
 
+/// The local endpoint's context window (tokens) when the local model is the only backend, as
+/// `Some(None)` when that endpoint sets none. `None` when the CLIs are in play.
+pub(crate) fn local_only_context(state: &AppState) -> Option<Option<u32>> {
+    let settings = state.reasoning.get();
+    if !matches!(settings.mode, Mode::Local) {
+        return None;
+    }
+    let endpoint = settings
+        .local_endpoint
+        .as_deref()
+        .and_then(|id| crate::custom_endpoint(state, id));
+    Some(endpoint.and_then(|e| e.assist.context_tokens))
+}
+
 /// The backend meeting intelligence should use now.
 pub(crate) fn backend(state: &AppState) -> Arc<dyn ReasoningBackend> {
     let settings = state.reasoning.get();
