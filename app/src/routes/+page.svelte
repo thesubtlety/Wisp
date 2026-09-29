@@ -931,8 +931,8 @@
         await applyLiveDecode();
       }
       await ensureListener();
-      // An end time typed before Start survives the reset below.
-      const presetEnd = intel.scheduledEnd;
+      // An end time typed before Start survives the reset below; an assumed one doesn't.
+      const presetEnd = intel.scheduledEndTyped ? intel.scheduledEnd : "";
       if (intelEnabled) {
         resetIntel();
         await ensureIntelListener();
@@ -1000,6 +1000,8 @@
     }
     running = false;
     liveNotice = "";
+    // This meeting's end time never applies to the next one.
+    intel.scheduledEndTyped = false;
     clearTimeout(titleTimer);
 
     if (autoSave && segments.length > 0 && meetingId) {

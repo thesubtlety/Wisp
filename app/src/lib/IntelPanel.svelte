@@ -151,7 +151,10 @@
         <input
           type="time"
           value={intel.scheduledEnd}
-          onchange={(e) => setScheduledEnd(e.currentTarget.value)}
+          onchange={(e) => {
+            intel.scheduledEndTyped = true;
+            setScheduledEnd(e.currentTarget.value);
+          }}
         />
       </label>
       {#if intel.wrapSuggested && !intel.endgame}

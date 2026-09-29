@@ -202,6 +202,9 @@ export const intel = $state({
   auditing: false,
   audit: null as null | { gaps: Gap[]; rejected: number; markdown: string },
   scheduledEnd: "",
+  // Whether the user typed `scheduledEnd` (vs. the assumed slot). Only a typed time carries into
+  // the next Start, and Stop clears it.
+  scheduledEndTyped: false,
   /** Screenshots attached to this meeting. */
   context: [] as ContextShot[],
   contextBusy: false,

@@ -144,23 +144,35 @@ impl ReasoningBackend for CodexCliBackend {
         let spec = self.command(&ws, crate::render_prompt(req), &req.images);
         let out = run_command(&spec, req.timeout, cancel)?;
         let events = Events::parse(&out.stdout);
-        if out.code != Some(0) {
-            let detail = if out.stderr.trim().is_empty() {
-                events.error.unwrap_or(out.stdout)
-            } else {
-                out.stderr
-            };
-            return Err(ReasoningError::Process {
-                code: out.code,
-                stderr: truncate(&detail, 800),
-            });
-        }
-        let raw = std::fs::read_to_string(ws.last_message_path())
-            .ok()
-            .or(events.last_message)
-            .unwrap_or(out.stdout);
-        finish(self.name(), req, raw, None, out.elapsed, events.usage)
+        let usage = events.usage.clone();
+        let message = std::fs::read_to_string(ws.last_message_path()).ok();
+        let raw = reply_or_error(out.code, &out.stdout, &out.stderr, events, message)?;
+        finish(self.name(), req, raw, None, out.elapsed, usage)
     }
+}
+
+/// The reply text from a finished `codex exec`, or why it failed. A failed turn is an error even
+/// when codex exits 0, and its own error event says more than stderr (which also carries routine
+/// notices). `message` is the last-message file, if codex wrote one.
+fn reply_or_error(
+    code: Option<i32>,
+    stdout: &str,
+    stderr: &str,
+    events: Events,
+    message: Option<String>,
+) -> Result<String, ReasoningError> {
+    let message = message.or(events.last_message);
+    if code != Some(0) || (message.is_none() && events.error.is_some()) {
+        let detail = events
+            .error
+            .or_else(|| Some(stderr.to_owned()).filter(|s| !s.trim().is_empty()))
+            .unwrap_or_else(|| stdout.to_owned());
+        return Err(ReasoningError::Process {
+            code,
+            stderr: truncate(&detail, 800),
+        });
+    }
+    Ok(message.unwrap_or_else(|| stdout.to_owned()))
 }
 
 /// What `codex exec --json` printed: one JSON event per line.
@@ -359,6 +371,48 @@ mod tests {
         assert_eq!((u.cost_usd, u.model), (None, None), "codex reports neither");
         assert_eq!(e.last_message.as_deref(), Some("OK"));
         assert_eq!(e.error, None);
+    }
+
+    #[test]
+    fn a_failed_turn_is_an_error_and_says_why() {
+        let failed = r#"{"type":"turn.failed","error":{"message":"usage limit reached"}}"#;
+        let err = |code, stdout: &str, stderr: &str| match reply_or_error(
+            code,
+            stdout,
+            stderr,
+            Events::parse(stdout),
+            None,
+        ) {
+            Err(ReasoningError::Process { stderr, .. }) => stderr,
+            other => panic!("expected a process error, got {other:?}"),
+        };
+        // The event's message wins over stderr's routine notices, whatever the exit code.
+        assert_eq!(
+            err(Some(1), failed, "Reading prompt from stdin..."),
+            "usage limit reached"
+        );
+        assert_eq!(
+            err(Some(0), failed, "Reading prompt from stdin..."),
+            "usage limit reached"
+        );
+        // Without an event, stderr, then stdout.
+        assert_eq!(err(Some(2), "", "boom"), "boom");
+
+        // A written reply is used even if an earlier turn reported an error.
+        let ok = reply_or_error(
+            Some(0),
+            failed,
+            "",
+            Events::parse(failed),
+            Some("{}".into()),
+        );
+        assert_eq!(ok.unwrap(), "{}");
+        // With no file, the agent_message from the events.
+        let msg = r#"{"type":"item.completed","item":{"type":"agent_message","text":"{\"a\":1}"}}"#;
+        assert_eq!(
+            reply_or_error(Some(0), msg, "", Events::parse(msg), None).unwrap(),
+            r#"{"a":1}"#
+        );
     }
 
     #[test]

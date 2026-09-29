@@ -152,7 +152,7 @@ impl Default for RuntimeConfig {
         Self {
             policy: TriggerPolicy::default(),
             focus: None,
-            timeout: Duration::from_secs(60),
+            timeout: Duration::from_secs(90),
             interventions: InterventionPolicy::default(),
             scheduled_end_ms: None,
             memory: Vec::new(),
