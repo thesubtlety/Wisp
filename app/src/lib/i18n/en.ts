@@ -237,6 +237,15 @@ export const en = {
   // Live box-aux: model download / CoreML hints, permission banners, cloud key notices. "Wisp",
   // "Neural Engine", "System Settings", "Screen Recording"/"Microphone" (macOS panes), and provider
   // names stay English.
+  meeting: {
+    detected: (who: string): string => `Meeting detected in ${who}`,
+    browserMic: (app: string): string => `${app} is using the microphone`,
+    ended: (label: string): string => `${label} ended. Stop transcribing?`,
+    start: "Start transcribing",
+    notNow: "Not now",
+    stop: "Stop",
+    keepGoing: "Keep going",
+  },
   notice: {
     blocked: (reason: string): string => `⚠ ${reason} — pick another model.`,
     download: "Download",
@@ -461,6 +470,10 @@ export const en = {
     deleteProjectConfirm: "Its meetings, documents, imported copies and knowledge go too.",
     delete: "Delete",
     autoSaveNotes: "Auto-save notes to library",
+    detectMeetings: "Detect meetings",
+    detectMeetingsNote:
+      "Watches which app uses the microphone (Zoom, Teams, Google Meet in a browser…) and asks before recording. Never starts on its own.",
+    detectMeetingsUnsupported: "Needs macOS 14.2 or later.",
     meetingIntel: "Meeting intelligence",
     meetingIntelNote:
       "During a live meeting, sends final transcript lines to the reasoning backend below (by default your own Codex or Claude CLI, on your subscription) and keeps a structured list of requirements, decisions and commitments. Saved with the note. Starts with the next session.",

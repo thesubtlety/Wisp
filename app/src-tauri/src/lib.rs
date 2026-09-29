@@ -65,9 +65,11 @@ mod audit;
 mod context;
 mod dictation;
 mod intel;
+mod meeting;
 mod permissions;
 mod reasoning;
 mod retention;
+mod tray;
 
 use assist::{normalize_assist, AssistParams};
 
@@ -2669,6 +2671,15 @@ fn microphone_blocked() -> bool {
     permissions::microphone_blocked()
 }
 
+/// Whether a live session is running (for the meeting detector's "never prompt while recording").
+fn live_session_running(app: &AppHandle) -> bool {
+    app.state::<AppState>()
+        .sessions
+        .lock()
+        .map(|sessions| !sessions.is_empty())
+        .unwrap_or(false)
+}
+
 #[tauri::command]
 fn session_running(state: State<'_, AppState>) -> Result<bool, String> {
     Ok(!state
@@ -4349,6 +4360,9 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(dictation::shortcut_plugin())
+        .plugin(tauri_plugin_notification::init())
+        .manage(tray::TrayState::default())
+        .manage(meeting::MeetingState::default())
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             let active_model_path = data_dir.join("active-model");
@@ -4488,6 +4502,8 @@ pub fn run() {
             });
 
             audit::spawn_writer(app.handle());
+            tray::build(app)?;
+            meeting::spawn_poller(app.handle());
 
             // Restore the persisted embedding model in the background — loading may download and be
             // slow. Spawned after `manage` so the `state()` call inside `load_embedder` resolves.
@@ -4622,7 +4638,9 @@ pub fn run() {
             delete_embedding_model,
             search_mode,
             set_search_mode,
-            frontend_ready
+            frontend_ready,
+            tray::set_tray_recording,
+            meeting::set_meeting_detection
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

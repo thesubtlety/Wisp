@@ -47,11 +47,14 @@ whisper-vulkan = ["wisp-engine-whisper-cpp/vulkan", "wisp-models/whisper-vulkan"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+# tray-icon: the macOS menu bar icon (start/stop, meeting status).
+tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 # Global push-to-talk hotkey for dictation (fires on key press AND release).
 tauri-plugin-global-shortcut = "2"
+# The "meeting detected" / "meeting ended" system notifications.
+tauri-plugin-notification = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Read and validate a user-selected ONNX graph plus its sherpa-onnx `model_type` metadata before

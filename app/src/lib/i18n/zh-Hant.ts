@@ -219,6 +219,15 @@ export const zhHant: Messages = {
     selectModel: "選擇模型",
   },
 
+  meeting: {
+    detected: (who: string): string => `偵測到會議：${who}`,
+    browserMic: (app: string): string => `${app} 正在使用麥克風`,
+    ended: (label: string): string => `${label} 已結束。停止轉錄？`,
+    start: "開始轉錄",
+    notNow: "暫不",
+    stop: "停止",
+    keepGoing: "繼續",
+  },
   notice: {
     blocked: (reason) => `⚠ ${reason} —— 請換一個模型。`,
     download: "下載",
@@ -422,6 +431,9 @@ export const zhHant: Messages = {
     deleteProjectConfirm: "其會議、文件、匯入的副本與知識也會一併刪除。",
     delete: "刪除",
     autoSaveNotes: "結束後自動將筆記存入庫",
+    detectMeetings: "偵測會議",
+    detectMeetingsNote: "留意哪個 App 正在使用麥克風（Zoom、Teams、瀏覽器中的 Google Meet…），錄製前會先詢問你。不會自動開始。",
+    detectMeetingsUnsupported: "需要 macOS 14.2 或更新版本。",
     meetingIntel: "會議智慧",
     meetingIntelNote:
       "即時會議期間，將已定稿的逐字稿傳送給下方選擇的推理後端（預設是你自己的 Codex 或 Claude 命令列工具，使用你的訂閱），並整理需求、決定與承諾。隨筆記一併儲存。下次工作階段開始生效。",

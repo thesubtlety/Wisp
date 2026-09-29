@@ -219,6 +219,15 @@ export const zhHans: Messages = {
     selectModel: "选择模型",
   },
 
+  meeting: {
+    detected: (who: string): string => `检测到会议：${who}`,
+    browserMic: (app: string): string => `${app} 正在使用麦克风`,
+    ended: (label: string): string => `${label} 已结束。停止转录？`,
+    start: "开始转录",
+    notNow: "暂不",
+    stop: "停止",
+    keepGoing: "继续",
+  },
   notice: {
     blocked: (reason) => `⚠ ${reason} —— 请换一个模型。`,
     download: "下载",
@@ -422,6 +431,9 @@ export const zhHans: Messages = {
     deleteProjectConfirm: "其会议、文档、导入的副本和知识也会一并删除。",
     delete: "删除",
     autoSaveNotes: "结束后自动将笔记存入库",
+    detectMeetings: "检测会议",
+    detectMeetingsNote: "留意哪个应用在使用麦克风（Zoom、Teams、浏览器中的 Google Meet…），录制前会先询问你。不会自动开始。",
+    detectMeetingsUnsupported: "需要 macOS 14.2 或更高版本。",
     meetingIntel: "会议智能",
     meetingIntelNote:
       "实时会议期间，将已定稿的转录内容发送给下方选择的推理后端（默认是你自己的 Codex 或 Claude 命令行工具，使用你的订阅），并整理需求、决定和承诺。随笔记一起保存。下次会话开始生效。",
