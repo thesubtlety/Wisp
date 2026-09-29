@@ -176,6 +176,8 @@ enum Msg {
     Pin(Snippet),
     Unpin(String),
     Stop,
+    /// Analyze whatever is still pending, then stop.
+    Finish,
 }
 
 /// A running intelligence worker for one meeting.
@@ -325,6 +327,27 @@ impl IntelRuntime {
         })
     }
 
+    /// Runs one last pass over lines not yet analyzed, then stops, like [`Self::stop`]. The pass is
+    /// cancelled if it takes longer than `limit`, so stopping never hangs on a slow backend.
+    pub fn finish(mut self, limit: Duration) -> Finished {
+        let cancel = self.cancel.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            if done_rx.recv_timeout(limit).is_err() {
+                cancel.cancel();
+            }
+        });
+        let _ = self.tx.send(Msg::Finish);
+        let finished = self.worker.take().and_then(|w| w.join().ok());
+        let _ = done_tx.send(());
+        finished.unwrap_or_else(|| Finished {
+            state: MeetingState::new(LIVE_MEETING_ID),
+            log: Vec::new(),
+            lines: 0,
+            candidate_log: Vec::new(),
+        })
+    }
+
     fn shutdown(&mut self) -> Option<Finished> {
         self.cancel.cancel();
         let _ = self.tx.send(Msg::Stop);
@@ -376,6 +399,7 @@ impl Worker {
                 Err(RecvTimeoutError::Disconnected) => break,
             };
             let mut stop = false;
+            let mut finish = false;
             for msg in first.into_iter().chain(rx.try_iter()) {
                 match msg {
                     Msg::Final {
@@ -403,9 +427,17 @@ impl Worker {
                     }
                     Msg::Unpin(ref_id) => self.pinned.retain(|p| p.ref_id != ref_id),
                     Msg::Stop => stop = true,
+                    Msg::Finish => finish = true,
                 }
             }
             if stop || self.cancel.is_cancelled() {
+                break;
+            }
+            if finish {
+                // The end of a meeting is where commitments get made; don't leave it unread.
+                if self.pending_chars() > 0 {
+                    self.pass();
+                }
                 break;
             }
             if wrap_up {
@@ -910,6 +942,50 @@ mod tests {
         assert!(seen.lock().unwrap().is_empty());
         assert_eq!(done.state.analyzed_through, None);
         assert_eq!(done.lines, 1);
+    }
+
+    #[test]
+    fn finish_analyzes_the_lines_the_cadence_had_not_reached() {
+        let backend = Arc::new(ScriptedBackend::with_responder("scripted", |_| {
+            Ok(json!({"ops": [], "candidates": []}))
+        }));
+        let (_seen, on_update) = collect();
+        // Default cadence: one short line never triggers a pass on its own.
+        let rt = IntelRuntime::spawn(
+            backend.clone(),
+            Box::new(NoRetrieval),
+            RuntimeConfig::default(),
+            on_update,
+            Box::new(|| 0),
+        );
+        rt.push_final("Them", 0, "I'll send the dataset Friday.");
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(backend.request_count(), 0);
+        let done = rt.finish(Duration::from_secs(5));
+        assert_eq!(backend.request_count(), 1, "one last pass");
+        assert_eq!(done.state.analyzed_through, Some(0));
+    }
+
+    #[test]
+    fn finish_gives_up_on_a_slow_backend() {
+        let backend = Arc::new(ScriptedBackend::with_responder("hung", |_| {
+            std::thread::sleep(Duration::from_secs(3));
+            Err(ReasoningError::Cancelled)
+        }));
+        let (_seen, on_update) = collect();
+        let rt = IntelRuntime::spawn(
+            backend,
+            Box::new(NoRetrieval),
+            RuntimeConfig::default(),
+            on_update,
+            Box::new(|| 0),
+        );
+        rt.push_final("Them", 0, "Words.");
+        std::thread::sleep(Duration::from_millis(50));
+        let started = Instant::now();
+        let done = rt.finish(Duration::from_millis(100));
+        assert_eq!(done.lines, 1);
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     #[test]

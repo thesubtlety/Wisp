@@ -36,7 +36,7 @@ export const zhHans: Messages = {
     allMeetings: "全部会议",
     renameProject: "重命名项目",
     instructions: "说明",
-    instructionsHelp: "告诉 AI 在这个项目中什么对你重要。从下一次会议起生效。",
+    instructionsHelp: "告诉 AI 在这个项目中什么对你重要。使用 Codex 或 Claude Code 时会离开这台 Mac。从下一次会议起生效。",
     instructionsPlaceholder:
       "你在这里的角色（例如：我为客户负责迁移）。\n什么重要（对方对我的承诺、关于托管和日期的决定）。\n什么可以忽略（计费、闲聊、其他团队的工作）。",
     meetingCount: (n: number): string => `${n} 场会议`,
@@ -400,7 +400,7 @@ export const zhHans: Messages = {
     reasoningNote: "自动模式下，提问、缺口审查、回顾和截图仍使用 Codex 或 Claude Code；它们无法运行时才退回本地模型。下一场会议起生效。",
     aboutMe: "关于我",
     aboutMePlaceholder: "例如：Wisp 的解决方案工程师，负责与客户的技术范围会议。",
-    aboutMeNote: "与项目说明一起随每次会议的 AI 请求发送，以便跳过对你不重要的内容。从下一次会议起生效。",
+    aboutMeNote: "与项目说明一起随每次会议的 AI 请求发送，以便跳过对你不重要的内容。使用 Codex 或 Claude Code 时会离开这台 Mac。从下一次会议起生效。",
     checkReasoningLabel: "检查后端",
     checkReasoning: "检查",
     retention: "保留期限",

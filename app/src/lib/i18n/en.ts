@@ -438,7 +438,7 @@ export const en = {
     reasoningNote: "Automatic keeps questions, the gap audit, reviews and screenshots on Codex or Claude Code; the local model is their last resort when those can't run. Takes effect from the next meeting.",
     aboutMe: "About me",
     aboutMePlaceholder: "e.g. Solutions engineer at Wisp. I run technical scoping calls with customers.",
-    aboutMeNote: "Sent with every meeting's AI requests, next to the project's instructions, so it can skip what doesn't matter to you. Takes effect from the next meeting.",
+    aboutMeNote: "Sent with every meeting's AI requests, next to the project's instructions, so it can skip what doesn't matter to you. With Codex or Claude Code it leaves this Mac. Takes effect from the next meeting.",
     checkReasoningLabel: "Check backends",
     checkReasoning: "Check",
     retention: "Retention",

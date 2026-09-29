@@ -50,8 +50,9 @@ impl Library {
         Ok(())
     }
 
-    /// Folds speaker `from` into `into`: every segment `from` spoke becomes `into`'s, and `from`'s
-    /// name is dropped. For when diarization split one person in two. Returns the segments moved.
+    /// Folds speaker `from` into `into`: every segment `from` spoke becomes `into`'s. `from`'s name
+    /// moves to `into` if `into` has none, else it is dropped. For when diarization split one
+    /// person in two. Returns the segments moved.
     pub fn merge_speaker(&mut self, meeting_id: &str, from: u32, into: u32) -> Result<usize> {
         if from == into {
             return Ok(0);
@@ -59,6 +60,11 @@ impl Library {
         let tx = self.conn.transaction()?;
         let moved = tx.execute(
             "UPDATE segment SET speaker = ?3 WHERE meeting_id = ?1 AND speaker = ?2",
+            rusqlite::params![meeting_id, from, into],
+        )?;
+        // Keep the name the user gave, unless the speaker it merges into is already named.
+        tx.execute(
+            "UPDATE OR IGNORE speaker_name SET speaker = ?3 WHERE meeting_id = ?1 AND speaker = ?2",
             rusqlite::params![meeting_id, from, into],
         )?;
         tx.execute(
@@ -181,6 +187,16 @@ mod tests {
         let names = lib.speaker_names("m1").unwrap();
         assert_eq!(names.len(), 1);
         assert_eq!(names.get(&0).map(String::as_str), Some("Alice"));
+    }
+
+    #[test]
+    fn merging_into_an_unnamed_speaker_keeps_the_name() {
+        let mut lib = library_with_meeting();
+        lib.set_speaker_name("m1", 1, "Don").unwrap();
+        lib.merge_speaker("m1", 1, 0).unwrap();
+        let names = lib.speaker_names("m1").unwrap();
+        assert_eq!(names.len(), 1);
+        assert_eq!(names.get(&0).map(String::as_str), Some("Don"));
     }
 
     #[test]

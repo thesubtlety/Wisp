@@ -520,6 +520,8 @@ impl Library {
             tx.execute("DELETE FROM chunk WHERE meeting_id = ?1", [id])?;
             tx.execute("DELETE FROM candidate_log WHERE meeting_id = ?1", [id])?;
             tx.execute("DELETE FROM llm_call WHERE meeting_id = ?1", [id])?;
+            // People's names go with the transcript that labelled them.
+            tx.execute("DELETE FROM speaker_name WHERE meeting_id = ?1", [id])?;
             tx.execute(
                 "UPDATE meeting SET transcript_pruned_at_ms = ?2, segment_count = 0 WHERE id = ?1",
                 rusqlite::params![id, now_ms],

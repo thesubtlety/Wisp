@@ -316,11 +316,15 @@ fn current_state(state: &AppState) -> MeetingState {
     MeetingState::new(LIVE_MEETING_ID)
 }
 
-/// Stops the runtime (cancelling any pass in flight) and parks its result for `save_note`.
+/// The longest Stop waits for the last pass over the meeting's final lines.
+const FINAL_PASS_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Stops the runtime after one last pass over unanalyzed lines (bounded by [`FINAL_PASS_LIMIT`])
+/// and parks its result for `save_note`.
 pub(crate) fn stop(state: &AppState) {
     let runtime = state.intel.runtime.lock().ok().and_then(|mut r| r.take());
     if let Some(runtime) = runtime {
-        let finished = runtime.stop();
+        let finished = runtime.finish(FINAL_PASS_LIMIT);
         if let Ok(mut slot) = state.intel.finished.lock() {
             *slot = Some(finished);
         }

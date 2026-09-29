@@ -2965,6 +2965,8 @@ fn start_session_blocking(app: AppHandle, options: LiveOptions) -> Result<Option
     // first; that keeps its line numbers aligned with the saved transcript.
     intel::reset(&state);
     audit::set_live_meeting(&state, options.meeting_id.clone());
+    // Dictation is refused during a session; free its model so a large one isn't held twice.
+    dictation::drop_cached_engine(&state);
     if options.intel {
         intel::start(
             &app,

@@ -9,7 +9,7 @@
 //!
 //! Either way the text is inserted via `wisp-textinject`, which needs Accessibility permission.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
@@ -44,6 +44,18 @@ const MIN_CLIP_SAMPLES: usize = TARGET_SAMPLE_RATE as usize * 3 / 10;
 
 /// Silence appended to the clip so the decoder doesn't drop the last word at the cut.
 const TAIL_PADDING_SAMPLES: usize = TARGET_SAMPLE_RATE as usize * 3 / 10;
+
+/// Below this RMS level a clip is treated as silence and not decoded. Whisper tends to invent a
+/// phrase ("Thank you.") for silence, which would then be pasted. About -46 dBFS: quieter than any
+/// speech a laptop mic picks up, louder than a quiet room.
+const MIN_CLIP_RMS: f32 = 0.005;
+
+/// Serializes model loads so a warm-up and a key release never load twice. Separate from the cache
+/// lock, which is only held briefly, so dropping the cache never waits on a load.
+static LOADING: Mutex<()> = Mutex::new(());
+
+/// Bumped on every drop. A load that started before a drop does not install its engine.
+static GENERATION: AtomicU64 = AtomicU64::new(0);
 
 /// Which engine push-to-talk dictation runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,46 +131,70 @@ fn current_choice(state: &AppState) -> Option<DictationEngine> {
     )
 }
 
+/// A loaded engine, shared between the cache and a dictation in progress.
+type SharedEngine = Arc<Mutex<Box<dyn AsrEngine>>>;
+
 /// A loaded batch engine, kept between dictations so each key press doesn't reload the model.
 pub(crate) struct CachedEngine {
     model: ModelId,
     language: String,
-    engine: Arc<Mutex<Box<dyn AsrEngine>>>,
+    engine: SharedEngine,
 }
 
 /// The dictation engine cache held in `AppState`.
 pub(crate) type EngineCache = Mutex<Option<CachedEngine>>;
 
-/// Returns the cached engine for `model` + `language`, loading it (and dropping any other) if needed.
-/// Holds the cache lock while loading so a warm-up and a key release never load twice.
-fn engine_for(
+/// The cached engine for `model` + `language`, if that is what's loaded.
+fn cached_engine(
     state: &AppState,
     model: &ModelId,
     language: &str,
-) -> Result<Arc<Mutex<Box<dyn AsrEngine>>>, String> {
+) -> Result<Option<SharedEngine>, String> {
+    let cache = state
+        .dictation_engine
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())?;
+    Ok(cache
+        .as_ref()
+        .filter(|c| c.model == *model && c.language == language)
+        .map(|c| c.engine.clone()))
+}
+
+/// Returns the cached engine for `model` + `language`, loading it (and replacing any other) if
+/// needed. The load runs outside the cache lock; see [`LOADING`] and [`GENERATION`].
+fn engine_for(state: &AppState, model: &ModelId, language: &str) -> Result<SharedEngine, String> {
+    if let Some(engine) = cached_engine(state, model, language)? {
+        return Ok(engine);
+    }
+    let _loading = LOADING
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())?;
+    // Another load may have finished while this one waited.
+    if let Some(engine) = cached_engine(state, model, language)? {
+        return Ok(engine);
+    }
+    let generation = GENERATION.load(Ordering::SeqCst);
+    let (descriptor, dir) = resolve_local_model(state, model)?;
+    let engine = build_engine(&descriptor, &dir, language).map_err(|e| e.to_string())?;
+    let engine = Arc::new(Mutex::new(engine));
     let mut cache = state
         .dictation_engine
         .lock()
         .map_err(|_| "state lock poisoned".to_owned())?;
-    if let Some(cached) = cache.as_ref() {
-        if cached.model == *model && cached.language == language {
-            return Ok(cached.engine.clone());
-        }
+    if GENERATION.load(Ordering::SeqCst) == generation {
+        *cache = Some(CachedEngine {
+            model: model.clone(),
+            language: language.to_owned(),
+            engine: engine.clone(),
+        });
     }
-    *cache = None;
-    let (descriptor, dir) = resolve_local_model(state, model)?;
-    let engine = build_engine(&descriptor, &dir, language).map_err(|e| e.to_string())?;
-    let engine = Arc::new(Mutex::new(engine));
-    *cache = Some(CachedEngine {
-        model: model.clone(),
-        language: language.to_owned(),
-        engine: engine.clone(),
-    });
     Ok(engine)
 }
 
-/// Drops the cached batch engine (dictation off, or the model set changed). It reloads on next use.
+/// Drops the cached batch engine (dictation off, the model set changed, or a live session needs
+/// the memory). It reloads on next use. Never waits on a load in progress.
 pub(crate) fn drop_cached_engine(state: &AppState) {
+    GENERATION.fetch_add(1, Ordering::SeqCst);
     if let Ok(mut cache) = state.dictation_engine.lock() {
         *cache = None;
     }
@@ -189,6 +225,14 @@ struct ClipBuffer {
     cap: usize,
 }
 
+/// Root-mean-square level of `samples` (0 for none).
+fn rms(samples: &[f32]) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    (samples.iter().map(|x| x * x).sum::<f32>() / samples.len() as f32).sqrt()
+}
+
 impl ClipBuffer {
     fn new(cap: usize) -> Self {
         Self {
@@ -205,7 +249,7 @@ impl ClipBuffer {
 
     /// The clip ready to decode — tail-padded — or `None` if it's too short to hold speech.
     fn into_clip(self) -> Option<Vec<f32>> {
-        if self.samples.len() < MIN_CLIP_SAMPLES {
+        if self.samples.len() < MIN_CLIP_SAMPLES || rms(&self.samples) < MIN_CLIP_RMS {
             return None;
         }
         let mut clip = self.samples;
@@ -723,6 +767,13 @@ mod tests {
         let mut tap = ClipBuffer::new(1_000_000);
         tap.push(&vec![0.1; MIN_CLIP_SAMPLES - 1]);
         assert_eq!(tap.into_clip(), None);
+    }
+
+    #[test]
+    fn a_silent_clip_is_skipped() {
+        let mut quiet = ClipBuffer::new(1_000_000);
+        quiet.push(&vec![0.001; MIN_CLIP_SAMPLES * 4]);
+        assert_eq!(quiet.into_clip(), None);
     }
 
     #[test]

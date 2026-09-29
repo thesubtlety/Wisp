@@ -1135,6 +1135,8 @@
   function settleSpeakerModel() {
     if (!diarizeModels.length) return;
     const installed = diarizeModels.find((m) => m.installed);
+    // A remembered "on" with every speaker model removed would block Live from starting.
+    if (!installed) liveDiarize = false;
     if (!diarizeModels.some((m) => m.id === diarizeId)) diarizeId = (installed ?? diarizeModels[0]).id;
     if (!liveDiarizeDecided && installed) {
       if (!diarizeModels.find((m) => m.id === diarizeId)?.installed) diarizeId = installed.id;
