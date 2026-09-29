@@ -25,7 +25,9 @@ pub fn about_you(about_me: &str, project_name: Option<&str>, instructions: &str)
         parts.push(format!("Project: {name}"));
     }
     if !instructions.is_empty() {
-        parts.push(format!("Your instructions for this project:\n{instructions}"));
+        parts.push(format!(
+            "Your instructions for this project:\n{instructions}"
+        ));
     }
     Some(parts.join("\n").chars().take(MAX_ABOUT_CHARS).collect())
 }

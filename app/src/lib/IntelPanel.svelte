@@ -239,14 +239,18 @@
         {#if intel.review.source === "state"}
           <p class="warn">{i18n.t.intel.reviewFromState}</p>
         {/if}
-        {#if !intel.review.followups.length}<p class="hint">{i18n.t.intel.noFollowUps}</p>{/if}
+        {#if !intel.review.followups.length}<p class="hint">{i18n.t.intel.noFollowUps}</p>{:else}<p class="hint">{i18n.t.intel.reviewHelp}</p>{/if}
         <ol class="followups">
           {#each intel.review.followups as f (f.n)}
             <li>
               <p class="ftext"><span class="fn">{f.n}.</span> {f.text}</p>
               <div class="classes">
                 {#each CLASS_ORDER as c (c)}
-                  <button class:on={f.class === c} onclick={() => setFollowUpClass(f.n, c)}>
+                  <button
+                    class:on={f.class === c}
+                    title={i18n.t.intel.classHelp[c]}
+                    onclick={() => setFollowUpClass(f.n, c)}
+                  >
                     {i18n.t.intel.classes[c]}
                   </button>
                 {/each}
