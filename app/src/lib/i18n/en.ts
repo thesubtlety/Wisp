@@ -366,6 +366,15 @@ export const en = {
 
   // Dictation settings (Settings.svelte). "Apple" / "macOS" stay English.
   settings: {
+    installedModels: "Installed models",
+    noInstalledModels: "No downloaded models.",
+    kindTranscription: "Transcription",
+    kindSpeakers: "Speakers",
+    kindNoise: "Noise reduction",
+    modelInUse: "in use",
+    deleteModel: "Delete",
+    confirmDeleteModel: "Delete files",
+    deletingModel: "Deleting…",
     aiModels: "AI models",
     search: "Notes search",
     downloads: "Model downloads",

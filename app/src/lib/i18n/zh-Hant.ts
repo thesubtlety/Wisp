@@ -331,6 +331,15 @@ export const zhHant: Messages = {
   },
 
   settings: {
+    installedModels: "已安裝的模型",
+    noInstalledModels: "沒有已下載的模型。",
+    kindTranscription: "轉寫",
+    kindSpeakers: "說話者",
+    kindNoise: "降噪",
+    modelInUse: "使用中",
+    deleteModel: "刪除",
+    confirmDeleteModel: "刪除檔案",
+    deletingModel: "正在刪除…",
     aiModels: "AI 模型",
     search: "筆記搜尋",
     downloads: "模型下載",

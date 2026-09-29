@@ -331,6 +331,15 @@ export const zhHans: Messages = {
   },
 
   settings: {
+    installedModels: "已安装的模型",
+    noInstalledModels: "没有已下载的模型。",
+    kindTranscription: "转写",
+    kindSpeakers: "说话人",
+    kindNoise: "降噪",
+    modelInUse: "使用中",
+    deleteModel: "删除",
+    confirmDeleteModel: "删除文件",
+    deletingModel: "正在删除…",
     aiModels: "AI 模型",
     search: "笔记搜索",
     downloads: "模型下载",

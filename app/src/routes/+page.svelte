@@ -1609,6 +1609,17 @@
     });
   }
 
+  // Settings › Storage deleted a model: reload every picker's list.
+  onMount(() => {
+    const reload = () => {
+      refreshModels();
+      refreshDiarizeModels();
+      refreshDenoiseModels();
+    };
+    window.addEventListener("wisp:models-changed", reload);
+    return () => window.removeEventListener("wisp:models-changed", reload);
+  });
+
   onMount(() => {
     // Restore each mode's saved model from the previous session (the seed effect fills any gaps).
     try {

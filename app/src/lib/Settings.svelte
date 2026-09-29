@@ -281,12 +281,59 @@
     }
   }
 
+  // ── Installed local models (Storage) ─────────────────────────────────────────────────────────────
+  // Every downloaded transcription, speaker and noise model, so disk can be reclaimed in one place.
+  type InstalledModel = { id: string; name: string; sizeBytes: number; active: boolean; kind: string };
+  type ModelRow = InstalledModel & { installed: boolean; deletable: boolean };
+  let installedModels = $state<InstalledModel[]>([]);
+  let confirmModel = $state("");
+  let modelBusy = $state("");
+
+  async function loadInstalledModels() {
+    try {
+      const lists = await Promise.all([
+        invoke<ModelRow[]>("list_models"),
+        invoke<ModelRow[]>("list_diarization_models"),
+        invoke<ModelRow[]>("list_denoise_models"),
+      ]);
+      const kinds = [i18n.t.settings.kindTranscription, i18n.t.settings.kindSpeakers, i18n.t.settings.kindNoise];
+      const seen = new Set<string>();
+      installedModels = lists.flatMap((list, i) =>
+        list
+          .filter((m) => m.installed && m.deletable && !seen.has(m.id) && seen.add(m.id))
+          .map((m) => ({ id: m.id, name: m.name, sizeBytes: m.sizeBytes, active: m.active, kind: kinds[i] })),
+      );
+    } catch (e) {
+      storageError = String(e);
+    }
+  }
+
+  async function deleteModel(id: string) {
+    modelBusy = id;
+    try {
+      await invoke("remove_model", { id });
+      // The Live/File pickers keep their own lists; tell them to reload.
+      window.dispatchEvent(new CustomEvent("wisp:models-changed"));
+      await loadInstalledModels();
+    } catch (e) {
+      storageError = String(e);
+    } finally {
+      modelBusy = "";
+      confirmModel = "";
+    }
+  }
+
+  function fmtBytes(n: number): string {
+    return n >= 1e9 ? `${(n / 1e9).toFixed(1)} GB` : `${Math.max(1, Math.round(n / 1e6))} MB`;
+  }
+
   // Refresh dictation status + the storage paths whenever the dialog opens.
   $effect(() => {
     if (open) {
       loadDictation();
       loadDownloadSettings();
       loadPaths();
+      loadInstalledModels();
       loadRetention();
       loadReasoning();
     }
@@ -650,6 +697,30 @@
             {#if retentionError}<p class="set-error">{retentionError}</p>{/if}
 
             {#if storageError}<p class="set-error">{storageError}</p>{/if}
+
+            <p class="set-label models-head">{i18n.t.settings.installedModels}</p>
+            {#if installedModels.length === 0}
+              <p class="set-note">{i18n.t.settings.noInstalledModels}</p>
+            {/if}
+            {#each installedModels as m (m.id)}
+              <div class="store-row">
+                <div class="store-info">
+                  <span class="set-label">{m.name}</span>
+                  <span class="store-path"
+                    >{m.kind} · {fmtBytes(m.sizeBytes)}{m.active ? ` · ${i18n.t.settings.modelInUse}` : ""}</span
+                  >
+                </div>
+                {#if confirmModel === m.id}
+                  <button class="set-btn danger" disabled={modelBusy === m.id} onclick={() => deleteModel(m.id)}>
+                    {modelBusy === m.id ? i18n.t.settings.deletingModel : i18n.t.settings.confirmDeleteModel}
+                  </button>
+                  <button class="set-btn" onclick={() => (confirmModel = "")}>{i18n.t.common.cancel}</button>
+                {:else}
+                  <button class="set-btn" onclick={() => (confirmModel = m.id)}>{i18n.t.settings.deleteModel}</button>
+                {/if}
+              </div>
+            {/each}
+
             {#if paths}
               {#each [{ label: i18n.t.settings.storageModels, path: paths.models, reveal: false }, { label: i18n.t.settings.storageNotes, path: paths.database, reveal: true }, { label: i18n.t.settings.storageData, path: paths.data, reveal: false }] as loc (loc.path)}
                 <div class="store-row">
@@ -671,6 +742,10 @@
 {/if}
 
 <style>
+  .models-head {
+    display: block;
+    margin-top: 14px;
+  }
   .backdrop {
     position: fixed;
     inset: 0;
