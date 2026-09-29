@@ -18,6 +18,7 @@ pub mod diarize;
 pub mod engine;
 pub mod error;
 pub mod export;
+pub mod meeting;
 pub mod model;
 pub mod params;
 pub mod perf;
