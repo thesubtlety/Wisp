@@ -4642,9 +4642,28 @@ pub fn run() {
             tray::set_tray_recording,
             meeting::set_meeting_detection
         ])
+        // On macOS, closing the window hides it: Wisp stays in the menu bar (for meeting detection
+        // and a running session) until Quit.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if cfg!(target_os = "macos") && window.label() == "main" {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app_handle, event| {
+            // Clicking the Dock icon brings the hidden window back.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen {
+                has_visible_windows: false,
+                ..
+            } = event
+            {
+                tray::show_main_window(app_handle);
+            }
             // Release audio capture on quit so an abrupt exit never leaves the CoreAudio HAL or
             // ScreenCaptureKit wedged for the next launch. Bounded (it reuses the stop teardown), so a
             // stuck native handle can't hang the quit either; a no-op when nothing is running.
