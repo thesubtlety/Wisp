@@ -811,6 +811,8 @@ mod tests {
                      DROP TABLE candidate_log;
                      DROP TABLE project_memory;
                      DROP TABLE llm_call;
+                     DROP TABLE speaker_name;
+                     ALTER TABLE project DROP COLUMN instructions;
                      PRAGMA user_version = 3;",
                 )
                 .unwrap();

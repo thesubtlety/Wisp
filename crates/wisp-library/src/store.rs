@@ -13,7 +13,7 @@ use crate::retention::RetentionPolicy;
 use crate::Result;
 
 /// On-disk schema version, bumped on schema changes (drives migration via `PRAGMA user_version`).
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 9;
 
 /// Characters of transcript kept as a list preview.
 const PREVIEW_CHARS: usize = 160;
@@ -235,6 +235,20 @@ CREATE INDEX llm_call_meeting ON llm_call (meeting_id);
 CREATE INDEX llm_call_at ON llm_call (at_ms);
 ";
 
+/// Speaker names and project instructions. A meeting's diarized speaker ids stay in `segment`; this
+/// maps them to the names the user gave them, so a rename is undoable and needs no reindex. A
+/// project's instructions tell the model what matters to the user there (role, goals, what to
+/// ignore).
+pub(crate) const SCHEMA_V9: &str = "\
+CREATE TABLE speaker_name (
+    meeting_id TEXT NOT NULL REFERENCES meeting (id) ON DELETE CASCADE,
+    speaker    INTEGER NOT NULL,
+    name       TEXT NOT NULL,
+    PRIMARY KEY (meeting_id, speaker)
+);
+ALTER TABLE project ADD COLUMN instructions TEXT NOT NULL DEFAULT '';
+";
+
 /// A handle to the meeting knowledge base. Open once and reuse across queries. With no embedder it
 /// is full-text only; configure one via [`Library::set_embedder`] to enable semantic and hybrid
 /// search.
@@ -299,7 +313,7 @@ impl Library {
             .pragma_query_value(None, "user_version", |r| r.get(0))?;
         // Each step commits with its version, so a failed step leaves the database at the previous
         // version rather than half-migrated (a re-run ALTER TABLE would fail on the duplicate column).
-        let steps: [(i64, &str); 8] = [
+        let steps: [(i64, &str); 9] = [
             (1, SCHEMA_V1),
             (2, SCHEMA_V2),
             (3, SCHEMA_V3),
@@ -308,6 +322,7 @@ impl Library {
             (6, SCHEMA_V6),
             (7, SCHEMA_V7),
             (8, SCHEMA_V8),
+            (9, SCHEMA_V9),
         ];
         for (step, sql) in steps {
             if version >= step {
