@@ -29,6 +29,7 @@
     KIND_ORDER,
     GAP_ORDER,
     type StateItem,
+    type AskAnswer,
   } from "$lib/intel.svelte";
 
   let { running }: { running: boolean } = $props();
@@ -60,6 +61,13 @@
       .join("\n");
   }
   let copiedAt = $state(-1);
+  // Ask answers opened past their short form, by turn.
+  let expanded = $state(new Set<number>());
+  /** A short answer worth showing first: present, and not already the whole answer. */
+  const isBrief = (a: AskAnswer) => !!a.short && a.short !== a.answer;
+  $effect(() => {
+    if (!intel.turns.length) expanded = new Set();
+  });
   let notRunning = $state(false);
   let feedEl = $state<HTMLDivElement>();
 
@@ -160,9 +168,12 @@
           {#each gapGroups as g (g.category)}
             <p class="gcat">{i18n.t.intel.gaps[g.category]}</p>
             {#each g.gaps as gap, j (j)}
-              <p class="gap">
-                {gap.text}{#each gap.cited as id (id)}<span class="cid gref">{id}</span>{/each}
-              </p>
+              <details class="gap">
+                <summary class="headline" title={gap.text}>{gap.headline || gap.text}</summary>
+                <p class="gdetail">
+                  {gap.text}{#each gap.cited as id (id)}<span class="cid gref">{id}</span>{/each}
+                </p>
+              </details>
             {/each}
           {/each}
           <div class="cactions">
@@ -177,15 +188,22 @@
       {/if}
       {#each [...intel.cards].reverse() as card (card.id)}
         <div class="card">
-          <p class="ctitle">{card.candidate.title}</p>
-          {#if card.candidate.detail}<p class="cdetail">{card.candidate.detail}</p>{/if}
-          {#if card.candidate.suggestedQuestion}
-            <p class="cq">“{card.candidate.suggestedQuestion}”</p>
-          {/if}
-          <p class="imeta">
-            <span>{Math.round(card.candidate.confidence * 100)}%</span>
-            {#each card.candidate.cited as id (id)}<span class="cid">{id}</span>{/each}
-          </p>
+          <details class="cmore">
+            <summary class="ctitle headline" title={card.candidate.title}
+              >{card.candidate.headline || card.candidate.title}</summary
+            >
+            {#if card.candidate.headline && card.candidate.headline !== card.candidate.title}
+              <p class="cdetail">{card.candidate.title}</p>
+            {/if}
+            {#if card.candidate.detail}<p class="cdetail">{card.candidate.detail}</p>{/if}
+            {#if card.candidate.suggestedQuestion}
+              <p class="cq">“{card.candidate.suggestedQuestion}”</p>
+            {/if}
+            <p class="imeta">
+              <span>{Math.round(card.candidate.confidence * 100)}%</span>
+              {#each card.candidate.cited as id (id)}<span class="cid">{id}</span>{/each}
+            </p>
+          </details>
           <div class="cactions">
             {#if card.candidate.suggestedQuestion}
               <button class="copy" onclick={() => copy(10_000 + intel.cards.indexOf(card), card.candidate.suggestedQuestion!)}>
@@ -326,25 +344,33 @@
           {:else if turn.error}
             <p class="error">{turn.error}</p>
           {:else if turn.answer}
+            {@const brief = isBrief(turn.answer)}
             <div class="a">
-              <p class="answer">{turn.answer.answer}</p>
+              {#if brief}<p class="answer short">{turn.answer.short}</p>{/if}
               {#if !turn.answer.grounded}<p class="warn">{i18n.t.intel.notGrounded}</p>{/if}
-              {#if turn.answer.unknownCitations.length}
-                <p class="warn">{i18n.t.intel.droppedCitations(turn.answer.unknownCitations.length)}</p>
-              {/if}
-              {#if turn.answer.citations.length}
-                <details class="sources">
-                  <summary>{i18n.t.intel.sources} ({turn.answer.citations.length})</summary>
-                  <ul>
-                    {#each turn.answer.citations as c (c.id)}
-                      <li title={c.text}>
-                        <span class="cid">{c.id}</span>
-                        <span class="clabel">{c.label}</span>
-                        <span class="ctext">{c.text}</span>
-                      </li>
-                    {/each}
-                  </ul>
-                </details>
+              {#if brief && !expanded.has(i)}
+                <button class="linkish more" onclick={() => (expanded = new Set(expanded).add(i))}
+                  >{i18n.t.intel.more}</button
+                >
+              {:else}
+                <p class="answer" class:detail={brief}>{turn.answer.answer}</p>
+                {#if turn.answer.unknownCitations.length}
+                  <p class="warn">{i18n.t.intel.droppedCitations(turn.answer.unknownCitations.length)}</p>
+                {/if}
+                {#if turn.answer.citations.length}
+                  <details class="sources">
+                    <summary>{i18n.t.intel.sources} ({turn.answer.citations.length})</summary>
+                    <ul>
+                      {#each turn.answer.citations as c (c.id)}
+                        <li title={c.text}>
+                          <span class="cid">{c.id}</span>
+                          <span class="clabel">{c.label}</span>
+                          <span class="ctext">{c.text}</span>
+                        </li>
+                      {/each}
+                    </ul>
+                  </details>
+                {/if}
               {/if}
               <button class="copy" onclick={() => copy(i, turn.answer!.markdown)}>
                 {copiedAt === i ? i18n.t.intel.copied : i18n.t.intel.copy}
@@ -717,7 +743,44 @@
   .gap {
     margin: 0;
     font-size: 13px;
+  }
+
+  /* A headline to read at a glance: one bold line; the full sentence opens on click. */
+  .headline {
+    display: list-item;
+    cursor: pointer;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  details[open] > .headline {
+    white-space: normal;
+  }
+
+  .gdetail {
+    margin: 2px 0 4px 14px;
+    color: var(--muted);
     user-select: text;
+  }
+
+  .cmore > :not(summary) {
+    margin-top: 5px;
+  }
+
+  .answer.short {
+    font-weight: 600;
+  }
+
+  .answer.detail {
+    color: var(--muted);
+  }
+
+  .more {
+    margin-left: 0;
+    padding: 0;
+    font-size: 12.5px;
   }
 
   .gref {

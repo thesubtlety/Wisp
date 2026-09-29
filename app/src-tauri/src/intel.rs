@@ -1497,6 +1497,7 @@ mod tests {
         filter.consider(
             wisp_intel::Candidate {
                 kind: wisp_intel::CandidateKind::Conflict,
+                headline: "Hosting unclear".into(),
                 title: "Hosting unclear".into(),
                 detail: String::new(),
                 suggested_question: None,

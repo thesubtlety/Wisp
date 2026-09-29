@@ -17,6 +17,7 @@
 //!   which reach the user, with a log for tuning.
 //! - [`learning`] — end-of-meeting proposals for project memory, with hashed provenance.
 //! - [`review`] — post-call follow-up review, corrected in plain words, applied to the state.
+//! - [`headline`] — short forms (headlines, short answers) for reading at a glance.
 //! - [`screenshot`] — a screenshot attached as context, described once by a vision backend.
 //! - [`runtime`] — the live worker: final lines in over a channel that never blocks, batched
 //!   passes out, one at a time.
@@ -28,6 +29,7 @@ pub mod ask;
 pub mod endgame;
 pub mod evidence;
 pub mod export;
+pub mod headline;
 pub mod intervene;
 pub mod learning;
 pub mod model;

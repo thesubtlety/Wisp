@@ -71,7 +71,10 @@ impl CandidateKind {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RawCandidate {
     pub kind: CandidateKind,
-    /// One line, as the card's headline.
+    /// At most six words, read at a glance. Derived from `title` when missing or too long.
+    #[serde(default)]
+    pub headline: String,
+    /// The issue in one sentence.
     pub title: String,
     /// Why it matters, briefly.
     pub detail: String,
@@ -94,6 +97,9 @@ pub struct RawCandidate {
 #[serde(rename_all = "camelCase")]
 pub struct Candidate {
     pub kind: CandidateKind,
+    /// At most six words, shown first; see [`crate::headline`].
+    #[serde(default)]
+    pub headline: String,
     pub title: String,
     pub detail: String,
     pub suggested_question: Option<String>,
@@ -152,6 +158,7 @@ pub fn validate_candidate(
     }
     Ok(Candidate {
         kind: raw.kind,
+        headline: crate::headline::headline(&raw.headline, &title),
         title,
         detail,
         suggested_question: raw
@@ -192,11 +199,12 @@ pub fn candidates_schema() -> Value {
             "type": "object",
             "additionalProperties": false,
             "required": [
-                "kind", "title", "detail", "suggested_question", "source_refs", "related_items",
+                "kind", "headline", "title", "detail", "suggested_question", "source_refs", "related_items",
                 "importance", "urgency", "confidence", "future_work_risk"
             ],
             "properties": {
                 "kind": {"type": "string", "enum": kinds},
+                "headline": {"type": "string"},
                 "title": {"type": "string"},
                 "detail": {"type": "string"},
                 "suggested_question": {"type": ["string", "null"]},
@@ -475,6 +483,7 @@ mod tests {
     fn raw(title: &str) -> RawCandidate {
         RawCandidate {
             kind: CandidateKind::UnconfirmedAssumption,
+            headline: String::new(),
             title: title.into(),
             detail: "The estimate assumes it.".into(),
             suggested_question: Some("Is customer-hosted deployment confirmed?".into()),
@@ -672,5 +681,43 @@ mod tests {
         );
         let ok = serde_json::to_value(vec![raw("x")]).unwrap();
         wisp_reasoning::validate(&schema, &ok).unwrap();
+        assert!(item["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("headline")));
+    }
+
+    #[test]
+    fn a_candidate_keeps_a_short_headline_and_derives_a_missing_or_long_one() {
+        let s = MeetingState::new("live");
+        let mut r = raw("The plan relies on customer-hosted deployment, which nobody confirmed");
+        r.headline = " Confirm customer hosting ".into();
+        let c = validate_candidate(&r, &packet(), &s).unwrap();
+        assert_eq!(c.headline, "Confirm customer hosting");
+
+        r.headline = String::new();
+        let c = validate_candidate(&r, &packet(), &s).unwrap();
+        assert_eq!(c.headline, "The plan relies on customer-hosted deployment…");
+
+        r.headline = "Please go and confirm the customer hosting plan today".into();
+        let c = validate_candidate(&r, &packet(), &s).unwrap();
+        assert_eq!(c.headline, "Please go and confirm the customer…");
+    }
+
+    #[test]
+    fn output_without_a_headline_still_parses() {
+        let old = json!({
+            "kind": "follow_up", "title": "Send the DPA", "detail": "", "suggested_question": null,
+            "source_refs": ["T1"], "related_items": [], "importance": 0.5, "urgency": 0.5,
+            "confidence": 0.9, "future_work_risk": 0.5
+        });
+        let r: RawCandidate = serde_json::from_value(old).unwrap();
+        assert_eq!(r.headline, "");
+        let c = validate_candidate(&r, &packet(), &MeetingState::new("live")).unwrap();
+        assert_eq!(c.headline, "Send the DPA");
+        let mut saved = serde_json::to_value(&c).unwrap();
+        saved.as_object_mut().unwrap().remove("headline");
+        let back: Candidate = serde_json::from_value(saved).unwrap();
+        assert_eq!(back.headline, "");
     }
 }
