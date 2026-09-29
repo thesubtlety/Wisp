@@ -481,7 +481,120 @@ pub(crate) fn describe_context(app: AppHandle, source_id: i64) -> Result<(), Str
     Ok(())
 }
 
-/// Deletes a screenshot now: its source, description and image file, and its pin.
+/// A screenshot kept with a project, for the Library's project view.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProjectShot {
+    pub(crate) source_id: i64,
+    pub(crate) label: String,
+    /// What the description calls it, once described.
+    pub(crate) title: Option<String>,
+    /// The start of the description, when there is one.
+    pub(crate) snippet: Option<String>,
+    pub(crate) added_at_ms: i64,
+    pub(crate) expires_at_ms: Option<i64>,
+}
+
+/// The title and the rest of a stored description (see `ScreenshotDescription::source_text`).
+/// `None` for an undescribed screenshot.
+fn split_description(text: &str) -> Option<(String, String)> {
+    let text = text.trim();
+    if text.is_empty() || text == PLACEHOLDER {
+        return None;
+    }
+    let (title, rest) = text.split_once('\n').unwrap_or((text, ""));
+    Some((title.trim().to_owned(), rest.trim().to_owned()))
+}
+
+/// A project's screenshots, newest first.
+#[tauri::command]
+pub(crate) fn list_project_screenshots(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> Result<Vec<ProjectShot>, String> {
+    let library = state
+        .library
+        .lock()
+        .map_err(|_| "library lock poisoned".to_owned())?;
+    let sources = library
+        .list_sources(&project_id)
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for source in sources.into_iter().filter(|s| s.kind == SCREENSHOT_KIND) {
+        let text = library
+            .snippet_for_ref(&source_ref(source.id, 0))
+            .map_err(|e| e.to_string())?
+            .map(|s| s.text)
+            .unwrap_or_default();
+        let (title, snippet) = match split_description(&text) {
+            Some((title, rest)) => (Some(title), Some(rest).filter(|r| !r.is_empty())),
+            None => (None, None),
+        };
+        out.push(ProjectShot {
+            source_id: source.id,
+            label: source.label,
+            title,
+            snippet,
+            added_at_ms: source.added_at_ms,
+            expires_at_ms: source.expires_at_ms,
+        });
+    }
+    Ok(out)
+}
+
+/// The `kind` a screenshot source is stored with.
+const SCREENSHOT_KIND: &str = "screenshot";
+
+/// The screenshot file of `source`, only if it is a screenshot whose file resolves inside
+/// `managed_root`.
+fn screenshot_file(
+    source: &wisp_library::Source,
+    managed_root: &std::path::Path,
+) -> Result<PathBuf, String> {
+    if source.kind != SCREENSHOT_KIND {
+        return Err("not a screenshot".to_owned());
+    }
+    let path = source
+        .managed_path
+        .as_deref()
+        .ok_or("the screenshot has no image")?;
+    let root = managed_root
+        .canonicalize()
+        .map_err(|e| format!("managed folder: {e}"))?;
+    let path = std::path::Path::new(path)
+        .canonicalize()
+        .map_err(|_| "the screenshot image is gone".to_owned())?;
+    if !path.starts_with(&root) || !path.is_file() {
+        return Err("the screenshot image is not in the app's folder".to_owned());
+    }
+    Ok(path)
+}
+
+/// A screenshot's image bytes, for a thumbnail or the full-size view.
+#[tauri::command]
+pub(crate) async fn context_image(
+    app: AppHandle,
+    source_id: i64,
+) -> Result<tauri::ipc::Response, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let source = state
+            .library
+            .lock()
+            .map_err(|_| "library lock poisoned".to_owned())?
+            .get_source(source_id)
+            .map_err(|e| e.to_string())?
+            .ok_or("no such screenshot")?;
+        let path = screenshot_file(&source, &state.managed_dir)?;
+        let bytes = std::fs::read(&path).map_err(|e| format!("read screenshot: {e}"))?;
+        Ok(tauri::ipc::Response::new(bytes))
+    })
+    .await
+    .map_err(|e| format!("image task failed: {e}"))?
+}
+
+/// Deletes a screenshot now: its source, description and image file, and its pin. Works for any
+/// screenshot the library still has, not only the current meeting's.
 #[tauri::command]
 pub(crate) fn remove_context(app: AppHandle, source_id: i64) -> Result<(), String> {
     let state = app.state::<AppState>();
@@ -492,27 +605,35 @@ pub(crate) fn remove_context(app: AppHandle, source_id: i64) -> Result<(), Strin
 }
 
 fn remove(state: &AppState, source_id: i64) -> Result<(), String> {
-    let known = state
+    let is_shot = {
+        let mut library = state
+            .library
+            .lock()
+            .map_err(|_| "library lock poisoned".to_owned())?;
+        let is_shot = library
+            .get_source(source_id)
+            .map_err(|e| e.to_string())?
+            .is_some_and(|s| s.kind == SCREENSHOT_KIND);
+        if is_shot {
+            library
+                .remove_source(source_id, &state.managed_dir)
+                .map_err(|e| e.to_string())?;
+        }
+        is_shot
+    };
+    let mut shots = state
         .intel
         .context
         .shots
         .lock()
-        .map_err(|_| "state lock poisoned".to_owned())?
-        .iter()
-        .any(|x| x.source_id == source_id);
-    if !known {
-        return Err("no such screenshot".to_owned());
+        .map_err(|_| "state lock poisoned".to_owned())?;
+    let known = shots.iter().any(|x| x.source_id == source_id);
+    shots.retain(|x| x.source_id != source_id);
+    if is_shot || known {
+        Ok(())
+    } else {
+        Err("no such screenshot".to_owned())
     }
-    state
-        .library
-        .lock()
-        .map_err(|_| "library lock poisoned".to_owned())?
-        .remove_source(source_id, &state.managed_dir)
-        .map_err(|e| e.to_string())?;
-    if let Ok(mut shots) = state.intel.context.shots.lock() {
-        shots.retain(|x| x.source_id != source_id);
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -535,6 +656,67 @@ mod tests {
     fn labels_say_when_in_the_meeting() {
         assert_eq!(clock(65_000), "01:05");
         assert_eq!(clock(3_725_000), "1:02:05");
+    }
+
+    fn shot(kind: &str, managed_path: Option<&Path>) -> wisp_library::Source {
+        wisp_library::Source {
+            id: 1,
+            project_id: "p".into(),
+            kind: kind.into(),
+            label: "Screenshot".into(),
+            origin_path: None,
+            managed_path: managed_path.map(|p| p.display().to_string()),
+            sha256: String::new(),
+            added_at_ms: 0,
+            expires_at_ms: None,
+            chunk_count: 1,
+        }
+    }
+
+    #[test]
+    fn only_screenshot_files_inside_the_managed_folder_are_served() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let inside = root.path().join("screenshots");
+        std::fs::create_dir_all(&inside).unwrap();
+        let good = inside.join("a.png");
+        std::fs::write(&good, b"x").unwrap();
+        let elsewhere = outside.path().join("b.png");
+        std::fs::write(&elsewhere, b"x").unwrap();
+
+        let served = screenshot_file(&shot("screenshot", Some(&good)), root.path()).unwrap();
+        assert_eq!(served, good.canonicalize().unwrap());
+        assert!(screenshot_file(&shot("pasted", Some(&good)), root.path()).is_err());
+        assert!(screenshot_file(&shot("screenshot", None), root.path()).is_err());
+        assert!(screenshot_file(&shot("screenshot", Some(&elsewhere)), root.path()).is_err());
+        let sneaky = inside
+            .join("..")
+            .join("..")
+            .join(outside.path().file_name().unwrap());
+        assert!(screenshot_file(
+            &shot("screenshot", Some(&sneaky.join("b.png"))),
+            root.path()
+        )
+        .is_err());
+        assert!(screenshot_file(
+            &shot("screenshot", Some(&inside.join("gone.png"))),
+            root.path()
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn a_stored_description_splits_into_title_and_detail() {
+        assert_eq!(split_description(PLACEHOLDER), None);
+        assert_eq!(split_description("  "), None);
+        assert_eq!(
+            split_description("Pricing table\n\nThree tiers."),
+            Some(("Pricing table".to_owned(), "Three tiers.".to_owned()))
+        );
+        assert_eq!(
+            split_description("Just a title"),
+            Some(("Just a title".to_owned(), String::new()))
+        );
     }
 
     #[test]

@@ -26,6 +26,33 @@ export const en = {
   },
 
   library: {
+    meetingTitle: "Meeting title (optional)",
+    titleNoSuggestion: (why: string): string => `Meeting title (no suggestion: ${why})`,
+    titleSuggested: "Suggested by your local model. Type to replace it.",
+    renameMeeting: "Rename",
+    project: "Project",
+    noProject: "No project",
+    newProject: "New project…",
+    projectName: "Project name",
+    create: "Create",
+    save: "Save",
+    allMeetings: "All meetings",
+    renameProject: "Rename project",
+    instructions: "Instructions",
+    instructionsHelp: "Tell the AI what matters to you in this project. Used from the next meeting on.",
+    instructionsPlaceholder:
+      "Your role here (e.g. I lead the migration for the customer).\nWhat matters (their commitments to me, decisions on hosting and dates).\nWhat to ignore (billing, small talk, other teams' work).",
+    meetingCount: (n: number): string => (n === 1 ? "1 meeting" : `${n} meetings`),
+    newMeetingInProject: "New meeting in this project",
+    projectKnowledge: "Project knowledge",
+    screenshots: "Screenshots",
+    shotExpires: (date: string): string => `Deleted on ${date}`,
+    shotKept: "Kept until you delete it",
+    deleteShotTitle: "Delete screenshot",
+    deleteShotConfirm: "Delete this screenshot and its description? This can't be undone.",
+    emptyProject: "No meetings here yet.",
+    movedKeepsKnowledge: (from: string): string =>
+      `Moved. Knowledge already learned from this meeting stays in ${from}.`,
     title: "Library",
     newNoteTitle: (date: string): string => `Note · ${date}`,
     searchPlaceholder: "Search notes…",
@@ -41,13 +68,68 @@ export const en = {
     delete: "Delete",
     cancel: "Cancel",
     deleteTitle: "Delete note",
-    deleteConfirm: "Delete this note? This can't be undone.",
+    deleteConfirm: "Delete this note? This can't be undone. AI activity entries from other meetings that quoted it are kept until they expire or you clear them.",
     you: "You",
     them: "Them",
+    speakers: "Speakers",
+    speakerTip: "Click to rename or merge this speaker",
+    speakerName: "Speaker name",
+    speakerNameHint: "Renames this speaker everywhere in the meeting. Leave blank for the default label.",
+    mergeInto: "Merge into…",
+    merge: "Merge",
+    mergeTitle: "Merge speakers",
+    mergeConfirm: (from: string, into: string): string =>
+      `Move every line from ${from} to ${into}? ${from} then disappears from this meeting.`,
+  },
+
+  // AI activity log (Settings › AI activity, and from the intelligence panel).
+  audit: {
+    title: "AI activity",
+    intro:
+      "Every call Wisp made to an AI model, with the full text sent and the reply. LOCAL calls stayed on this Mac; REMOTE calls went to an online service (the Codex and Claude CLIs send to OpenAI and Anthropic). Entries are kept as long as transcripts, and deleting a meeting deletes its entries.",
+    all: "All",
+    thisMeeting: "This meeting",
+    refresh: "Refresh",
+    clear: "Clear log",
+    clearConfirm: "Delete the whole AI activity log? This can't be undone.",
+    clearYes: "Clear",
+    cancel: "Cancel",
+    empty: "No AI calls logged yet.",
+    noMeeting: "No meeting is running or just saved.",
+    capped: (n: number) => `Showing the newest ${n}.`,
+    local: "LOCAL",
+    remote: "REMOTE",
+    ok: "OK",
+    failed: "Error",
+    defaultModel: "default model",
+    tokens: (input: number, output: number, estimated: boolean) =>
+      `${estimated ? "≈" : ""}${input.toLocaleString()} in / ${estimated ? "≈" : ""}${output.toLocaleString()} out`,
+    estimatedNote: "The backend reported no token counts, so they are estimated from the text (about 4 characters per token).",
+    sent: "Sent",
+    instructions: "Instructions",
+    context: "Context",
+    images: "Images",
+    reply: "Reply",
+    error: "Error",
+    copy: "Copy",
+    copied: "Copied",
+    tasks: {
+      observe: "Live update",
+      ask: "Question",
+      endgame_audit: "Wrap-up check",
+      post_call: "Post-call review",
+      project_learning: "Project learning",
+      screenshot_context: "Screenshot description",
+      assist: "AI assist",
+      realtime_assist: "Realtime assist",
+    },
   },
 
   // Live transcription screen.
   live: {
+    more: "More",
+    openAssist: "Open AI assist",
+    hideAssist: "Close AI assist",
     loadingModels: "Loading models…",
 
     // Delete-model confirmation dialog (shared by the Live + File pickers).
@@ -64,6 +146,8 @@ export const en = {
 
     you: "You",
     them: "Them",
+    speakerTip: "Click to name this speaker",
+    speakerName: "Speaker name",
     // Tooltip for the You/Them capture toggles — depends on whether the source is on and whether a
     // session is running (running → mute/unmute; idle → include/exclude from transcription).
     youTip: (on: boolean, running: boolean): string =>
@@ -153,6 +237,15 @@ export const en = {
   // Live box-aux: model download / CoreML hints, permission banners, cloud key notices. "Wisp",
   // "Neural Engine", "System Settings", "Screen Recording"/"Microphone" (macOS panes), and provider
   // names stay English.
+  meeting: {
+    detected: (who: string): string => `Meeting detected in ${who}`,
+    browserMic: (app: string): string => `${app} is using the microphone`,
+    ended: (label: string): string => `${label} ended. Stop transcribing?`,
+    start: "Start transcribing",
+    notNow: "Not now",
+    stop: "Stop",
+    keepGoing: "Keep going",
+  },
   notice: {
     blocked: (reason: string): string => `⚠ ${reason} — pick another model.`,
     download: "Download",
@@ -273,6 +366,15 @@ export const en = {
 
   // Dictation settings (Settings.svelte). "Apple" / "macOS" stay English.
   settings: {
+    installedModels: "Installed models",
+    noInstalledModels: "No downloaded models.",
+    kindTranscription: "Transcription",
+    kindSpeakers: "Speakers",
+    kindNoise: "Noise reduction",
+    modelInUse: "in use",
+    deleteModel: "Delete",
+    confirmDeleteModel: "Delete files",
+    deletingModel: "Deleting…",
     aiModels: "AI models",
     search: "Notes search",
     downloads: "Model downloads",
@@ -323,8 +425,11 @@ export const en = {
     embedCloudNote: "Cloud models send note text to the provider; local models stay fully on-device.",
     dictation: "Dictation",
     dictationIntro:
-      "Hold the hotkey, speak, release — Wisp types it into whatever app has focus, fully on-device (Apple speech).",
-    dictationNote: "Dictation needs Apple on-device speech (macOS 26 or newer).",
+      "Hold the hotkey, speak, release — Wisp types it into whatever app has focus, fully on-device.",
+    dictationNote:
+      "Dictation needs Apple on-device speech (macOS 26 or newer) or a downloaded on-device model, such as Parakeet v3. Download one under AI models.",
+    dictationUsesApple: "Uses Apple on-device speech.",
+    dictationUsesModel: (name: string): string => `Uses ${name} (on-device).`,
     pushToTalk: "Push-to-talk",
     on: "On",
     off: "Off",
@@ -349,6 +454,9 @@ export const en = {
     remoteEndpointWarning: "This endpoint isn't on this machine: meeting text sent to the local model goes to it.",
     localHint: "To use a local model, add its OpenAI-compatible endpoint under AI models (Ollama: http://localhost:11434/v1).",
     reasoningNote: "Automatic keeps questions, the gap audit, reviews and screenshots on Codex or Claude Code; the local model is their last resort when those can't run. Takes effect from the next meeting.",
+    aboutMe: "About me",
+    aboutMePlaceholder: "e.g. Solutions engineer at Wisp. I run technical scoping calls with customers.",
+    aboutMeNote: "Sent with every meeting's AI requests, next to the project's instructions, so it can skip what doesn't matter to you. With Codex or Claude Code it leaves this Mac. Takes effect from the next meeting.",
     checkReasoningLabel: "Check backends",
     checkReasoning: "Check",
     retention: "Retention",
@@ -371,6 +479,10 @@ export const en = {
     deleteProjectConfirm: "Its meetings, documents, imported copies and knowledge go too.",
     delete: "Delete",
     autoSaveNotes: "Auto-save notes to library",
+    detectMeetings: "Detect meetings",
+    detectMeetingsNote:
+      "Watches which app uses the microphone (Zoom, Teams, Google Meet in a browser…) and asks before recording. Never starts on its own.",
+    detectMeetingsUnsupported: "Needs macOS 14.2 or later.",
     meetingIntel: "Meeting intelligence",
     meetingIntelNote:
       "During a live meeting, sends final transcript lines to the reasoning backend below (by default your own Codex or Claude CLI, on your subscription) and keeps a structured list of requirements, decisions and commitments. Saved with the note. Starts with the next session.",
@@ -383,6 +495,10 @@ export const en = {
   // AI assist / notes panel (AiNotes.svelte). "✦ Models" / "AI" / "API" / provider names stay
   // English; the template PROMPTS (LLM instructions) are not here — only their menu labels are.
   assist: {
+    refresh: "Refresh",
+    rollingEvery: (s: number): string => `Refreshes every ${s}s until Stop`,
+    subscriptionName: "Subscription (Codex / Claude Code)",
+    subscriptionModel: "As set in Settings › Storage › Reasoning",
     emptyText: "Add an AI model for notes and live hints — your gateway, a local Ollama, or OpenAI.",
     manageInModels: "Manage in ✦ Models",
     needsKey: (name: string): string => `⚠ ${name} needs an API key — add it`,
@@ -470,11 +586,15 @@ export const en = {
     undescribed: "Not described",
     describeAgain: "Describe again",
     removeShot: "Remove screenshot",
+    more: "More",
+    enlarge: "Show full size",
+    imageMissing: "The image is gone",
     contextFailed: (msg: string) => `Couldn't attach: ${msg}`,
     endsAt: "Ends at",
+    endsAtHint: "When the meeting is scheduled to end. Wrap-up is suggested 5 minutes before. Optional.",
     wrapSuggested: {
-      scheduled: "The meeting is scheduled to end soon. Review remaining gaps?",
-      semantic: "Looks like the meeting may be wrapping up. Review remaining gaps?",
+      scheduled: "Ending soon. Review gaps?",
+      semantic: "Wrapping up? Review gaps.",
     },
     reviewGaps: "Review gaps",
     notYet: "Not yet",
@@ -498,7 +618,9 @@ export const en = {
     findingFollowUps: "Finding follow-ups…",
     reviewFromState: "Couldn't reach Codex or Claude; listed from the meeting state instead.",
     noFollowUps: "No follow-ups found.",
-    reviewPlaceholder: "e.g. 1 and 4 are mine. 2 is an open question. Drop 5.",
+    reviewPlaceholder: "e.g. 1 and 4 are mine. 2 is an open question. Drop 5. Save 6 to the project.",
+    reviewHelp:
+      "Pick what each follow-up is (hover a button for what it does), or say it below. Apply changes the meeting's state; follow-ups marked Save to project then go to the project knowledge step.",
     send: "Send",
     understood: "Understood",
     applyReview: "Apply to meeting",
@@ -508,7 +630,15 @@ export const en = {
       theirs: "Theirs",
       open_question: "Question",
       not_a_task: "Drop",
-      project_memory: "Project",
+      project_memory: "Save to project…",
+    },
+    classHelp: {
+      mine: "You'll do it. Apply records it as your commitment (owner: You).",
+      theirs: "They'll do it. Apply records it as their commitment (owner: them).",
+      open_question: "Not a task yet. Apply adds it to the meeting's open questions.",
+      not_a_task: "Not needed. Apply hides the item it's linked to; nothing happens if it has none.",
+      project_memory:
+        "Worth keeping. Apply doesn't change the meeting; it opens the project knowledge step, where you save it.",
     },
     project: "Project",
     noProject: "No project",

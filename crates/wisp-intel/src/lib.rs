@@ -8,6 +8,7 @@
 //! - [`reducer`] — validates proposed ops against that packet and the state, applies the valid
 //!   ones deterministically, and says why the rest were rejected.
 //! - [`ops`] — the op format, its JSON Schema, and the replayable log of applied ops.
+//! - [`about`] — what matters to You: "About me" plus the project's instructions, for prompts.
 //! - [`analyze`] — "Analyze Now": one observer pass through a
 //!   [`wisp_reasoning::ReasoningBackend`].
 //! - [`ask`] — questions about the meeting, answered with checked citations.
@@ -17,17 +18,20 @@
 //!   which reach the user, with a log for tuning.
 //! - [`learning`] — end-of-meeting proposals for project memory, with hashed provenance.
 //! - [`review`] — post-call follow-up review, corrected in plain words, applied to the state.
+//! - [`headline`] — short forms (headlines, short answers) for reading at a glance.
 //! - [`screenshot`] — a screenshot attached as context, described once by a vision backend.
 //! - [`runtime`] — the live worker: final lines in over a channel that never blocks, batched
 //!   passes out, one at a time.
 //!
 //! Nothing here knows about Tauri, audio or the UI. The model proposes; the reducer decides.
 
+pub mod about;
 pub mod analyze;
 pub mod ask;
 pub mod endgame;
 pub mod evidence;
 pub mod export;
+pub mod headline;
 pub mod intervene;
 pub mod learning;
 pub mod model;
@@ -37,6 +41,7 @@ pub mod review;
 pub mod runtime;
 pub mod screenshot;
 
+pub use about::{about_you, ABOUT_HEADING};
 pub use analyze::{
     analyze_now, prepare_observe, retrieval_text, AnalyzeInput, AnalyzeOutcome, IntelError,
     PreparedPass,

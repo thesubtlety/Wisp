@@ -12,6 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
+use wisp_core::speakers::{line_speaker, SpeakerNames};
 use wisp_core::transcript::{AudioSourceKind, TranscriptSegment};
 use wisp_intel::{
     apply_edits, ask, fallback_followups, generate_followups, interpret_reply, parse_reply,
@@ -181,6 +182,8 @@ impl Drop for StartGuard<'_> {
     fn drop(&mut self) {
         if self.armed {
             reset(self.state);
+            // The meeting never started, so later calls must not be logged under it.
+            crate::audit::set_live_meeting(self.state, None);
         }
     }
 }
@@ -192,6 +195,7 @@ pub(crate) fn start(app: &AppHandle, project_id: Option<String>, meeting_label: 
     let emitter = app.clone();
     let state = app.state::<AppState>();
     let memory = project_memory(&state, project_id.as_deref());
+    let focus = about_you(&state, project_id.as_deref());
     if let Ok(mut slot) = state.intel.project.lock() {
         slot.clone_from(&project_id);
     }
@@ -203,6 +207,7 @@ pub(crate) fn start(app: &AppHandle, project_id: Option<String>, meeting_label: 
         }),
         RuntimeConfig {
             memory,
+            focus,
             ..RuntimeConfig::default()
         },
         Box::new(move |update| {
@@ -234,24 +239,36 @@ pub(crate) fn start(app: &AppHandle, project_id: Option<String>, meeting_label: 
     *slot = Some(runtime);
 }
 
-/// The speaker label a line carries into the reasoning context.
-fn speaker_label(segment: &TranscriptSegment) -> String {
-    match (segment.source, segment.speaker) {
-        (AudioSourceKind::Microphone, _) => "You".to_owned(),
-        (_, Some(s)) => format!("Speaker {}", s.0 + 1),
-        _ => "Them".to_owned(),
-    }
+/// The speaker label a line carries into the reasoning context: the name the user gave the speaker
+/// when set (see [`line_speaker`] for the mic rule), else You / Them / Speaker N. A rename applies to
+/// lines from then on; lines the runtime already holds keep the label they arrived with.
+fn speaker_label(segment: &TranscriptSegment, names: &SpeakerNames) -> String {
+    line_speaker(
+        segment.source == AudioSourceKind::Microphone,
+        segment.speaker,
+        names,
+    )
+}
+
+/// The names the user gave the live session's speakers so far.
+pub(crate) fn live_speaker_names(state: &AppState) -> SpeakerNames {
+    state
+        .live_speaker_names
+        .lock()
+        .map(|n| n.clone())
+        .unwrap_or_default()
 }
 
 /// Hands one admitted final to the running runtime, if any. Never blocks on a model.
 pub(crate) fn route_final(app: &AppHandle, segment: &TranscriptSegment) {
     let state = app.state::<AppState>();
+    let speaker = speaker_label(segment, &live_speaker_names(&state));
     let Ok(guard) = state.intel.runtime.lock() else {
         return;
     };
     if let Some(runtime) = guard.as_ref() {
         runtime.push_final(
-            speaker_label(segment),
+            speaker,
             segment.start.as_millis() as i64,
             segment.text.clone(),
         );
@@ -260,7 +277,7 @@ pub(crate) fn route_final(app: &AppHandle, segment: &TranscriptSegment) {
 
 /// The live transcript as the runtime numbers it: admitted finals in arrival order, blank lines
 /// dropped, so `T<n>` means the same line to Ask as to the state's evidence.
-fn live_lines(retained: &[TranscriptSegment]) -> Vec<TranscriptLine> {
+fn live_lines(retained: &[TranscriptSegment], names: &SpeakerNames) -> Vec<TranscriptLine> {
     retained
         .iter()
         .filter(|s| !s.text.trim().is_empty())
@@ -268,7 +285,7 @@ fn live_lines(retained: &[TranscriptSegment]) -> Vec<TranscriptLine> {
         .map(|(i, s)| TranscriptLine {
             idx: i as i64,
             start_ms: s.start.as_millis() as i64,
-            speaker: speaker_label(s),
+            speaker: speaker_label(s, names),
             text: s.text.clone(),
         })
         .collect()
@@ -299,11 +316,15 @@ fn current_state(state: &AppState) -> MeetingState {
     MeetingState::new(LIVE_MEETING_ID)
 }
 
-/// Stops the runtime (cancelling any pass in flight) and parks its result for `save_note`.
+/// The longest Stop waits for the last pass over the meeting's final lines.
+const FINAL_PASS_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Stops the runtime after one last pass over unanalyzed lines (bounded by [`FINAL_PASS_LIMIT`])
+/// and parks its result for `save_note`.
 pub(crate) fn stop(state: &AppState) {
     let runtime = state.intel.runtime.lock().ok().and_then(|mut r| r.take());
     if let Some(runtime) = runtime {
-        let finished = runtime.stop();
+        let finished = runtime.finish(FINAL_PASS_LIMIT);
         if let Ok(mut slot) = state.intel.finished.lock() {
             *slot = Some(finished);
         }
@@ -401,10 +422,11 @@ fn persist_parked(
 
 /// The live transcript so far, numbered as the runtime numbers it.
 pub(crate) fn recent_lines(state: &AppState) -> Vec<TranscriptLine> {
+    let names = live_speaker_names(state);
     state
         .live_segments
         .lock()
-        .map(|s| live_lines(&s))
+        .map(|s| live_lines(&s, &names))
         .unwrap_or_default()
 }
 
@@ -497,11 +519,13 @@ pub(crate) async fn intel_ask(
                 previous.cancel();
             }
         }
+        let names = live_speaker_names(&state);
         let transcript = live_lines(
             &state
                 .live_segments
                 .lock()
                 .map_err(|_| "state lock poisoned".to_owned())?,
+            &names,
         );
         let meeting = current_state(&state);
         let project_id = state.intel.project.lock().ok().and_then(|p| p.clone());
@@ -591,10 +615,16 @@ fn saved_meeting(
         .map_err(|_| "library lock poisoned".to_owned())?;
     let log = stored_log(&library, id)?;
     let meeting = MeetingState::replay(id, &log).map_err(|e| e.to_string())?;
+    let names = library.speaker_names(id).map_err(|e| e.to_string())?;
     let lines = library
         .get_note(id)
         .map_err(|e| e.to_string())?
-        .map(|(_, segments)| segments.iter().map(TranscriptLine::from_segment).collect())
+        .map(|(_, segments)| {
+            segments
+                .iter()
+                .map(|s| TranscriptLine::from_segment_named(s, &names))
+                .collect()
+        })
         .unwrap_or_default();
     Ok((meeting, lines))
 }
@@ -624,12 +654,14 @@ pub(crate) async fn intel_review_start(app: AppHandle, id: String) -> Result<Rev
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let (meeting, lines) = saved_meeting(&state, &id)?;
-        let backend = crate::reasoning::backend(&state);
+        let about = about_you(&state, meeting_project(&state, &id).as_deref());
+        let backend = crate::reasoning::backend_for(&state, Some(id.clone()));
         let (followups, source, note) = match generate_followups(
             backend.as_ref(),
             &CancelToken::new(),
             &meeting,
             &lines,
+            about.as_deref(),
             std::time::Duration::from_secs(180),
         ) {
             Ok(list) => (list, "model", None),
@@ -662,19 +694,18 @@ pub(crate) struct ReplyDto {
 pub(crate) async fn intel_review_reply(app: AppHandle, reply: String) -> Result<ReplyDto, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
-        let followups = state
+        let (meeting_id, followups) = state
             .intel
             .review
             .lock()
             .map_err(|_| "state lock poisoned".to_owned())?
-            .as_ref()
-            .map(|(_, f)| f.clone())
+            .clone()
             .ok_or("no review in progress")?;
         let (edits, via) = match parse_reply(&reply, followups.len()) {
             Some(edits) => (edits, "local"),
             None => (
                 interpret_reply(
-                    crate::reasoning::backend(&state).as_ref(),
+                    crate::reasoning::backend_for(&state, Some(meeting_id)).as_ref(),
                     &CancelToken::new(),
                     &followups,
                     &reply,
@@ -795,6 +826,26 @@ fn project_memory(state: &AppState, project_id: Option<&str>) -> Vec<MemoryEntry
         .unwrap_or_default()
 }
 
+/// What matters to the user in `project_id` (see [`wisp_intel::about_you`]): "About me" from
+/// Settings plus the project's name and instructions, read fresh each time.
+fn about_you(state: &AppState, project_id: Option<&str>) -> Option<String> {
+    let about_me = state.reasoning.about_me();
+    let (name, instructions) = project_id
+        .and_then(|id| {
+            let library = state.library.lock().ok()?;
+            let instructions = library.project_instructions(id).ok().flatten()?;
+            Some((project_name(&library, Some(id)), instructions))
+        })
+        .unwrap_or_default();
+    wisp_intel::about_you(&about_me, name.as_deref(), &instructions)
+}
+
+/// The project a saved meeting belongs to, if any.
+fn meeting_project(state: &AppState, id: &str) -> Option<String> {
+    let library = state.library.lock().ok()?;
+    library.get_note(id).ok()??.0.project_id
+}
+
 /// Every project, for the project selector.
 #[tauri::command]
 pub(crate) fn list_projects(state: State<'_, AppState>) -> Result<Vec<Project>, String> {
@@ -823,6 +874,108 @@ pub(crate) fn create_project(state: State<'_, AppState>, name: String) -> Result
         .map_err(|e| {
             if e.to_string().contains("UNIQUE") {
                 format!("a project named \"{name}\" already exists")
+            } else {
+                e.to_string()
+            }
+        })
+}
+
+/// Renames a project (trimmed, unique).
+#[tauri::command]
+pub(crate) fn rename_project(
+    state: State<'_, AppState>,
+    id: String,
+    name: String,
+) -> Result<bool, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("a project needs a name".to_owned());
+    }
+    state
+        .library
+        .lock()
+        .map_err(|_| "library lock poisoned".to_owned())?
+        .rename_project(&id, name)
+        .map_err(|e| {
+            if e.to_string().contains("UNIQUE") {
+                format!("a project named \"{name}\" already exists")
+            } else {
+                e.to_string()
+            }
+        })
+}
+
+/// A project's instructions: what matters to the user there. Empty when none were written.
+#[tauri::command]
+pub(crate) fn get_project_instructions(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<String, String> {
+    state
+        .library
+        .lock()
+        .map_err(|_| "library lock poisoned".to_owned())?
+        .project_instructions(&id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "no such project".to_owned())
+}
+
+/// Replaces a project's instructions (trimmed; empty clears them). Used from the next meeting on.
+#[tauri::command]
+pub(crate) fn set_project_instructions(
+    state: State<'_, AppState>,
+    id: String,
+    instructions: String,
+) -> Result<bool, String> {
+    state
+        .library
+        .lock()
+        .map_err(|_| "library lock poisoned".to_owned())?
+        .set_project_instructions(&id, &instructions)
+        .map_err(|e| e.to_string())
+}
+
+/// Retitles a saved meeting. With `if_title`, only while its title is still that (for automatic
+/// titles, which must not replace one the user typed meanwhile).
+#[tauri::command]
+pub(crate) fn rename_note(
+    state: State<'_, AppState>,
+    id: String,
+    title: String,
+    if_title: Option<String>,
+) -> Result<bool, String> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err("a meeting needs a title".to_owned());
+    }
+    let library = state
+        .library
+        .lock()
+        .map_err(|_| "library lock poisoned".to_owned())?;
+    match if_title {
+        Some(expected) => library.rename_meeting_if(&id, title, &expected),
+        None => library.rename_meeting(&id, title),
+    }
+    .map_err(|e| e.to_string())
+}
+
+/// Files a saved meeting under `project_id`, or under no project when it's empty or absent. Project
+/// knowledge already learned from the meeting stays where it was learned.
+#[tauri::command]
+pub(crate) fn set_note_project(
+    state: State<'_, AppState>,
+    id: String,
+    project_id: Option<String>,
+) -> Result<bool, String> {
+    let project = project_id.as_deref().filter(|p| !p.is_empty());
+    state
+        .library
+        .lock()
+        .map_err(|_| "library lock poisoned".to_owned())?
+        .set_meeting_project(&id, project)
+        .map_err(|e| {
+            if e.to_string().contains("FOREIGN KEY") {
+                "that project no longer exists".to_owned()
             } else {
                 e.to_string()
             }
@@ -902,6 +1055,7 @@ pub(crate) async fn intel_learning_propose(
         };
         let (meeting, lines) = saved_meeting(&state, &id)?;
         let memory = project_memory(&state, Some(&project));
+        let about = about_you(&state, Some(&project));
         let followups = state
             .intel
             .review_project
@@ -909,7 +1063,7 @@ pub(crate) async fn intel_learning_propose(
             .map(|f| f.clone())
             .unwrap_or_default();
         propose_learning(
-            crate::reasoning::backend(&state).as_ref(),
+            crate::reasoning::backend_for(&state, Some(id.clone())).as_ref(),
             &CancelToken::new(),
             &LearningInput {
                 state: &meeting,
@@ -917,6 +1071,7 @@ pub(crate) async fn intel_learning_propose(
                 memory: &memory,
                 followups: &followups,
                 meeting_label: &note.title,
+                about: about.as_deref(),
                 timeout: std::time::Duration::from_secs(180),
             },
         )
@@ -1068,11 +1223,13 @@ fn export_source(
                 .and_then(|f| f.as_ref().map(|f| (f.state.clone(), f.log.clone())))
                 .ok_or("no meeting intelligence to export")?,
         };
+        let names = live_speaker_names(state);
         let lines = live_lines(
             &state
                 .live_segments
                 .lock()
                 .map_err(|_| "state lock poisoned".to_owned())?,
+            &names,
         );
         let project = state.intel.project.lock().ok().and_then(|p| p.clone());
         let memory = project_memory(state, project.as_deref());
@@ -1106,7 +1263,11 @@ fn export_source(
             .map_err(|e| e.to_string())?
             .ok_or("no such meeting")?;
         let log = stored_log(&library, id)?;
-        let lines = segments.iter().map(TranscriptLine::from_segment).collect();
+        let names = library.speaker_names(id).map_err(|e| e.to_string())?;
+        let lines = segments
+            .iter()
+            .map(|s| TranscriptLine::from_segment_named(s, &names))
+            .collect();
         let project = project_name(&library, note.project_id.as_deref());
         (note, log, lines, project)
     };
@@ -1312,7 +1473,7 @@ mod tests {
             seg(AudioSourceKind::System, 5500, "  "),
             seg(AudioSourceKind::Microphone, 3000, "Where do you host?"),
         ];
-        let lines = live_lines(&retained);
+        let lines = live_lines(&retained, &SpeakerNames::new());
         assert_eq!(lines.len(), 2);
         assert_eq!((lines[1].idx, lines[1].start_ms), (1, 3000));
         assert_eq!(lines[1].speaker, "You");
@@ -1321,12 +1482,19 @@ mod tests {
 
     #[test]
     fn speaker_labels_follow_the_source_and_diarization() {
+        let none = SpeakerNames::new();
         let mut s = seg(AudioSourceKind::Microphone, 0, "x");
-        assert_eq!(speaker_label(&s), "You");
+        assert_eq!(speaker_label(&s, &none), "You");
         s.source = AudioSourceKind::System;
-        assert_eq!(speaker_label(&s), "Them");
+        assert_eq!(speaker_label(&s, &none), "Them");
         s.speaker = Some(SpeakerId(1));
-        assert_eq!(speaker_label(&s), "Speaker 2");
+        assert_eq!(speaker_label(&s, &none), "Speaker 2");
+        let names: SpeakerNames = [(1, "Bob".to_owned())].into_iter().collect();
+        assert_eq!(speaker_label(&s, &names), "Bob");
+        // A diarized, named mic speaker (a shared room mic) reads as its name; unnamed stays "You".
+        s.source = AudioSourceKind::Microphone;
+        assert_eq!(speaker_label(&s, &names), "Bob");
+        assert_eq!(speaker_label(&s, &none), "You");
     }
 
     #[test]
@@ -1359,7 +1527,10 @@ mod tests {
             },
             state: MeetingState::replay(LIVE_MEETING_ID, &log).unwrap(),
             log,
-            lines: live_lines(&[seg(AudioSourceKind::System, 65_000, "It has to be Azure.")]),
+            lines: live_lines(
+                &[seg(AudioSourceKind::System, 65_000, "It has to be Azure.")],
+                &SpeakerNames::new(),
+            ),
             memory: vec![MemoryEntry {
                 id: 7,
                 project_id: "p".into(),
@@ -1430,6 +1601,7 @@ mod tests {
         filter.consider(
             wisp_intel::Candidate {
                 kind: wisp_intel::CandidateKind::Conflict,
+                headline: "Hosting unclear".into(),
                 title: "Hosting unclear".into(),
                 detail: String::new(),
                 suggested_question: None,

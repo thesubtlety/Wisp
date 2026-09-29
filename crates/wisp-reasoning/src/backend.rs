@@ -16,6 +16,10 @@ pub enum TaskKind {
     ProjectLearning,
     /// Describe a screenshot the user attached as context.
     ScreenshotContext,
+    /// A free-text assist task over a transcript (summary, action items, a custom prompt).
+    Assist,
+    /// A short title for a meeting.
+    Title,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,6 +82,16 @@ pub struct ReasoningResponse {
     pub raw: String,
     pub backend: String,
     pub elapsed: Duration,
+    /// Tokens the backend reported for the call; `None` when it reports none.
+    pub usage: Option<TokenUsage>,
+}
+
+/// Tokens one call used, as the backend reported them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenUsage {
+    /// Prompt tokens, cached ones included.
+    pub input: u64,
+    pub output: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -142,6 +156,10 @@ pub trait ReasoningBackend: Send + Sync {
     fn name(&self) -> &str;
     fn health(&self) -> Health;
     fn capabilities(&self) -> Capabilities;
+    /// The model asked for, when the backend names one; `None` means the backend's default.
+    fn model(&self) -> Option<&str> {
+        None
+    }
     fn invoke(
         &self,
         request: &ReasoningRequest,
@@ -156,7 +174,7 @@ pub fn render_prompt(req: &ReasoningRequest) -> String {
          No prose, no code fences.\n\n{}\n",
         req.instructions.trim(),
         req.context.trim(),
-        serde_json::to_string_pretty(&req.output_schema).unwrap_or_default()
+        serde_json::to_string_pretty(&crate::schema::for_model(&req.output_schema)).unwrap_or_default()
     )
 }
 
@@ -180,6 +198,7 @@ pub(crate) fn finish(
     raw: String,
     candidate: Option<serde_json::Value>,
     elapsed: Duration,
+    usage: Option<TokenUsage>,
 ) -> Result<ReasoningResponse, ReasoningError> {
     let output = candidate
         .or_else(|| crate::json::extract_json_object(&raw))
@@ -191,6 +210,7 @@ pub(crate) fn finish(
         raw,
         backend: backend.to_string(),
         elapsed,
+        usage,
     })
 }
 

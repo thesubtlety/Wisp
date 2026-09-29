@@ -54,14 +54,17 @@ export type CloudProvider = {
 
 // A `$state` object (not a bare primitive) so the proxy is shared across every importer and stays
 // reactive — and so `cloudState.endpointsOpen` is bindable from the Modal.
-export const cloudState = $state<{ providers: CloudProvider[]; endpointsOpen: boolean }>({
+export const cloudState = $state<{ providers: CloudProvider[]; endpointsOpen: boolean; loaded: boolean }>({
   providers: [],
   endpointsOpen: false,
+  // False until the first list arrives, so pickers don't mistake "not loaded" for "gone".
+  loaded: false,
 });
 
 /** Reload the provider catalog and key-status flags from the backend. */
 export async function refreshCloud(): Promise<void> {
   cloudState.providers = await invoke<CloudProvider[]>("list_cloud_providers");
+  cloudState.loaded = true;
 }
 
 /** Save (non-empty `key`) or clear (empty `key`) a provider's API key on this device, then refresh. */
@@ -222,6 +225,26 @@ export function saveParamValues(
 }
 
 /** The provider with `id`, if present in the catalog. */
+/** The assist provider that runs on Settings › Reasoning (Codex / Claude Code / the local model). */
+export const SUBSCRIPTION_PROVIDER = "subscription";
+
+/** Whether `url`'s host is this machine (mirrors `wisp_reasoning::is_loopback`). */
+export function isLoopbackUrl(url: string): boolean {
+  let host: string;
+  try {
+    host = new URL(url).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  return host === "localhost" || host === "[::1]" || host === "::1" || /^127(\.\d{1,3}){3}$/.test(host);
+}
+
+/** Whether the assist needs a key saved for `p` first: not for the subscription, nor for an
+ *  endpoint on this machine (Ollama, LM Studio). */
+export function assistNeedsKey(p: CloudProvider): boolean {
+  return !p.keySet && p.id !== SUBSCRIPTION_PROVIDER && !isLoopbackUrl(p.baseUrl);
+}
+
 export function cloudProvider(id: string): CloudProvider | undefined {
   return cloudState.providers.find((p) => p.id === id);
 }

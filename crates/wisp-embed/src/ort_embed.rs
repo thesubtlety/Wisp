@@ -281,9 +281,21 @@ fn position_ids_from_mask(mask: &Array2<i64>) -> Array2<i64> {
     pos
 }
 
+/// Qwen3-Embedding scores unrelated text up to ~0.47 and direct matches at ~0.58–0.68 (measured
+/// with qwen3-0.6b on meeting transcripts), so 0.5 separates them. Other models keep a zero floor
+/// until measured.
+const LAST_TOKEN_MIN_SCORE: f32 = 0.5;
+
 impl Embedder for OrtEmbedder {
     fn dim(&self) -> usize {
         self.dim
+    }
+
+    fn min_score(&self) -> f32 {
+        match self.pooling {
+            Pooling::LastToken => LAST_TOKEN_MIN_SCORE,
+            _ => 0.0,
+        }
     }
 
     fn embed_passages(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {

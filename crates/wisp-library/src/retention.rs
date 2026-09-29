@@ -211,6 +211,59 @@ impl Library {
         Ok(rows)
     }
 
+    /// Renames a project (trimmed). Names stay unique, so a taken name is an error. Returns whether
+    /// the project exists.
+    pub fn rename_project(&self, project_id: &str, name: &str) -> Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE project SET name = ?2 WHERE id = ?1",
+            rusqlite::params![project_id, name.trim()],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// A project's instructions: what matters to the user there. `None` when the project doesn't
+    /// exist; empty when none were written.
+    pub fn project_instructions(&self, project_id: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT instructions FROM project WHERE id = ?1",
+                [project_id],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Replaces a project's instructions (trimmed; empty clears them). Returns whether the project
+    /// exists.
+    pub fn set_project_instructions(&self, project_id: &str, text: &str) -> Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE project SET instructions = ?2 WHERE id = ?1",
+            rusqlite::params![project_id, text.trim()],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Retitles a meeting (trimmed). Search reads titles from the meeting row, so hits follow.
+    /// Returns whether the meeting exists.
+    pub fn rename_meeting(&self, meeting_id: &str, title: &str) -> Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE meeting SET title = ?2 WHERE id = ?1",
+            rusqlite::params![meeting_id, title.trim()],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Retitles a meeting only if its title is still `expected`, so a late automatic title never
+    /// replaces one the user just typed. Returns whether it changed.
+    pub fn rename_meeting_if(&self, meeting_id: &str, title: &str, expected: &str) -> Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE meeting SET title = ?2 WHERE id = ?1 AND title = ?3",
+            rusqlite::params![meeting_id, title.trim(), expected],
+        )?;
+        Ok(n > 0)
+    }
+
     /// Moves a meeting into `project_id`, or out of any project with `None`. Returns whether the
     /// meeting exists.
     pub fn set_meeting_project(&self, meeting_id: &str, project_id: Option<&str>) -> Result<bool> {
@@ -415,7 +468,7 @@ impl Library {
             [project_id],
             |r| r.get::<_, i64>(0),
         )?;
-        for table in ["state_op", "candidate_log"] {
+        for table in ["state_op", "candidate_log", "llm_call"] {
             tx.execute(
                 &format!(
                     "DELETE FROM {table} WHERE meeting_id IN (SELECT id FROM meeting WHERE project_id = ?1)"
@@ -466,6 +519,9 @@ impl Library {
             tx.execute("DELETE FROM segment WHERE meeting_id = ?1", [id])?;
             tx.execute("DELETE FROM chunk WHERE meeting_id = ?1", [id])?;
             tx.execute("DELETE FROM candidate_log WHERE meeting_id = ?1", [id])?;
+            tx.execute("DELETE FROM llm_call WHERE meeting_id = ?1", [id])?;
+            // People's names go with the transcript that labelled them.
+            tx.execute("DELETE FROM speaker_name WHERE meeting_id = ?1", [id])?;
             tx.execute(
                 "UPDATE meeting SET transcript_pruned_at_ms = ?2, segment_count = 0 WHERE id = ?1",
                 rusqlite::params![id, now_ms],
@@ -474,6 +530,20 @@ impl Library {
         let sources = tx.execute(
             "DELETE FROM source WHERE expires_at_ms IS NOT NULL AND expires_at_ms <= ?1",
             [now_ms],
+        )?;
+        // Calls for a meeting whose transcript is gone (logged after it expired), and calls with
+        // no saved meeting, which expire by their own time.
+        tx.execute(
+            "DELETE FROM llm_call
+             WHERE meeting_id IN (SELECT id FROM meeting WHERE transcript_pruned_at_ms IS NOT NULL)
+                OR (?2 IS NOT NULL AND at_ms + ?2 <= ?1
+                    AND (meeting_id IS NULL OR meeting_id NOT IN (SELECT id FROM meeting)))",
+            rusqlite::params![
+                now_ms,
+                self.retention
+                    .transcript_days
+                    .map(|d| i64::from(d) * DAY_MS)
+            ],
         )?;
         tx.commit()?;
 
@@ -618,6 +688,85 @@ mod tests {
     }
 
     #[test]
+    fn a_meeting_can_be_retitled_and_moved_between_projects() {
+        let lib = library_with_meeting();
+        lib.create_project("p1", "Acme", T0).unwrap();
+        lib.create_project("p2", "Globex", T0).unwrap();
+
+        // An automatic rename only lands while the title is still the one it expects.
+        assert!(!lib
+            .rename_meeting_if("m1", "Auto", "Something else")
+            .unwrap());
+        assert!(lib.rename_meeting_if("m1", "Auto", "Acme scoping").unwrap());
+        assert!(lib.rename_meeting("m1", "  Acme hosting call ").unwrap());
+        assert!(!lib.rename_meeting("nope", "x").unwrap());
+        let (note, _) = lib.get_note("m1").unwrap().unwrap();
+        assert_eq!(note.title, "Acme hosting call");
+        // Search hits carry the new title.
+        let hits = lib.search("azure", 10).unwrap();
+        assert_eq!(hits[0].title, "Acme hosting call");
+
+        assert!(lib.set_meeting_project("m1", Some("p1")).unwrap());
+        assert!(lib.set_meeting_project("m1", Some("p2")).unwrap());
+        assert_eq!(
+            lib.get_note("m1").unwrap().unwrap().0.project_id.as_deref(),
+            Some("p2")
+        );
+        assert!(lib.set_meeting_project("m1", None).unwrap());
+        assert_eq!(lib.get_note("m1").unwrap().unwrap().0.project_id, None);
+
+        // A project that doesn't exist (say, deleted meanwhile) is refused, and the meeting stays put.
+        assert!(lib.set_meeting_project("m1", Some("gone")).is_err());
+        assert_eq!(lib.get_note("m1").unwrap().unwrap().0.project_id, None);
+    }
+
+    #[test]
+    fn a_project_can_be_renamed_but_names_stay_unique() {
+        let lib = Library::open_in_memory().unwrap();
+        lib.create_project("p1", "Acme", T0).unwrap();
+        lib.create_project("p2", "Globex", T0).unwrap();
+
+        assert!(lib.rename_project("p1", " Acme Corp ").unwrap());
+        assert!(!lib.rename_project("nope", "x").unwrap());
+        let names: Vec<String> = lib
+            .list_projects()
+            .unwrap()
+            .into_iter()
+            .map(|p| p.name)
+            .collect();
+        assert_eq!(names, ["Acme Corp", "Globex"]);
+
+        let taken = lib.rename_project("p2", "Acme Corp").unwrap_err();
+        assert!(taken.to_string().contains("UNIQUE"), "{taken}");
+    }
+
+    #[test]
+    fn a_project_keeps_its_instructions() {
+        let lib = Library::open_in_memory().unwrap();
+        lib.create_project("p1", "Acme", T0).unwrap();
+        assert_eq!(lib.project_instructions("p1").unwrap().as_deref(), Some(""));
+        assert_eq!(lib.project_instructions("nope").unwrap(), None);
+
+        assert!(lib
+            .set_project_instructions("p1", "  I own the migration. Ignore billing.\n")
+            .unwrap());
+        assert_eq!(
+            lib.project_instructions("p1").unwrap().as_deref(),
+            Some("I own the migration. Ignore billing.")
+        );
+        assert!(!lib.set_project_instructions("nope", "x").unwrap());
+        // A rename keeps them.
+        assert!(lib.rename_project("p1", "Acme Corp").unwrap());
+        assert_eq!(
+            lib.project_instructions("p1").unwrap().as_deref(),
+            Some("I own the migration. Ignore billing.")
+        );
+        // Empty clears them.
+        assert!(lib.set_project_instructions("p1", "  ").unwrap());
+        assert_eq!(lib.project_instructions("p1").unwrap().as_deref(), Some(""));
+    }
+
+    #[test]
     fn default_policy_is_ninety_and_thirty_days() {
         let p = RetentionPolicy::default();
         assert_eq!(p.transcript_expiry(T0), Some(T0 + 90 * DAY_MS));
@@ -687,6 +836,45 @@ mod tests {
             lib.prune(expiry + DAY_MS, root.path()).unwrap(),
             PruneReport::default()
         );
+    }
+
+    #[test]
+    fn ai_activity_goes_with_its_transcript_or_by_its_own_time() {
+        use crate::llm_log::tests::call;
+        let mut lib = library_with_meeting();
+        let root = tempfile::tempdir().unwrap();
+        let expiry = T0 + 90 * DAY_MS;
+        // Made for m1 late in its life: still goes with m1's transcript.
+        lib.insert_llm_call(&call(expiry - DAY_MS, Some("m1")))
+            .unwrap();
+        // No meeting, or one never saved: expire by their own time.
+        lib.insert_llm_call(&call(T0, None)).unwrap();
+        lib.insert_llm_call(&call(T0 + DAY_MS, Some("unsaved")))
+            .unwrap();
+        lib.insert_llm_call(&call(T0 + 60 * DAY_MS, None)).unwrap();
+        let left = |lib: &Library| {
+            lib.llm_calls(None, 10)
+                .unwrap()
+                .iter()
+                .map(|c| c.at_ms)
+                .collect::<Vec<_>>()
+        };
+
+        lib.prune(expiry - DAY_MS, root.path()).unwrap();
+        assert_eq!(left(&lib).len(), 4, "nothing due yet");
+        lib.prune(expiry, root.path()).unwrap();
+        assert_eq!(left(&lib), [T0 + 60 * DAY_MS, T0 + DAY_MS]);
+        lib.prune(T0 + 150 * DAY_MS, root.path()).unwrap();
+        assert!(left(&lib).is_empty());
+
+        // Keeping transcripts forever keeps the log too.
+        lib.set_retention(RetentionPolicy {
+            transcript_days: None,
+            ..RetentionPolicy::default()
+        });
+        lib.insert_llm_call(&call(T0, None)).unwrap();
+        lib.prune(T0 + 1000 * DAY_MS, root.path()).unwrap();
+        assert_eq!(left(&lib).len(), 1);
     }
 
     #[test]
@@ -912,6 +1100,7 @@ mod tests {
             ("chunk", q("SELECT count(*) FROM chunk WHERE meeting_id = ?1", meeting)),
             ("state_op", q("SELECT count(*) FROM state_op WHERE meeting_id = ?1", meeting)),
             ("candidate_log", q("SELECT count(*) FROM candidate_log WHERE meeting_id = ?1", meeting)),
+            ("llm_call", q("SELECT count(*) FROM llm_call WHERE meeting_id = ?1", meeting)),
             ("source", q("SELECT count(*) FROM source WHERE project_id = ?1", project)),
             ("source_chunk", q("SELECT count(*) FROM source_chunk c JOIN source s ON s.id = c.source_id WHERE s.project_id = ?1", project)),
             ("project_memory", q("SELECT count(*) FROM project_memory WHERE project_id = ?1", project)),
@@ -940,6 +1129,8 @@ mod tests {
             }],
         )
         .unwrap();
+        lib.insert_llm_call(&crate::llm_log::tests::call(T0, Some("m1")))
+            .unwrap();
         lib.add_memory(
             "p",
             &crate::MemoryInput {
@@ -1016,7 +1207,14 @@ mod tests {
         full_project(&mut lib, root.path());
         assert!(lib.delete_note("m1").unwrap());
         let fp = footprint(&lib, "m1", "p");
-        for table in ["meeting", "segment", "chunk", "state_op", "candidate_log"] {
+        for table in [
+            "meeting",
+            "segment",
+            "chunk",
+            "state_op",
+            "candidate_log",
+            "llm_call",
+        ] {
             assert_eq!(
                 fp.iter().find(|(t, _)| *t == table).unwrap().1,
                 0,

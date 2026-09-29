@@ -53,9 +53,9 @@ pub struct TriggerPolicy {
 impl Default for TriggerPolicy {
     fn default() -> Self {
         Self {
-            min_new_chars: 400,
+            min_new_chars: 1_200,
             min_interval: Duration::from_secs(20),
-            max_wait: Duration::from_secs(60),
+            max_wait: Duration::from_secs(90),
         }
     }
 }
@@ -125,7 +125,8 @@ pub enum IntelUpdate {
 #[derive(Debug, Clone)]
 pub struct RuntimeConfig {
     pub policy: TriggerPolicy,
-    /// What the user wants from this meeting.
+    /// What matters to the user here: "About me" and the project's instructions (see
+    /// [`crate::about_you`]). Given to every pass and the audit.
     pub focus: Option<String>,
     /// Longest a single pass may take.
     pub timeout: Duration,
@@ -175,6 +176,8 @@ enum Msg {
     Pin(Snippet),
     Unpin(String),
     Stop,
+    /// Analyze whatever is still pending, then stop.
+    Finish,
 }
 
 /// A running intelligence worker for one meeting.
@@ -324,6 +327,27 @@ impl IntelRuntime {
         })
     }
 
+    /// Runs one last pass over lines not yet analyzed, then stops, like [`Self::stop`]. The pass is
+    /// cancelled if it takes longer than `limit`, so stopping never hangs on a slow backend.
+    pub fn finish(mut self, limit: Duration) -> Finished {
+        let cancel = self.cancel.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            if done_rx.recv_timeout(limit).is_err() {
+                cancel.cancel();
+            }
+        });
+        let _ = self.tx.send(Msg::Finish);
+        let finished = self.worker.take().and_then(|w| w.join().ok());
+        let _ = done_tx.send(());
+        finished.unwrap_or_else(|| Finished {
+            state: MeetingState::new(LIVE_MEETING_ID),
+            log: Vec::new(),
+            lines: 0,
+            candidate_log: Vec::new(),
+        })
+    }
+
     fn shutdown(&mut self) -> Option<Finished> {
         self.cancel.cancel();
         let _ = self.tx.send(Msg::Stop);
@@ -375,6 +399,7 @@ impl Worker {
                 Err(RecvTimeoutError::Disconnected) => break,
             };
             let mut stop = false;
+            let mut finish = false;
             for msg in first.into_iter().chain(rx.try_iter()) {
                 match msg {
                     Msg::Final {
@@ -402,9 +427,17 @@ impl Worker {
                     }
                     Msg::Unpin(ref_id) => self.pinned.retain(|p| p.ref_id != ref_id),
                     Msg::Stop => stop = true,
+                    Msg::Finish => finish = true,
                 }
             }
             if stop || self.cancel.is_cancelled() {
+                break;
+            }
+            if finish {
+                // The end of a meeting is where commitments get made; don't leave it unread.
+                if self.pending_chars() > 0 {
+                    self.pass();
+                }
                 break;
             }
             if wrap_up {
@@ -730,15 +763,15 @@ mod tests {
         let p = TriggerPolicy::default();
         let s = Duration::from_secs;
         assert!(!p.should_run(0, None, s(999)), "nothing new");
-        assert!(!p.should_run(100, None, s(5)), "too little, too soon");
-        assert!(p.should_run(400, None, s(0)), "enough text, first pass");
+        assert!(!p.should_run(1_199, None, s(89)), "too little, too soon");
+        assert!(p.should_run(1_200, None, s(0)), "enough text, first pass");
         assert!(
             !p.should_run(5000, Some(s(10)), s(30)),
             "inside the interval"
         );
         assert!(p.should_run(5000, Some(s(20)), s(0)), "interval passed");
         assert!(
-            p.should_run(10, Some(s(30)), s(60)),
+            p.should_run(10, Some(s(30)), s(90)),
             "small but waited long enough"
         );
     }
@@ -912,6 +945,50 @@ mod tests {
     }
 
     #[test]
+    fn finish_analyzes_the_lines_the_cadence_had_not_reached() {
+        let backend = Arc::new(ScriptedBackend::with_responder("scripted", |_| {
+            Ok(json!({"ops": [], "candidates": []}))
+        }));
+        let (_seen, on_update) = collect();
+        // Default cadence: one short line never triggers a pass on its own.
+        let rt = IntelRuntime::spawn(
+            backend.clone(),
+            Box::new(NoRetrieval),
+            RuntimeConfig::default(),
+            on_update,
+            Box::new(|| 0),
+        );
+        rt.push_final("Them", 0, "I'll send the dataset Friday.");
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(backend.request_count(), 0);
+        let done = rt.finish(Duration::from_secs(5));
+        assert_eq!(backend.request_count(), 1, "one last pass");
+        assert_eq!(done.state.analyzed_through, Some(0));
+    }
+
+    #[test]
+    fn finish_gives_up_on_a_slow_backend() {
+        let backend = Arc::new(ScriptedBackend::with_responder("hung", |_| {
+            std::thread::sleep(Duration::from_secs(3));
+            Err(ReasoningError::Cancelled)
+        }));
+        let (_seen, on_update) = collect();
+        let rt = IntelRuntime::spawn(
+            backend,
+            Box::new(NoRetrieval),
+            RuntimeConfig::default(),
+            on_update,
+            Box::new(|| 0),
+        );
+        rt.push_final("Them", 0, "Words.");
+        std::thread::sleep(Duration::from_millis(50));
+        let started = Instant::now();
+        let done = rt.finish(Duration::from_millis(100));
+        assert_eq!(done.lines, 1);
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
     fn pushing_never_waits_for_a_slow_pass() {
         let backend = Arc::new(ScriptedBackend::with_responder("slow", |_| {
             std::thread::sleep(Duration::from_millis(400));
@@ -1040,7 +1117,7 @@ mod tests {
     #[test]
     fn candidates_pass_the_filter_into_cards_and_dismissals_reach_the_log() {
         let strong = |title: &str| {
-            json!({"kind": "missing_owner", "title": title, "detail": "", "suggested_question": null,
+            json!({"kind": "missing_owner", "headline": "", "title": title, "detail": "", "suggested_question": null,
                    "source_refs": ["T0"], "related_items": [], "importance": 0.9, "urgency": 0.9,
                    "confidence": 0.9, "future_work_risk": 0.9})
         };
@@ -1079,7 +1156,7 @@ mod tests {
         let backend = Arc::new(ScriptedBackend::with_responder("scripted", |req| {
             Ok(match req.task {
                 wisp_reasoning::TaskKind::EndgameAudit => json!({"gaps": [
-                    {"category": "missing", "text": "Nobody owns deployment.", "source_refs": [], "related_items": []}
+                    {"category": "missing", "headline": "", "text": "Nobody owns deployment.", "source_refs": [], "related_items": []}
                 ]}),
                 _ => json!({"ops": [], "candidates": []}),
             })

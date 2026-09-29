@@ -24,6 +24,11 @@ const STREAMING_ZIPFORMER_BASE: &str =
 const PARAFORMER_ZH_BASE: &str =
     "https://huggingface.co/csukuangfj/sherpa-onnx-paraformer-zh-2024-03-09/resolve/906992d326ebf0c5171cde675aa0902be9e5bc6c";
 
+/// Hugging Face repo hosting the sherpa-onnx NVIDIA NeMo Parakeet TDT v3 (offline, 25 European
+/// languages) export (no auth).
+const PARAKEET_V3_BASE: &str =
+    "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/resolve/2bda32ec70b097a55adaa07d9a7173915b43cc78";
+
 /// Hugging Face repo hosting the sherpa-onnx NVIDIA NeMo Parakeet TDT (offline, English) export (no auth).
 const PARAKEET_BASE: &str =
     "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8/resolve/1ab9323565ddb038682214b292f588070a538ce2";
@@ -47,6 +52,7 @@ const GTCRN_BASE: &str =
 /// All models Wisp offers in the picker.
 pub fn builtin_catalog() -> Vec<ModelDescriptor> {
     vec![
+        parakeet_v3(),
         whisper_turbo_q8(),
         whisper_turbo_q5(),
         whisper_turbo_full(),
@@ -93,6 +99,58 @@ fn paraformer_zh() -> ModelDescriptor {
             "FunASR Paraformer (Chinese + English) via sherpa-onnx — a non-autoregressive recognizer \
              that runs fast on the CPU and emits timestamps. Often stronger on Mandarin than \
              SenseVoice. Offline (not for live captions). int8 (~0.22 GB)."
+                .to_owned(),
+    }
+}
+
+/// NVIDIA NeMo Parakeet TDT v3 (offline, 25 European languages) via sherpa-onnx — v2's accuracy on
+/// English plus automatic language detection. Same transducer layout as v2. int8 (~0.67 GB).
+fn parakeet_v3() -> ModelDescriptor {
+    ModelDescriptor {
+        id: ModelId("parakeet-v3".to_owned()),
+        family: ModelFamily::Parakeet,
+        quant: Quant::Q8,
+        display_name: "Parakeet v3 · 25 languages · int8 (accurate)".to_owned(),
+        files: vec![
+            ModelFile {
+                name: "encoder.int8.onnx".to_owned(),
+                url: format!("{PARAKEET_V3_BASE}/encoder.int8.onnx"),
+                sha256: "acfc2b4456377e15d04f0243af540b7fe7c992f8d898d751cf134c3a55fd2247"
+                    .to_owned(),
+                size_bytes: 652_184_281,
+            },
+            ModelFile {
+                name: "decoder.int8.onnx".to_owned(),
+                url: format!("{PARAKEET_V3_BASE}/decoder.int8.onnx"),
+                sha256: "179e50c43d1a9de79c8a24149a2f9bac6eb5981823f2a2ed88d655b24248db4e"
+                    .to_owned(),
+                size_bytes: 11_845_275,
+            },
+            ModelFile {
+                name: "joiner.int8.onnx".to_owned(),
+                url: format!("{PARAKEET_V3_BASE}/joiner.int8.onnx"),
+                sha256: "3164c13fc2821009440d20fcb5fdc78bff28b4db2f8d0f0b329101719c0948b3"
+                    .to_owned(),
+                size_bytes: 6_355_277,
+            },
+            ModelFile {
+                name: "tokens.txt".to_owned(),
+                url: format!("{PARAKEET_V3_BASE}/tokens.txt"),
+                sha256: "d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d"
+                    .to_owned(),
+                size_bytes: 93_939,
+            },
+        ],
+        languages: [
+            "bg", "hr", "cs", "da", "nl", "en", "et", "fi", "fr", "de", "el", "hu", "it", "lv",
+            "lt", "mt", "pl", "pt", "ro", "sk", "sl", "es", "sv", "ru", "uk",
+        ]
+        .map(str::to_owned)
+        .to_vec(),
+        description:
+            "NVIDIA NeMo Parakeet TDT 0.6B v3 via sherpa-onnx — top open accuracy on English plus \
+             24 more European languages, detected automatically. Runs on the CPU. The recommended \
+             default. int8 (~0.67 GB)."
                 .to_owned(),
     }
 }
@@ -292,8 +350,8 @@ fn whisper_turbo_q8() -> ModelDescriptor {
         languages: whisper_languages(),
         description:
             "Whisper large-v3-turbo on the GPU (Metal) at q8 precision — real Cantonese (yue) + \
-             ~99 languages, very accurate yet fast because it runs on the GPU. The recommended \
-             default. ~0.85 GB."
+             ~99 languages, very accurate yet fast because it runs on the GPU. The pick for \
+             languages Parakeet v3 doesn't cover. ~0.85 GB."
                 .to_owned(),
     }
 }
@@ -663,7 +721,7 @@ mod tests {
     #[test]
     fn catalog_has_distinct_ids_and_files() {
         let catalog = builtin_catalog();
-        assert_eq!(catalog.len(), 16);
+        assert_eq!(catalog.len(), 17);
 
         let ids: std::collections::HashSet<_> = catalog.iter().map(|d| &d.id).collect();
         assert_eq!(ids.len(), catalog.len(), "model ids must be distinct");
@@ -694,14 +752,11 @@ mod tests {
     }
 
     #[test]
-    fn default_model_is_the_accuracy_first_turbo_q8() {
-        // New installs default to the first catalog entry. Pin it: turbo-q8 is the accuracy-first
-        // pick that's still real-time on the GPU (large-v3 is more accurate but too slow to default
-        // for live). A reorder should be a conscious, reviewed change.
-        assert_eq!(
-            builtin_catalog()[0].id,
-            ModelId("whisper-large-v3-turbo-q8".to_owned())
-        );
+    fn default_model_is_parakeet_v3() {
+        // New installs default to the first catalog entry. Pin it: Parakeet v3 is the most accurate
+        // open model for English and covers 24 more European languages. A reorder should be a
+        // conscious, reviewed change.
+        assert_eq!(builtin_catalog()[0].id, ModelId("parakeet-v3".to_owned()));
     }
 
     #[test]

@@ -14,6 +14,9 @@
     changedParamValues,
     loadParamValues,
     saveParamValues,
+    assistNeedsKey,
+    SUBSCRIPTION_PROVIDER,
+    type CloudProvider,
     type ParamSpec,
     type ParamValue,
   } from "$lib/cloud.svelte";
@@ -96,25 +99,44 @@
 
   // Providers that can host the assist, each with its assist models (catalog chat/realtime, or a
   // custom endpoint's own model).
+  // The subscription comes first: it needs no key and follows Settings › Reasoning.
+  const subscription = $derived<CloudProvider>({
+    id: SUBSCRIPTION_PROVIDER,
+    name: i18n.t.assist.subscriptionName,
+    keySet: true,
+    keyHint: null,
+    keysUrl: "",
+    custom: false,
+    baseUrl: "",
+    protocol: "",
+    assist: {} as CloudProvider["assist"],
+    models: [],
+  });
+  const allProviders = $derived([subscription, ...cloudState.providers]);
   const providerAssist = $derived(
-    cloudState.providers
+    allProviders
       .map((p) => ({
         provider: p,
         models:
-          ASSIST_CATALOG[p.id] ??
+          p.id === SUBSCRIPTION_PROVIDER
+            ? [{ id: "auto", label: i18n.t.assist.subscriptionModel, kind: "chat" as const }]
+            : ASSIST_CATALOG[p.id] ??
           (p.custom
             ? p.models.map((m) => ({ id: m.id, label: m.name, kind: "chat" as const }))
             : []),
       }))
       .filter((g) => g.models.length > 0),
   );
-  const provider = $derived(cloudState.providers.find((p) => p.id === providerId));
+  const provider = $derived(allProviders.find((p) => p.id === providerId));
   const assistModels = $derived(providerAssist.find((g) => g.provider.id === providerId)?.models ?? []);
   const model = $derived(assistModels.find((m) => m.id === modelId));
   const selectedKind = $derived(model?.kind ?? "chat");
 
-  // Default to a sensible pick (prefer a custom endpoint), keep the model valid, persist.
+  // Default to a sensible pick (prefer a custom endpoint), keep the model valid, persist. Waits for
+  // the provider list: until then a saved pick only looks missing, and replacing it would send the
+  // next task somewhere the user didn't choose.
   $effect(() => {
+    if (!cloudState.loaded) return;
     if (!provider || !assistModels.length) {
       const fb = providerAssist.find((g) => g.provider.custom) ?? providerAssist[0];
       if (fb) {
@@ -299,7 +321,7 @@ in the meeting's language, no preamble.";
     const p = providerId,
       m = modelId,
       kind = selectedKind;
-    if (!p || !m) {
+    if (!p || !m || p === SUBSCRIPTION_PROVIDER) {
       assistParamSpecs = [];
       assistParamValues = {};
       return;
@@ -362,6 +384,7 @@ open questions, and drops small talk. Keep it tight and factual — only what wa
 in the meeting's language. Output only the summary.";
 
   const collapsed = $derived(live && liveOn);
+  const isSubscription = $derived(providerId === SUBSCRIPTION_PROVIDER);
   // A realtime model listens to live audio, so it only works inside a running Live session (never in
   // File mode, whose transcript is static). Otherwise Start is disabled and a hint explains — a chat
   // model still runs over the transcript anywhere.
@@ -409,7 +432,7 @@ in the meeting's language. Output only the summary.";
   // when busy or unconfigured. On error, closes any half-streamed entry so it doesn't dangle.
   async function call(text: string) {
     if (!provider || !model || running) return;
-    if (!provider.keySet) {
+    if (assistNeedsKey(provider)) {
       error = `Add an API key for ${provider.name} first.`;
       liveOn = false;
       return;
@@ -460,7 +483,7 @@ in the meeting's language. Output only the summary.";
   // `running` busy flag for the whole pass so the timer can't re-enter it mid-flight.
   async function rollOnce() {
     if (!provider || !model || running || !prompt.trim()) return;
-    if (!provider.keySet) {
+    if (assistNeedsKey(provider)) {
       error = `Add an API key for ${provider.name} first.`;
       liveOn = false;
       return;
@@ -506,7 +529,7 @@ in the meeting's language. Output only the summary.";
   // during a live session (option A), or runs a single pass over a finished transcript. While Start is
   // establishing the first response it shows "Connecting…"; only on success does it switch to Stop.
   async function start() {
-    if (connecting || running || !provider?.keySet || !model || !prompt.trim()) return;
+    if (connecting || running || (!provider || assistNeedsKey(provider)) || !model || !prompt.trim()) return;
     error = "";
     // A real-time model opens the official WebSocket and listens to the live audio (option B); a chat
     // model rolls by polling the transcript (option A). One button, dispatched by the model's kind.
@@ -514,8 +537,10 @@ in the meeting's language. Output only the summary.";
       await startRealtime();
       return;
     }
-    if (!sessionRunning) {
-      await call(transcript); // static transcript → a single pass (the feed shows Working…)
+    // A static transcript, or the subscription (each pass is a slow CLI call on the user's plan), runs
+    // a single pass; pressing the button again refreshes it.
+    if (!sessionRunning || isSubscription) {
+      await call(transcript); // the feed shows Working…
       return;
     }
     const myToken = ++startToken;
@@ -718,7 +743,7 @@ in the meeting's language. Output only the summary.";
                   onclick={() => (mpProvider = g.provider.id)}
                 >
                   <span class="mp-cat-name">{g.provider.name}</span>
-                  {#if !g.provider.keySet}<span class="mp-cat-dot" title={i18n.t.assist.apiKeyNeeded}></span>{/if}
+                  {#if assistNeedsKey(g.provider)}<span class="mp-cat-dot" title={i18n.t.assist.apiKeyNeeded}></span>{/if}
                 </button>
               {/each}
             </div>
@@ -746,6 +771,7 @@ in the meeting's language. Output only the summary.";
 
     {#if collapsed}
       <div class="ctl-right">
+        {#if selectedKind !== "realtime"}<span class="rolling-note">{i18n.t.assist.rollingEvery(INTERVAL / 1000)}</span>{/if}
         <button class="hint" onclick={runNow} disabled={running} title={i18n.t.assist.hintNow}>✨ {i18n.t.assist.hint}</button>
         <button class="stop" onclick={stopAssist}>◼ {i18n.t.assist.stop}</button>
         <button class="clear" onclick={clearFeed} disabled={!feed.length}>{i18n.t.common.clear}</button>
@@ -758,7 +784,7 @@ in the meeting's language. Output only the summary.";
        instead, so its newest-at-bottom auto-scroll still works. -->
   <div class="body" class:scroll={!collapsed}>
     {#if !collapsed}
-    {#if provider && !provider.keySet}
+    {#if provider && assistNeedsKey(provider)}
       <button class="keyrow" onclick={openEndpointsModal}>{i18n.t.assist.needsKey(provider.name)}</button>
     {/if}
 
@@ -809,10 +835,10 @@ in the meeting's language. Output only the summary.";
     <div class="actions">
       <button
         class="run"
-        disabled={connecting || running || !provider?.keySet || !model || !prompt.trim() || realtimeNeedsSession}
+        disabled={connecting || running || (!provider || assistNeedsKey(provider)) || !model || !prompt.trim() || realtimeNeedsSession}
         onclick={start}
       >
-        {#if connecting || running}<span class="btn-spin"></span>{connecting ? i18n.t.assist.connecting : i18n.t.assist.working}{:else}{selectedKind === "realtime" ? `⚡ ${i18n.t.assist.start}` : `▸ ${i18n.t.assist.start}`}{/if}
+        {#if connecting || running}<span class="btn-spin"></span>{connecting ? i18n.t.assist.connecting : i18n.t.assist.working}{:else if isSubscription && feed.length}↻ {i18n.t.assist.refresh}{:else}{selectedKind === "realtime" ? `⚡ ${i18n.t.assist.start}` : `▸ ${i18n.t.assist.start}`}{/if}
       </button>
       {#if connecting || running}
         <button class="stop" onclick={cancelStart} title={i18n.t.assist.stop}>◼ {i18n.t.assist.stop}</button>
@@ -855,6 +881,11 @@ in the meeting's language. Output only the summary.";
 {/if}
 
 <style>
+  .rolling-note {
+    font-size: 11px;
+    opacity: 0.65;
+    white-space: nowrap;
+  }
   .empty {
     display: flex;
     gap: 12px;

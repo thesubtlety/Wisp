@@ -10,7 +10,6 @@
   import Modal from "$lib/Modal.svelte";
   import ParamsPanel from "$lib/ParamsPanel.svelte";
   import AiNotes from "$lib/AiNotes.svelte";
-  import AssistLauncher from "$lib/AssistLauncher.svelte";
   import AssistPanel, { savedAssistWidth } from "$lib/AssistPanel.svelte";
   import IntelPanel from "$lib/IntelPanel.svelte";
   import {
@@ -467,8 +466,14 @@
       devices = await invoke<string[]>("list_input_devices");
       systemAudioId = await invoke<string>("system_audio_id");
       micOffId = await invoke<string>("mic_off_id");
-      // Default: capture system audio too, so one click grabs everything (you + all audio).
-      if (!systemDevice) systemDevice = systemAudioId;
+      // Default: capture system audio too, so one click grabs everything (you + all audio). A saved
+      // choice (including "off") wins.
+      if (!systemDevice && !systemDeviceSaved) systemDevice = systemAudioId;
+      // A remembered device that is gone (unplugged, renamed) falls back to the default.
+      if (micDevice && micDevice !== micOffId && !devices.includes(micDevice)) micDevice = "";
+      if (systemDevice && systemDevice !== systemAudioId && !devices.includes(systemDevice)) {
+        systemDevice = systemAudioId;
+      }
     } catch (e) {
       error = String(e);
     }
@@ -781,6 +786,40 @@
   let intelEnabled = $state(localStorage.getItem("wisp.intel") === "true");
   // The intelligence panel shares the assist panel's slot; opening one closes the other.
   let liveIntelOpen = $state(false);
+  // An optional title for the live meeting; empty saves it under the date.
+  let meetingTitle = $state("");
+  // The local model suggests a title ~3 minutes in and again after save, but only while the user
+  // hasn't typed one. `titleIsSuggestion` marks the field as holding the model's words.
+  let titleIsSuggestion = $state(false);
+  let titleTimer: ReturnType<typeof setTimeout> | undefined;
+  const TITLE_FIRST_MS = 180_000;
+  const TITLE_MIN_CHARS = 200;
+
+  // Why the last suggestion failed (e.g. no local model set), shown in the empty title field.
+  let titleNote = $state("");
+
+  async function fetchTitle(text: string, id: string): Promise<string | null> {
+    if (text.trim().length < TITLE_MIN_CHARS) return null;
+    try {
+      const t = await invoke<string>("suggest_title", { transcript: text, meetingId: id || null });
+      titleNote = "";
+      return t;
+    } catch (e) {
+      titleNote = String(e); // the date title stands
+      return null;
+    }
+  }
+
+  async function suggestLiveTitle() {
+    if (meetingTitle.trim() && !titleIsSuggestion) return;
+    const forMeeting = meetingId;
+    const t = await fetchTitle(liveTranscriptText, forMeeting);
+    // Stop-and-restart during the call must not put this title on the next meeting.
+    if (t && running && meetingId === forMeeting && (!meetingTitle.trim() || titleIsSuggestion)) {
+      meetingTitle = t;
+      titleIsSuggestion = true;
+    }
+  }
   // Project picker: "new" shows an inline name field.
   let newProjectOpen = $state(false);
   let newProjectName = $state("");
@@ -797,6 +836,59 @@
   }
   $effect(() => {
     localStorage.setItem("wisp.intel", String(intelEnabled));
+  });
+  // Meeting detection (macOS): the backend watches which app uses the microphone and offers to start
+  // (or, when the meeting ends, to stop). It never starts or stops by itself. Defaults on.
+  let detectMeetings = $state(localStorage.getItem("wisp.detectMeetings") !== "false");
+  let detectMeetingsSupported = $state(true);
+  $effect(() => {
+    localStorage.setItem("wisp.detectMeetings", String(detectMeetings));
+    invoke<{ supported: boolean }>("set_meeting_detection", { enabled: detectMeetings })
+      .then((status) => (detectMeetingsSupported = status.supported))
+      .catch(() => {});
+  });
+  type MeetingInfo = { app: string; service: string | null; lowConfidence: boolean };
+  let meetingOffer = $state<{ kind: "detected" | "ended"; meeting: MeetingInfo } | null>(null);
+  function meetingOfferText(offer: { kind: "detected" | "ended"; meeting: MeetingInfo }): string {
+    const m = offer.meeting;
+    if (offer.kind === "ended") return i18n.t.meeting.ended(m.service ?? m.app);
+    if (m.lowConfidence) return i18n.t.meeting.browserMic(m.app);
+    return i18n.t.meeting.detected(m.service ? `${m.app} (${m.service})` : m.app);
+  }
+  // Keep the menu bar in step with the session; starting retires a "start" offer, stopping an "end" one.
+  $effect(() => {
+    const recording = running;
+    invoke("set_tray_recording", { recording }).catch(() => {});
+    if (meetingOffer && (meetingOffer.kind === "detected") === recording) meetingOffer = null;
+  });
+  function startFromOffer() {
+    meetingOffer = null;
+    if (running || starting) return;
+    mode = "live";
+    void start();
+  }
+  function stopFromOffer() {
+    meetingOffer = null;
+    if (running && !stopping) void stop();
+  }
+  onMount(() => {
+    const listeners = [
+      listen("tray://start", startFromOffer),
+      listen("tray://stop", stopFromOffer),
+      listen("tray://capture", () => {
+        if (running) void captureContext();
+      }),
+      listen<MeetingInfo>("meeting://detected", (e) => {
+        if (!running) meetingOffer = { kind: "detected", meeting: e.payload };
+      }),
+      listen<MeetingInfo>("meeting://ended", (e) => {
+        if (running) meetingOffer = { kind: "ended", meeting: e.payload };
+      }),
+      listen("meeting://gone", () => {
+        if (meetingOffer?.kind === "detected") meetingOffer = null;
+      }),
+    ];
+    return () => listeners.forEach((l) => l.then((unlisten) => unlisten()));
   });
   let meetingId = $state("");
   let meetingStartedAt = $state(0);
@@ -817,6 +909,8 @@
     // per session, so a lingering previous transcript would collide by (source, id) and interleave two
     // different time bases. Clear it here (export the old one first if you need it).
     segments = [];
+    liveSpeakerNames = {};
+    editingSpeaker = null;
     starting = true;
     slowStart = false;
     const slowTimer = setTimeout(() => (slowStart = true), 4000);
@@ -836,6 +930,8 @@
         resetIntel();
         await ensureIntelListener();
       }
+      // The id this meeting will be saved under; the backend logs its AI calls under it.
+      const nextMeetingId = crypto.randomUUID();
       const notice = await invoke<string | null>("start_session", {
         options: {
           engine: liveEngine,
@@ -849,13 +945,21 @@
           intel: intelEnabled,
           projectId: intelEnabled && intel.projectId ? intel.projectId : null,
           meetingLabel: i18n.t.library.newNoteTitle(new Date().toLocaleString()),
+          meetingId: nextMeetingId,
         },
       });
       liveNotice = notice ?? "";
       running = true;
       // A new live session is a new library entry; stamp its id + start now (a re-save replaces it).
-      meetingId = crypto.randomUUID();
+      meetingId = nextMeetingId;
       meetingStartedAt = Date.now();
+      clearTimeout(titleTimer);
+      titleTimer = setTimeout(suggestLiveTitle, TITLE_FIRST_MS);
+      // Insights open with the meeting, so what it finds is on screen without a click.
+      if (intelEnabled) {
+        liveIntelOpen = true;
+        liveAssistOpen = false;
+      }
       intel.startedAt = meetingStartedAt;
       // Both streams start unmuted; the live You/Them chips flip these mid-session.
       liveMicMuted = false;
@@ -887,20 +991,34 @@
     }
     running = false;
     liveNotice = "";
+    clearTimeout(titleTimer);
 
     if (autoSave && segments.length > 0 && meetingId) {
       // Persist the finished meeting to the Library. A failed save must not surface as a session
       // error — the transcript is still in memory and can be exported by hand.
       try {
+        const savedMeta = meetingMeta(
+          meetingTitle.trim() || i18n.t.library.newNoteTitle(new Date(meetingStartedAt).toLocaleString()),
+        );
         await invoke("save_note", {
           id: meetingId,
-          meta: meetingMeta(
-            i18n.t.library.newNoteTitle(new Date(meetingStartedAt).toLocaleString()),
-          ),
+          meta: savedMeta,
           startedAtMs: meetingStartedAt,
           source: "live",
           projectId: intelEnabled && intel.projectId ? intel.projectId : null,
         });
+        // Re-title from the whole meeting after saving, unless the user named it; the save itself
+        // never waits on the model.
+        if (!meetingTitle.trim() || titleIsSuggestion) {
+          const savedId = meetingId;
+          const savedTitle = savedMeta.title;
+          void fetchTitle(liveTranscriptText, savedId).then((t) => {
+            // Only while the saved title is unchanged: a rename in the Library meanwhile wins.
+            if (t) invoke("rename_note", { id: savedId, title: t, ifTitle: savedTitle }).catch(() => {});
+          });
+        }
+        meetingTitle = "";
+        titleIsSuggestion = false;
         // With intelligence on, the meeting ends in a short review of its follow-ups.
         if (intelEnabled) {
           intel.savedMeetingId = meetingId;
@@ -1002,6 +1120,84 @@
     if (!diarizeId && diarizeModels.length) diarizeId = diarizeModels[0].id;
   });
 
+  // Live and File options persist across launches, one JSON each. Restored on mount; saved on change.
+  const LIVE_OPTIONS_KEY = "wisp.liveOptions";
+  const FILE_OPTIONS_KEY = "wisp.fileOptions";
+  let optionsRestored = $state(false);
+  // A saved system-audio choice (even "off") overrides the capture-everything default.
+  let systemDeviceSaved = false;
+  // Whether "Identify speakers" holds a real choice: saved, set by the user, or defaulted on once a
+  // speaker model is installed. Until then it isn't saved, so the default can still apply.
+  let liveDiarizeDecided = $state(false);
+
+  function readOptions(key: string): Record<string, unknown> {
+    try {
+      const value: unknown = JSON.parse(localStorage.getItem(key) || "null");
+      return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+    } catch {
+      return {};
+    }
+  }
+
+  function restoreOptions() {
+    const live = readOptions(LIVE_OPTIONS_KEY);
+    if (typeof live.micDevice === "string") micDevice = live.micDevice;
+    if (typeof live.systemDevice === "string") {
+      systemDevice = live.systemDevice;
+      systemDeviceSaved = true;
+    }
+    if (typeof live.language === "string") language = live.language;
+    if (live.denoiser === null || typeof live.denoiser === "string") liveDenoiser = live.denoiser;
+    if (typeof live.accurate === "boolean") liveAccurate = live.accurate;
+    if (typeof live.hints === "string") livePrompt = live.hints;
+    if (typeof live.diarize === "boolean") {
+      liveDiarize = live.diarize;
+      liveDiarizeDecided = true;
+    }
+    if (typeof live.speakerModel === "string") diarizeId = live.speakerModel;
+    const file = readOptions(FILE_OPTIONS_KEY);
+    if (file.denoiser === null || typeof file.denoiser === "string") fileDenoiser = file.denoiser;
+    if (typeof file.accurate === "boolean") fileAccurate = file.accurate;
+    if (typeof file.diarize === "boolean") diarizeOn = file.diarize;
+    optionsRestored = true;
+  }
+
+  $effect(() => {
+    const live = {
+      micDevice,
+      systemDevice,
+      language,
+      denoiser: liveDenoiser,
+      accurate: liveAccurate,
+      hints: livePrompt,
+      diarize: liveDiarizeDecided ? liveDiarize : undefined,
+      speakerModel: diarizeId || undefined,
+    };
+    const file = { denoiser: fileDenoiser, accurate: fileAccurate, diarize: diarizeOn };
+    if (!optionsRestored) return;
+    try {
+      localStorage.setItem(LIVE_OPTIONS_KEY, JSON.stringify(live));
+      localStorage.setItem(FILE_OPTIONS_KEY, JSON.stringify(file));
+    } catch {
+      /* storage unavailable — the options last for this session only */
+    }
+  });
+
+  // A remembered speaker model that left the catalog falls back to an installed one. With no saved
+  // choice, "Identify speakers" turns on as soon as a speaker model is installed.
+  function settleSpeakerModel() {
+    if (!diarizeModels.length) return;
+    const installed = diarizeModels.find((m) => m.installed);
+    // A remembered "on" with every speaker model removed would block Live from starting.
+    if (!installed) liveDiarize = false;
+    if (!diarizeModels.some((m) => m.id === diarizeId)) diarizeId = (installed ?? diarizeModels[0]).id;
+    if (!liveDiarizeDecided && installed) {
+      if (!diarizeModels.find((m) => m.id === diarizeId)?.installed) diarizeId = installed.id;
+      liveDiarize = true;
+      liveDiarizeDecided = true;
+    }
+  }
+
   // Engine choice per mode: the active on-device model, or a cloud provider/model. The provider
 
   const liveProv = $derived(cloudProvider(liveCloudProvider));
@@ -1023,6 +1219,8 @@
   // Live AI assist: a right-side drawer running the same LLM tasks over the live transcript (finals
   // only), on demand. Auto-rolling refresh is a later refinement.
   let liveAssistOpen = $state(false);
+  // The "⋯" menu that holds the AI assist (it sits behind meeting intelligence, not beside it).
+  let moreOpen = $state(false);
   // Whether the transcript's compact "Export ▾" menu is open (collapses MD/TXT/SRT into one control).
   let exportMenuOpen = $state(false);
   let liveBodyEl = $state<HTMLElement | null>(null);
@@ -1033,9 +1231,13 @@
   // The transcript handed to the AI assist (not the on-screen one) — formatted conversationally so the
   // model reasons about turns: mic = "Me", system = "Them", plus the live diarizer's speaker number on
   // the meeting side (where multiple remote participants matter; mic is always you).
+  // A named speaker reads as its name — on the mic too, where diarization only splits a shared mic.
   const assistWho = (s: Segment): string => {
-    if (s.source === "Microphone") return "Me";
-    if (s.source === "System") return s.speaker !== null ? `Them (Speaker ${s.speaker + 1})` : "Them";
+    const named = s.speaker !== null ? liveSpeakerNames[s.speaker] : undefined;
+    if (s.source === "Microphone") return named ?? "Me";
+    if (s.source === "System") {
+      return s.speaker !== null ? `Them (${named ?? `Speaker ${s.speaker + 1}`})` : "Them";
+    }
     return sourceLabel(s.source);
   };
   const liveTranscriptText = $derived(
@@ -1115,6 +1317,40 @@
   const speakerColor = (n: number) => SPEAKER_COLORS[n % SPEAKER_COLORS.length];
   const speakerLabel = (n: number) => i18n.t.common.speaker(n + 1);
 
+  // Live speaker names: click a speaker chip in the feed to name it. The backend keeps the map for
+  // the reasoning context and exports and saves it with the meeting; a new session starts empty.
+  let liveSpeakerNames = $state<Record<number, string>>({});
+  let editingSpeaker = $state<{ row: string; speaker: number } | null>(null);
+  let speakerDraft = $state("");
+  const liveSpeakerLabel = (n: number) => liveSpeakerNames[n] || speakerLabel(n);
+
+  function editLiveSpeaker(row: string, speaker: number) {
+    editingSpeaker = { row, speaker };
+    speakerDraft = liveSpeakerNames[speaker] ?? "";
+  }
+
+  async function saveLiveSpeaker() {
+    const edit = editingSpeaker;
+    if (!edit) return;
+    editingSpeaker = null;
+    const name = speakerDraft.trim();
+    if ((liveSpeakerNames[edit.speaker] ?? "") === name) return;
+    try {
+      await invoke("set_live_speaker_name", { speaker: edit.speaker, name });
+      const next = { ...liveSpeakerNames };
+      if (name) next[edit.speaker] = name;
+      else delete next[edit.speaker];
+      liveSpeakerNames = next;
+      // After Stop the meeting may already be in the Library; name it there too (a no-op error if it
+      // was never saved).
+      if (!running && meetingId) {
+        await invoke("set_library_speaker_name", { id: meetingId, speaker: edit.speaker, name }).catch(() => {});
+      }
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
   // The File transcript assembled as plain text for the AI Notes panel.
   const fileTranscriptText = $derived(
     fileParagraphs
@@ -1132,6 +1368,7 @@
   async function refreshDiarizeModels() {
     try {
       diarizeModels = await invoke<ModelInfo[]>("list_diarization_models");
+      settleSpeakerModel();
     } catch (e) {
       error = String(e);
     }
@@ -1372,6 +1609,17 @@
     });
   }
 
+  // Settings › Storage deleted a model: reload every picker's list.
+  onMount(() => {
+    const reload = () => {
+      refreshModels();
+      refreshDiarizeModels();
+      refreshDenoiseModels();
+    };
+    window.addEventListener("wisp:models-changed", reload);
+    return () => window.removeEventListener("wisp:models-changed", reload);
+  });
+
   onMount(() => {
     // Restore each mode's saved model from the previous session (the seed effect fills any gaps).
     try {
@@ -1383,6 +1631,7 @@
     } catch {
       /* ignore unreadable storage */
     }
+    restoreOptions();
     refreshModels();
     refreshCloud();
     refreshDiarizeModels();
@@ -1642,9 +1891,59 @@
     </button>
   </nav>
 
-  <Settings bind:open={cloudState.endpointsOpen} bind:autoSave bind:intel={intelEnabled} />
+  <Settings
+    bind:open={cloudState.endpointsOpen}
+    bind:autoSave
+    bind:intel={intelEnabled}
+    bind:detectMeetings
+    {detectMeetingsSupported}
+  />
+
+  {#if meetingOffer}
+    <div class="meeting-offer-wrap">
+      <div class="notice meeting-offer" role="status" transition:fly={{ y: -8, duration: 150 }}>
+        <span class="notice-text"><strong>{meetingOfferText(meetingOffer)}</strong></span>
+        <span class="notice-actions">
+          {#if meetingOffer.kind === "detected"}
+            <button class="btn outline sm" onclick={startFromOffer} disabled={starting}>{i18n.t.meeting.start}</button>
+            <button class="btn ghost sm" onclick={() => (meetingOffer = null)}>{i18n.t.meeting.notNow}</button>
+          {:else}
+            <button class="btn outline sm" onclick={stopFromOffer} disabled={stopping}>{i18n.t.meeting.stop}</button>
+            <button class="btn ghost sm" onclick={() => (meetingOffer = null)}>{i18n.t.meeting.keepGoing}</button>
+          {/if}
+        </span>
+      </div>
+    </div>
+  {/if}
 
   <div class="workspace" class:is-hidden={mode === "library"}>
+
+  {#snippet moreMenu(assistOn: boolean, toggleAssist: () => void)}
+    <span class="more-menu">
+      <button
+        class="more-btn"
+        class:on={assistOn}
+        aria-haspopup="menu"
+        aria-expanded={moreOpen}
+        title={i18n.t.live.more}
+        aria-label={i18n.t.live.more}
+        onclick={() => (moreOpen = !moreOpen)}>⋯</button
+      >
+      {#if moreOpen}
+        <button class="picker-backdrop" aria-label={i18n.t.common.close} onclick={() => (moreOpen = false)}
+        ></button>
+        <div class="more-pop" role="menu" transition:fly={{ y: -6, duration: 120 }}>
+          <button
+            role="menuitem"
+            onclick={() => {
+              toggleAssist();
+              moreOpen = false;
+            }}>{assistOn ? i18n.t.live.hideAssist : i18n.t.live.openAssist}</button
+          >
+        </div>
+      {/if}
+    </span>
+  {/snippet}
 
   {#snippet modelPicker()}
     {#if models.length}
@@ -1825,8 +2124,9 @@
         {#if running}
           <span class="active-model">{liveRunningLabel}</span>
         {:else}
-          <div class="engine-group">
-            <span class="source-prefix">{i18n.t.common.transcribeWith}</span>
+          <!-- A small chip: the model is set once, so it shouldn't take the header. It opens the
+               full picker. -->
+          <div class="engine-group compact" title={i18n.t.common.transcribeWith}>
             {@render modelPicker()}
           </div>
         {/if}
@@ -2035,6 +2335,17 @@
         <div class="transcript-pane">
           <div class="pane-head">
             <span class="pane-title">{i18n.t.common.transcript}</span>
+            <input
+              class="meeting-title"
+              aria-label={i18n.t.library.meetingTitle}
+              placeholder={titleNote
+                ? i18n.t.library.titleNoSuggestion(titleNote)
+                : i18n.t.library.meetingTitle}
+              bind:value={meetingTitle}
+              class:suggested={titleIsSuggestion}
+              title={titleIsSuggestion ? i18n.t.library.titleSuggested : undefined}
+              oninput={() => (titleIsSuggestion = false)}
+            />
             {#if intelEnabled}
               <span class="project-pick">
                 {#if newProjectOpen}
@@ -2103,15 +2414,10 @@
                 >
               {/if}
               {#if running || liveSegments.length}
-                <AssistLauncher
-                  on={liveAssistOpen}
-                  label="Assist"
-                  title="AI Assist — live hints, notes & summary"
-                  onclick={() => {
-                    liveAssistOpen = !liveAssistOpen;
-                    if (liveAssistOpen) liveIntelOpen = false;
-                  }}
-                />
+                {@render moreMenu(liveAssistOpen, () => {
+                  liveAssistOpen = !liveAssistOpen;
+                  if (liveAssistOpen) liveIntelOpen = false;
+                })}
               {/if}
             </span>
           </div>
@@ -2124,10 +2430,24 @@
             </span>
             <span class="body">
               <span class="text"
-                >{#if seg.speaker !== null}<span
-                    class="speaker"
-                    style="--spk: {speakerColor(seg.speaker)}">{speakerLabel(seg.speaker)}</span
-                  >{/if}{seg.text}</span>
+                >{#if seg.speaker !== null}{@const row = seg.source + "-" + seg.id}{@const spk = seg.speaker}{#if editingSpeaker?.row === row}<!-- svelte-ignore a11y_autofocus --><input
+                      class="speaker-input"
+                      style="--spk: {speakerColor(spk)}"
+                      aria-label={i18n.t.live.speakerName}
+                      placeholder={speakerLabel(spk)}
+                      bind:value={speakerDraft}
+                      autofocus
+                      onkeydown={(e) => {
+                        if (e.key === "Enter") saveLiveSpeaker();
+                        if (e.key === "Escape") editingSpeaker = null;
+                      }}
+                      onblur={saveLiveSpeaker}
+                    />{:else}<button
+                      class="speaker"
+                      style="--spk: {speakerColor(spk)}"
+                      title={i18n.t.live.speakerTip}
+                      onclick={() => editLiveSpeaker(row, spk)}>{liveSpeakerLabel(spk)}</button
+                    >{/if}{/if}{seg.text}</span>
               {#if seg.auxText}<span class="aux-text">{seg.auxText}</span>{/if}
             </span>
           </li>
@@ -2354,7 +2674,14 @@
           <section class="modal-section">
             <span class="section-title">{i18n.t.advanced.speakers}</span>
             <label class="opt-toggle">
-              <input type="checkbox" bind:checked={liveDiarize} onchange={applyLiveDiarize} />
+              <input
+                type="checkbox"
+                bind:checked={liveDiarize}
+                onchange={() => {
+                  liveDiarizeDecided = true;
+                  applyLiveDiarize();
+                }}
+              />
               <span>{i18n.t.advanced.identifySpeakers}</span>
             </label>
             {#if liveDiarize}
@@ -2418,12 +2745,7 @@
               </button>
             {/if}
             {#if fileSegments.length && !fileTranscribing}
-              <AssistLauncher
-                on={fileAssistOpen}
-                label={i18n.t.fileResult.aiNotes}
-                title={i18n.t.fileResult.aiNotes}
-                onclick={() => (fileAssistOpen = !fileAssistOpen)}
-              />
+              {@render moreMenu(fileAssistOpen, () => (fileAssistOpen = !fileAssistOpen))}
             {/if}
           </span>
         </div>
@@ -2717,7 +3039,14 @@
   </div>
 
   {#if mode === "library"}
-    <Library />
+    <Library
+      sessionRunning={running}
+      onNewMeeting={(projectId) => {
+        intelEnabled = true;
+        selectProject(projectId);
+        mode = "live";
+      }}
+    />
   {/if}
 </main>
 
@@ -4080,6 +4409,26 @@
     line-height: 1.45;
   }
 
+  /* The meeting-detection offer floats over whichever view is open. */
+  .meeting-offer-wrap {
+    position: fixed;
+    top: 12px;
+    left: 0;
+    right: 0;
+    z-index: 60;
+    display: flex;
+    justify-content: center;
+    padding: 0 16px;
+    pointer-events: none;
+  }
+
+  .meeting-offer {
+    pointer-events: auto;
+    max-width: 620px;
+    background: var(--bg);
+    box-shadow: 0 6px 24px rgb(0 0 0 / 0.14);
+  }
+
   .notice-text {
     flex: 1;
     min-width: 0;
@@ -4207,6 +4556,24 @@
     padding: 10px 14px 6px;
   }
 
+  .meeting-title {
+    min-width: 0;
+    flex: 0 1 16rem;
+    font-size: 12px;
+    padding: 2px 6px;
+    border: 1px solid transparent;
+    border-radius: 5px;
+    background: transparent;
+    color: inherit;
+  }
+  .meeting-title.suggested {
+    font-style: italic;
+    color: var(--muted);
+  }
+  .meeting-title:hover,
+  .meeting-title:focus {
+    border-color: var(--border, currentColor);
+  }
   .pane-title {
     font-size: 11px;
     font-weight: 600;
@@ -4537,14 +4904,15 @@
     scroll-behavior: smooth;
   }
 
+  /* Compact lines: more of the conversation fits on screen while listening. */
   .feed li {
     display: flex;
     align-items: baseline;
-    gap: 16px;
-    padding: 12px 12px;
+    gap: 12px;
+    padding: 5px 10px;
     border-bottom: 1px solid var(--border);
-    font-size: 16px;
-    line-height: 1.55;
+    font-size: 14px;
+    line-height: 1.45;
   }
 
   .feed li:last-child {
@@ -4560,15 +4928,15 @@
     flex: none;
     display: flex;
     flex-direction: column;
-    gap: 2px;
-    width: 52px;
+    gap: 1px;
+    width: 44px;
     padding-top: 1px;
   }
 
   .time {
     font-family: var(--font-mono);
     color: var(--muted);
-    font-size: 12px;
+    font-size: 11px;
     font-variant-numeric: tabular-nums;
   }
 
@@ -4832,6 +5200,32 @@
     color: var(--spk);
   }
 
+  /* Live feed: the speaker chip is a button that opens an inline name field. */
+  button.speaker {
+    padding: 0;
+    border: 0;
+    background: none;
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  button.speaker:hover {
+    text-decoration: underline;
+  }
+
+  .speaker-input {
+    width: 9em;
+    margin-right: 7px;
+    padding: 1px 4px;
+    border: 1px solid var(--spk);
+    border-radius: 4px;
+    font: inherit;
+    font-weight: 600;
+    color: var(--spk);
+    background: transparent;
+  }
+
   .dropzone-title {
     font-size: 17px;
     font-weight: 600;
@@ -4900,6 +5294,82 @@
     gap: 10px;
     min-width: 0;
     flex: 1;
+  }
+
+  .engine-group.compact {
+    flex: 0 1 auto;
+  }
+
+  .engine-group.compact .picker {
+    flex: 0 1 auto;
+  }
+
+  /* The full-width menu opens from the chip's left edge rather than centred on it. */
+  .engine-group.compact .picker-menu.wide {
+    left: 0;
+    margin-left: 0;
+  }
+
+  .engine-group.compact .picker-trigger {
+    width: auto;
+    max-width: 16rem;
+    font-size: 12px;
+    color: var(--muted);
+    padding: 3px 10px;
+    border-radius: 999px;
+  }
+
+  .more-menu {
+    position: relative;
+  }
+
+  .more-btn {
+    font: inherit;
+    font-size: 15px;
+    line-height: 1;
+    color: var(--muted);
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 3px 9px;
+    cursor: pointer;
+  }
+
+  .more-btn:hover,
+  .more-btn.on {
+    color: var(--text);
+    border-color: var(--border-strong);
+  }
+
+  .more-pop {
+    position: absolute;
+    right: 0;
+    top: calc(100% + 4px);
+    z-index: 21;
+    min-width: 11rem;
+    padding: 4px;
+    background: var(--surface, var(--bg));
+    border: 1px solid var(--border-strong);
+    border-radius: 9px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.12);
+  }
+
+  .more-pop button {
+    display: block;
+    width: 100%;
+    text-align: left;
+    font: inherit;
+    font-size: 13px;
+    color: var(--text);
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+    padding: 6px 10px;
+    cursor: pointer;
+  }
+
+  .more-pop button:hover {
+    background: var(--bg);
   }
 
   /* Quick mic/system toggles in the Live bar — "You" (your mic) and "Them" (system/meeting audio). */

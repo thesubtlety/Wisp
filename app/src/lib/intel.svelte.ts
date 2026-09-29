@@ -55,6 +55,8 @@ export type Card = {
   shownAtMs: number;
   candidate: {
     kind: string;
+    /** At most six words, for a glance. */
+    headline: string;
     title: string;
     detail: string;
     suggestedQuestion: string | null;
@@ -84,7 +86,7 @@ export const GAP_ORDER: GapCategory[] = [
   "conflict",
 ];
 
-export type Gap = { category: GapCategory; text: string; cited: string[] };
+export type Gap = { category: GapCategory; headline: string; text: string; cited: string[] };
 
 export type FollowUpClass = "mine" | "theirs" | "open_question" | "not_a_task" | "project_memory";
 export const CLASS_ORDER: FollowUpClass[] = ["mine", "theirs", "open_question", "not_a_task", "project_memory"];
@@ -134,6 +136,8 @@ type IntelUpdate =
 
 export type Citation = { id: string; label: string; text: string; sourceRef: string | null; itemId: string | null };
 export type AskAnswer = {
+  /** At most twelve words, shown first. */
+  short: string;
   answer: string;
   citations: Citation[];
   unknownCitations: string[];
@@ -350,12 +354,24 @@ export function selectProject(id: string) {
   }
 }
 
-/** Creates a project and selects it. Returns an error message, or "" on success. */
-export async function createProject(name: string): Promise<string> {
+/** Creates a project and, unless `select` is false, selects it for new meetings. Returns an error
+ *  message, or "" on success. */
+export async function createProject(name: string, select = true): Promise<string> {
   try {
     const p = await invoke<Project>("create_project", { name });
-    intel.projects = [...intel.projects, p];
-    selectProject(p.id);
+    intel.projects = [...intel.projects, p].sort((a, b) => a.name.localeCompare(b.name));
+    if (select) selectProject(p.id);
+    return "";
+  } catch (e) {
+    return String(e);
+  }
+}
+
+/** Renames a project. Returns an error message, or "" on success. */
+export async function renameProject(id: string, name: string): Promise<string> {
+  try {
+    await invoke<boolean>("rename_project", { id, name });
+    await loadProjects();
     return "";
   } catch (e) {
     return String(e);
@@ -456,18 +472,23 @@ export async function setFollowUpClass(n: number, cls: FollowUpClass) {
   }
 }
 
-/** Applies the reviewed follow-ups to the meeting's state. */
+/** Applies the reviewed follow-ups to the meeting's state. Any marked "Save to project" then go
+ *  straight to the project-knowledge step, since applying alone stores nothing for them. */
 export async function applyReview() {
+  const toProject = intel.review?.followups.some((f) => f.class === "project_memory") ?? false;
   intel.reviewBusy = true;
+  let applied = false;
   try {
     intel.reviewApplied = await invoke<number>("intel_review_apply");
     intel.review = null;
     intel.reviewUnderstood = [];
+    applied = true;
   } catch (e) {
     intel.reviewError = String(e);
   } finally {
     intel.reviewBusy = false;
   }
+  if (applied && toProject && intel.savedProjectId && !intel.proposals) await proposeLearning();
 }
 
 /** Wrapping Up: enter endgame and audit what's still open. Recording goes on. */

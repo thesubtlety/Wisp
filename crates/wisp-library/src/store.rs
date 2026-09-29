@@ -13,7 +13,7 @@ use crate::retention::RetentionPolicy;
 use crate::Result;
 
 /// On-disk schema version, bumped on schema changes (drives migration via `PRAGMA user_version`).
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 9;
 
 /// Characters of transcript kept as a list preview.
 const PREVIEW_CHARS: usize = 160;
@@ -207,6 +207,48 @@ CREATE TABLE project_memory (
 CREATE INDEX project_memory_project ON project_memory (project_id);
 ";
 
+/// Schema v8 — the AI activity log: every model call with the full text sent and received, for
+/// the user to audit. It holds transcript text, so it is short-lived like a transcript: a call made
+/// for a meeting goes when that meeting's transcript expires or the meeting is deleted; any other
+/// call expires by its own time. No foreign key: a call is logged while its meeting is still live,
+/// before the meeting row exists.
+pub(crate) const SCHEMA_V8: &str = "\
+CREATE TABLE llm_call (
+    id               INTEGER PRIMARY KEY,
+    at_ms            INTEGER NOT NULL,
+    meeting_id       TEXT,
+    task             TEXT NOT NULL,
+    backend          TEXT NOT NULL,
+    model            TEXT,
+    local            INTEGER NOT NULL,
+    instructions     TEXT NOT NULL,
+    context          TEXT NOT NULL,
+    images           TEXT NOT NULL,
+    output           TEXT NOT NULL,
+    error            TEXT,
+    elapsed_ms       INTEGER NOT NULL,
+    tokens_in        INTEGER NOT NULL,
+    tokens_out       INTEGER NOT NULL,
+    tokens_estimated INTEGER NOT NULL
+);
+CREATE INDEX llm_call_meeting ON llm_call (meeting_id);
+CREATE INDEX llm_call_at ON llm_call (at_ms);
+";
+
+/// Speaker names and project instructions. A meeting's diarized speaker ids stay in `segment`; this
+/// maps them to the names the user gave them, so a rename is undoable and needs no reindex. A
+/// project's instructions tell the model what matters to the user there (role, goals, what to
+/// ignore).
+pub(crate) const SCHEMA_V9: &str = "\
+CREATE TABLE speaker_name (
+    meeting_id TEXT NOT NULL REFERENCES meeting (id) ON DELETE CASCADE,
+    speaker    INTEGER NOT NULL,
+    name       TEXT NOT NULL,
+    PRIMARY KEY (meeting_id, speaker)
+);
+ALTER TABLE project ADD COLUMN instructions TEXT NOT NULL DEFAULT '';
+";
+
 /// A handle to the meeting knowledge base. Open once and reuse across queries. With no embedder it
 /// is full-text only; configure one via [`Library::set_embedder`] to enable semantic and hybrid
 /// search.
@@ -271,7 +313,7 @@ impl Library {
             .pragma_query_value(None, "user_version", |r| r.get(0))?;
         // Each step commits with its version, so a failed step leaves the database at the previous
         // version rather than half-migrated (a re-run ALTER TABLE would fail on the duplicate column).
-        let steps: [(i64, &str); 7] = [
+        let steps: [(i64, &str); 9] = [
             (1, SCHEMA_V1),
             (2, SCHEMA_V2),
             (3, SCHEMA_V3),
@@ -279,6 +321,8 @@ impl Library {
             (5, SCHEMA_V5),
             (6, SCHEMA_V6),
             (7, SCHEMA_V7),
+            (8, SCHEMA_V8),
+            (9, SCHEMA_V9),
         ];
         for (step, sql) in steps {
             if version >= step {
@@ -336,6 +380,8 @@ impl Library {
             })
             .optional()?
             .flatten();
+        // Deleting the meeting cascades its speaker names; carry them over like the project.
+        let names = crate::speakers::read_names(&tx, id)?;
         tx.execute("DELETE FROM meeting WHERE id = ?1", [id])?;
         tx.execute(
             "INSERT INTO meeting
@@ -356,6 +402,7 @@ impl Library {
             ],
         )?;
         insert_segments(&tx, id, &finals)?;
+        crate::speakers::write_names(&tx, id, &names)?;
         if let Some(chunks) = &chunks {
             insert_chunks(&tx, id, chunks)?;
         }
@@ -497,7 +544,8 @@ impl Library {
         let mut stmt = self.conn.prepare(
             "SELECT m.id, m.title, m.started_at_ms, m.duration_ms, m.language, m.engine,
                     (SELECT group_concat(text, ' ')
-                       FROM (SELECT text FROM segment WHERE meeting_id = m.id ORDER BY idx LIMIT 6))
+                       FROM (SELECT text FROM segment WHERE meeting_id = m.id ORDER BY idx LIMIT 6)),
+                    m.project_id
              FROM meeting m
              ORDER BY m.started_at_ms DESC",
         )?;
@@ -512,6 +560,7 @@ impl Library {
                     language: r.get(4)?,
                     engine: r.get(5)?,
                     preview: truncate_chars(&preview.unwrap_or_default(), PREVIEW_CHARS),
+                    project_id: r.get(7)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -689,9 +738,10 @@ impl Library {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
-        // Drop non-matches (orthogonal / negatively-correlated chunks), then rank by similarity
-        // (higher is better, unlike BM25) and keep the best chunk per note.
-        hits.retain(|h| h.score > 0.0);
+        // Drop non-matches (below the model's floor, and never at or under zero), then rank by
+        // similarity (higher is better, unlike BM25) and keep the best chunk per note.
+        let floor = f64::from(embedder.min_score().max(0.0));
+        hits.retain(|h| h.score > floor);
         hits.sort_by(|a, b| {
             b.score
                 .partial_cmp(&a.score)
@@ -748,6 +798,8 @@ impl Library {
             .execute("DELETE FROM state_op WHERE meeting_id = ?1", [id])?;
         self.conn
             .execute("DELETE FROM candidate_log WHERE meeting_id = ?1", [id])?;
+        self.conn
+            .execute("DELETE FROM llm_call WHERE meeting_id = ?1", [id])?;
         let affected = self
             .conn
             .execute("DELETE FROM meeting WHERE id = ?1", [id])?;
@@ -1428,6 +1480,56 @@ mod tests {
         }
         let lib = Library::open(&path).unwrap(); // second open: already at the current user_version, schema skipped
         assert_eq!(lib.count().unwrap(), 1);
+    }
+
+    /// [`HashingEmbedder`] with a similarity floor, like a model that scores unrelated text high.
+    struct FlooredEmbedder(HashingEmbedder, f32);
+
+    impl Embedder for FlooredEmbedder {
+        fn dim(&self) -> usize {
+            self.0.dim()
+        }
+        fn embed_passages(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+            self.0.embed_passages(texts)
+        }
+        fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
+            self.0.embed_query(text)
+        }
+        fn min_score(&self) -> f32 {
+            self.1
+        }
+    }
+
+    #[test]
+    fn semantic_search_drops_hits_below_the_model_floor() {
+        let notes = |floor: f32| {
+            let mut lib = Library::open_in_memory().unwrap();
+            lib.set_embedder(Some(Box::new(FlooredEmbedder(
+                HashingEmbedder { dim: 256 },
+                floor,
+            ))));
+            let s = |t| seg(1, 0, 100, t, AudioSourceKind::Microphone);
+            lib.save_note("m1", &meta("A"), 0, &[s("budget review")])
+                .unwrap();
+            lib.save_note(
+                "m2",
+                &meta("B"),
+                0,
+                &[s("budget travel lunch dinner offsite plans")],
+            )
+            .unwrap();
+            let mut ids: Vec<String> = lib
+                .search_semantic("budget review", 10)
+                .unwrap()
+                .into_iter()
+                .map(|h| h.meeting_id)
+                .collect();
+            ids.sort();
+            ids
+        };
+        // A weak partial overlap (~0.29) counts at a zero floor but not above the model's floor.
+        assert_eq!(notes(0.0), ["m1", "m2"]);
+        assert_eq!(notes(0.6), ["m1"]);
     }
 
     #[test]

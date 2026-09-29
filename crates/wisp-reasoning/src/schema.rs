@@ -8,6 +8,26 @@ pub fn validate(schema: &Value, value: &Value) -> Result<(), String> {
     check(schema, value, "$")
 }
 
+/// Marks a property the model is asked for but may leave out. Strict structured output needs every
+/// property listed as required, so the field stays in `required`; the validator lets it be missing,
+/// and the caller fills a default. [`for_model`] removes the marker before the schema is sent.
+pub const OPTIONAL_MARK: &str = "x-optional";
+
+/// `schema` as sent to a model: every [`OPTIONAL_MARK`] removed, since strict schema modes reject
+/// unknown keywords.
+pub fn for_model(schema: &Value) -> Value {
+    match schema {
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .filter(|(k, _)| k.as_str() != OPTIONAL_MARK)
+                .map(|(k, v)| (k.clone(), for_model(v)))
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.iter().map(for_model).collect()),
+        other => other.clone(),
+    }
+}
+
 fn check(schema: &Value, value: &Value, path: &str) -> Result<(), String> {
     let Some(obj) = schema.as_object() else {
         return Ok(());
@@ -45,8 +65,14 @@ fn check(schema: &Value, value: &Value, path: &str) -> Result<(), String> {
     }
     if let Value::Object(map) = value {
         if let Some(Value::Array(req)) = obj.get("required") {
+            let optional = |key: &str| {
+                obj.get("properties")
+                    .and_then(|p| p.get(key))
+                    .and_then(|p| p.get(OPTIONAL_MARK))
+                    == Some(&Value::Bool(true))
+            };
             for key in req.iter().filter_map(Value::as_str) {
-                if !map.contains_key(key) {
+                if !map.contains_key(key) && !optional(key) {
                     return Err(format!("{path}: missing required '{key}'"));
                 }
             }
@@ -98,6 +124,31 @@ fn type_name(v: &Value) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_marked_property_may_be_missing_and_the_mark_never_reaches_the_model() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "required": ["text", "headline"],
+            "properties": {
+                "text": {"type": "string"},
+                "headline": {"type": "string", "x-optional": true}
+            }
+        });
+        assert!(validate(&schema, &serde_json::json!({"text": "t"})).is_ok());
+        assert!(validate(&schema, &serde_json::json!({"headline": "h"})).is_err());
+        assert!(
+            validate(&schema, &serde_json::json!({"text": "t", "headline": 3})).is_err(),
+            "present, it is still type-checked"
+        );
+
+        let sent = for_model(&schema);
+        assert!(!sent.to_string().contains("x-optional"));
+        assert_eq!(
+            sent["required"], schema["required"],
+            "still required for strict modes"
+        );
+    }
+
     use super::*;
     use serde_json::json;
 

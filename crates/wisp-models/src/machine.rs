@@ -108,21 +108,17 @@ pub fn parse_meminfo_total_bytes(meminfo: &str) -> Option<u64> {
     Some(kib * 1024)
 }
 
-/// Auto-picks the **Live** default for `profile` — the most accurate Whisper its GPU tier can keep up
-/// with in *real time*, computed from the tier rather than hard-coded per platform:
+/// Auto-picks the **Live** default for `profile`:
 ///
-/// - **Ultra** GPU → the full large-v3 (real time only on the strongest chips).
-/// - **High / Standard** → large-v3-turbo q8 (the everyday GPU sweet spot).
-/// - **Entry** → the lighter turbo q5.
-/// - **None** (no GPU engine) → SenseVoice — non-autoregressive, so real-time on the CPU.
+/// - Any GPU tier → Parakeet v3: the most accurate open model for English and 24 more European
+///   languages, and a transducer fast enough for real time on a modern CPU.
+/// - **None** (no GPU engine, often a weak CPU) → SenseVoice — non-autoregressive, so the lightest
+///   real-time choice.
 ///
-/// As chips get faster the tier rises and the pick follows automatically. The chosen id is guaranteed
-/// to exist in `catalog` (falling back to its first entry).
+/// The chosen id is guaranteed to exist in `catalog` (falling back to its first entry).
 pub fn recommended_default_model(profile: &MachineProfile, catalog: &[ModelDescriptor]) -> ModelId {
     let ideal = match profile.gpu_tier {
-        GpuTier::Ultra => "whisper-large-v3-gpu",
-        GpuTier::High | GpuTier::Standard => "whisper-large-v3-turbo-q8",
-        GpuTier::Entry => "whisper-large-v3-turbo-q5",
+        GpuTier::Ultra | GpuTier::High | GpuTier::Standard | GpuTier::Entry => "parakeet-v3",
         GpuTier::None => "sense-voice",
     };
     resolve(ideal, catalog)
@@ -240,23 +236,18 @@ mod tests {
     const GIB: u64 = 1024 * 1024 * 1024;
 
     #[test]
-    fn metal_picks_turbo_sized_to_memory() {
+    fn metal_picks_parakeet_v3_at_any_memory() {
         let catalog = builtin_catalog();
-        // Apple Silicon with headroom → the higher-precision q8.
-        assert_eq!(
-            recommended_default_model(&MachineProfile::new(Accelerator::Metal, 32 * GIB), &catalog),
-            ModelId("whisper-large-v3-turbo-q8".to_owned())
-        );
-        // The 16 GB boundary → q8.
-        assert_eq!(
-            recommended_default_model(&MachineProfile::new(Accelerator::Metal, 16 * GIB), &catalog),
-            ModelId("whisper-large-v3-turbo-q8".to_owned())
-        );
-        // A memory-constrained Apple Silicon (e.g. 8 GB base) → the lighter q5.
-        assert_eq!(
-            recommended_default_model(&MachineProfile::new(Accelerator::Metal, 8 * GIB), &catalog),
-            ModelId("whisper-large-v3-turbo-q5".to_owned())
-        );
+        // Parakeet v3 runs on the CPU and is light, so memory doesn't change the Live pick.
+        for gib in [8, 16, 32] {
+            assert_eq!(
+                recommended_default_model(
+                    &MachineProfile::new(Accelerator::Metal, gib * GIB),
+                    &catalog
+                ),
+                ModelId("parakeet-v3".to_owned())
+            );
+        }
     }
 
     #[test]
@@ -484,20 +475,15 @@ mod tests {
                 &catalog,
             )
         };
-        // Live tracks the chip: an Ultra runs the full large-v3 in real time, a Max/Pro gets turbo-q8,
-        // a base chip the lighter q5 — not a fixed per-platform string.
-        assert_eq!(
-            live(GpuTier::Ultra),
-            ModelId("whisper-large-v3-gpu".to_owned())
-        );
-        assert_eq!(
-            live(GpuTier::High),
-            ModelId("whisper-large-v3-turbo-q8".to_owned())
-        );
-        assert_eq!(
-            live(GpuTier::Entry),
-            ModelId("whisper-large-v3-turbo-q5".to_owned())
-        );
+        // Live is Parakeet v3 on every GPU tier.
+        for tier in [
+            GpuTier::Ultra,
+            GpuTier::High,
+            GpuTier::Standard,
+            GpuTier::Entry,
+        ] {
+            assert_eq!(live(tier), ModelId("parakeet-v3".to_owned()));
+        }
 
         // File reaches higher (no real-time limit): the full large-v3 on a real GPU, turbo on a base.
         let file = |tier| {

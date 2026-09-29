@@ -2,6 +2,9 @@
   // The meeting intelligence panel's body: Ask (questions answered with cited evidence, each answer
   // copyable) and State (the structured meeting state, with Analyze now). Lives inside AssistPanel.
   import { i18n } from "$lib/i18n.svelte";
+  import ShotThumb from "$lib/ShotThumb.svelte";
+  import Modal from "$lib/Modal.svelte";
+  import AiActivity from "$lib/AiActivity.svelte";
   import {
     intel,
     askQuestion,
@@ -28,6 +31,7 @@
     KIND_ORDER,
     GAP_ORDER,
     type StateItem,
+    type AskAnswer,
   } from "$lib/intel.svelte";
 
   let { running }: { running: boolean } = $props();
@@ -58,7 +62,10 @@
       .map((f) => `${f.n}. [${i18n.t.intel.classes[f.class]}] ${f.text}`)
       .join("\n");
   }
+  let activityOpen = $state(false);
   let copiedAt = $state(-1);
+  /** A short answer worth showing first: present, and not already the whole answer. */
+  const isBrief = (a: AskAnswer) => !!a.short && a.short !== a.answer;
   let notRunning = $state(false);
   let feedEl = $state<HTMLDivElement>();
 
@@ -129,11 +136,16 @@
         {i18n.t.intel.tabReview}
       </button>
     {/if}
+    <button class="activity" onclick={() => (activityOpen = true)}>{i18n.t.audit.title}</button>
   </div>
+
+  <Modal bind:open={activityOpen} title={i18n.t.audit.title}>
+    <AiActivity meetingId={intel.savedMeetingId ?? ""} />
+  </Modal>
 
   {#if intel.tab === "insights"}
     <div class="feed">
-      <label class="ends">
+      <label class="ends" title={i18n.t.intel.endsAtHint}>
         {i18n.t.intel.endsAt}
         <input
           type="time"
@@ -159,9 +171,12 @@
           {#each gapGroups as g (g.category)}
             <p class="gcat">{i18n.t.intel.gaps[g.category]}</p>
             {#each g.gaps as gap, j (j)}
-              <p class="gap">
-                {gap.text}{#each gap.cited as id (id)}<span class="cid gref">{id}</span>{/each}
-              </p>
+              <details class="gap" open>
+                <summary class="headline" title={gap.text}>{gap.headline || gap.text}</summary>
+                <p class="gdetail">
+                  {gap.text}{#each gap.cited as id (id)}<span class="cid gref">{id}</span>{/each}
+                </p>
+              </details>
             {/each}
           {/each}
           <div class="cactions">
@@ -176,15 +191,22 @@
       {/if}
       {#each [...intel.cards].reverse() as card (card.id)}
         <div class="card">
-          <p class="ctitle">{card.candidate.title}</p>
-          {#if card.candidate.detail}<p class="cdetail">{card.candidate.detail}</p>{/if}
-          {#if card.candidate.suggestedQuestion}
-            <p class="cq">“{card.candidate.suggestedQuestion}”</p>
-          {/if}
-          <p class="imeta">
-            <span>{Math.round(card.candidate.confidence * 100)}%</span>
-            {#each card.candidate.cited as id (id)}<span class="cid">{id}</span>{/each}
-          </p>
+          <details class="cmore" open>
+            <summary class="ctitle headline" title={card.candidate.title}
+              >{card.candidate.headline || card.candidate.title}</summary
+            >
+            {#if card.candidate.headline && card.candidate.headline !== card.candidate.title}
+              <p class="cdetail">{card.candidate.title}</p>
+            {/if}
+            {#if card.candidate.detail}<p class="cdetail">{card.candidate.detail}</p>{/if}
+            {#if card.candidate.suggestedQuestion}
+              <p class="cq">“{card.candidate.suggestedQuestion}”</p>
+            {/if}
+            <p class="imeta">
+              <span>{Math.round(card.candidate.confidence * 100)}%</span>
+              {#each card.candidate.cited as id (id)}<span class="cid">{id}</span>{/each}
+            </p>
+          </details>
           <div class="cactions">
             {#if card.candidate.suggestedQuestion}
               <button class="copy" onclick={() => copy(10_000 + intel.cards.indexOf(card), card.candidate.suggestedQuestion!)}>
@@ -212,14 +234,18 @@
         {#if intel.review.source === "state"}
           <p class="warn">{i18n.t.intel.reviewFromState}</p>
         {/if}
-        {#if !intel.review.followups.length}<p class="hint">{i18n.t.intel.noFollowUps}</p>{/if}
+        {#if !intel.review.followups.length}<p class="hint">{i18n.t.intel.noFollowUps}</p>{:else}<p class="hint">{i18n.t.intel.reviewHelp}</p>{/if}
         <ol class="followups">
           {#each intel.review.followups as f (f.n)}
             <li>
               <p class="ftext"><span class="fn">{f.n}.</span> {f.text}</p>
               <div class="classes">
                 {#each CLASS_ORDER as c (c)}
-                  <button class:on={f.class === c} onclick={() => setFollowUpClass(f.n, c)}>
+                  <button
+                    class:on={f.class === c}
+                    title={i18n.t.intel.classHelp[c]}
+                    onclick={() => setFollowUpClass(f.n, c)}
+                  >
                     {i18n.t.intel.classes[c]}
                   </button>
                 {/each}
@@ -325,26 +351,28 @@
           {:else if turn.error}
             <p class="error">{turn.error}</p>
           {:else if turn.answer}
+            {@const brief = isBrief(turn.answer)}
             <div class="a">
-              <p class="answer">{turn.answer.answer}</p>
+              {#if brief}<p class="answer short">{turn.answer.short}</p>{/if}
               {#if !turn.answer.grounded}<p class="warn">{i18n.t.intel.notGrounded}</p>{/if}
-              {#if turn.answer.unknownCitations.length}
-                <p class="warn">{i18n.t.intel.droppedCitations(turn.answer.unknownCitations.length)}</p>
-              {/if}
-              {#if turn.answer.citations.length}
-                <details class="sources">
-                  <summary>{i18n.t.intel.sources} ({turn.answer.citations.length})</summary>
-                  <ul>
-                    {#each turn.answer.citations as c (c.id)}
-                      <li title={c.text}>
-                        <span class="cid">{c.id}</span>
-                        <span class="clabel">{c.label}</span>
-                        <span class="ctext">{c.text}</span>
-                      </li>
-                    {/each}
-                  </ul>
-                </details>
-              {/if}
+              <p class="answer" class:detail={brief}>{turn.answer.answer}</p>
+                {#if turn.answer.unknownCitations.length}
+                  <p class="warn">{i18n.t.intel.droppedCitations(turn.answer.unknownCitations.length)}</p>
+                {/if}
+                {#if turn.answer.citations.length}
+                  <details class="sources">
+                    <summary>{i18n.t.intel.sources} ({turn.answer.citations.length})</summary>
+                    <ul>
+                      {#each turn.answer.citations as c (c.id)}
+                        <li title={c.text}>
+                          <span class="cid">{c.id}</span>
+                          <span class="clabel">{c.label}</span>
+                          <span class="ctext">{c.text}</span>
+                        </li>
+                      {/each}
+                    </ul>
+                  </details>
+                {/if}
               <button class="copy" onclick={() => copy(i, turn.answer!.markdown)}>
                 {copiedAt === i ? i18n.t.intel.copied : i18n.t.intel.copy}
               </button>
@@ -412,7 +440,9 @@
             <p class="hint">{i18n.t.intel.screenshotsHint}</p>
           {/if}
           {#each intel.context as shot (shot.sourceId)}
-            <div class="item">
+            <div class="item shot">
+              <ShotThumb sourceId={shot.sourceId} title={shot.title ?? shot.label} />
+              <div class="shot-body">
               <p class="itext">{shot.title ?? i18n.t.intel.screenshot}</p>
               <p class="imeta">
                 <span>{shot.label}</span>
@@ -428,6 +458,7 @@
                   >×</button
                 >
               </p>
+              </div>
             </div>
           {/each}
         </section>
@@ -500,6 +531,10 @@
     border-bottom: 2px solid transparent;
     padding: 6px 10px;
     cursor: pointer;
+  }
+
+  .tabs button.activity {
+    margin-left: auto;
   }
 
   .tabs button.on {
@@ -713,7 +748,44 @@
   .gap {
     margin: 0;
     font-size: 13px;
+  }
+
+  /* A headline to read at a glance: one bold line; the full sentence opens on click. */
+  .headline {
+    display: list-item;
+    cursor: pointer;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  details[open] > .headline {
+    white-space: normal;
+  }
+
+  .gdetail {
+    margin: 2px 0 4px 14px;
+    color: var(--muted);
     user-select: text;
+  }
+
+  .cmore > :not(summary) {
+    margin-top: 5px;
+  }
+
+  .answer.short {
+    font-weight: 600;
+  }
+
+  .answer.detail {
+    color: var(--muted);
+  }
+
+  .more {
+    margin-left: 0;
+    padding: 0;
+    font-size: 12.5px;
   }
 
   .gref {
@@ -911,6 +983,17 @@
   .item {
     padding: 6px 0;
     border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  }
+
+  .item.shot {
+    display: flex;
+    gap: 8px;
+    align-items: flex-start;
+  }
+
+  .shot-body {
+    flex: 1;
+    min-width: 0;
   }
 
   .item.muted .itext {

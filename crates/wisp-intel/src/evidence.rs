@@ -8,6 +8,8 @@
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
+use wisp_core::speakers::{line_speaker, SpeakerNames};
+use wisp_core::transcript::SpeakerId;
 use wisp_library::{meeting_ref, MemoryEntry, Snippet, SnippetOrigin};
 
 use crate::model::SourceRef;
@@ -28,15 +30,20 @@ impl TranscriptLine {
     /// A stored segment as a line: the microphone is "You"; the other side is its diarized speaker
     /// ("Speaker 2") when known, else "Them".
     pub fn from_segment(segment: &wisp_library::Segment) -> Self {
-        let speaker = match (segment.source.as_str(), segment.speaker) {
-            ("mic", _) => "You".to_owned(),
-            (_, Some(n)) => format!("Speaker {}", n + 1),
-            _ => "Them".to_owned(),
-        };
+        Self::from_segment_named(segment, &SpeakerNames::new())
+    }
+
+    /// [`from_segment`](Self::from_segment), using the names the user gave the meeting's speakers
+    /// (see [`wisp_core::speakers::line_speaker`] for the rule).
+    pub fn from_segment_named(segment: &wisp_library::Segment, names: &SpeakerNames) -> Self {
+        let speaker_id = segment
+            .speaker
+            .and_then(|n| u32::try_from(n).ok())
+            .map(SpeakerId);
         Self {
             idx: segment.idx,
             start_ms: segment.start_ms,
-            speaker,
+            speaker: line_speaker(segment.source == "mic", speaker_id, names),
             text: segment.text.clone(),
         }
     }
@@ -362,6 +369,11 @@ mod tests {
         assert_eq!(
             TranscriptLine::from_segment(&seg("system", None)).speaker,
             "Them"
+        );
+        let names: SpeakerNames = [(1, "Bob".to_owned())].into_iter().collect();
+        assert_eq!(
+            TranscriptLine::from_segment_named(&seg("system", Some(1)), &names).speaker,
+            "Bob"
         );
         assert_eq!(TranscriptLine::from_segment(&seg("file", None)).idx, 7);
     }

@@ -11,9 +11,11 @@
 //! ignored. [`OpenAiCompatBackend`] talks to a model behind an OpenAI-compatible chat endpoint,
 //! usually a local one (Ollama, llama.cpp, LM Studio). [`FallbackBackend`] tries backends in order
 //! (Codex first, then Claude, say); [`TaskRouter`] sends each task kind to its own backend.
-//! [`ScriptedBackend`] is a deterministic stand-in for tests. The CLIs are found on PATH widened to
+//! [`AuditingBackend`] records every call it passes on. [`ScriptedBackend`] is a deterministic
+//! stand-in for tests. The CLIs are found on PATH widened to
 //! the usual install locations, since a Finder-launched app inherits almost none.
 
+mod audit;
 mod backend;
 mod claude;
 mod codex;
@@ -27,9 +29,12 @@ mod schema;
 mod scripted;
 mod workspace;
 
+pub use audit::{
+    audited, estimate_tokens, now_ms, task_label, AuditRecord, AuditSink, AuditingBackend, CallInfo,
+};
 pub use backend::{
     check_images, image_media_type, render_prompt, CancelToken, Capabilities, Health,
-    ReasoningBackend, ReasoningError, ReasoningRequest, ReasoningResponse, TaskKind,
+    ReasoningBackend, ReasoningError, ReasoningRequest, ReasoningResponse, TaskKind, TokenUsage,
     MAX_IMAGE_BYTES,
 };
 pub use claude::{ClaudeCodeBackend, ClaudeConfig};
@@ -40,6 +45,6 @@ pub use local::{is_loopback, LocalConfig, OpenAiCompatBackend};
 pub use locate::{find_program, search_dirs};
 pub use routed::TaskRouter;
 pub use runner::{run_command, CommandSpec, RunOutput, SUBSCRIPTION_STRIPPED_ENV};
-pub use schema::validate;
+pub use schema::{for_model, validate, OPTIONAL_MARK};
 pub use scripted::ScriptedBackend;
 pub use workspace::Workspace;

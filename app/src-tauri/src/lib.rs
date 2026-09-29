@@ -28,9 +28,12 @@ use wisp_core::denoise::Denoiser;
 use wisp_core::diarize::{attribute_speakers_by_word, ClipDiarizer, SpeakerSpan};
 use wisp_core::engine::{AsrEngine, ClipOptions, StreamingAsrEngine};
 use wisp_core::error::{Result as WispResult, WispError};
-use wisp_core::export::{format_markdown, format_transcript, ExportFormat, MeetingMeta};
+use wisp_core::export::{
+    format_markdown_named, format_transcript_named, ExportFormat, MeetingMeta,
+};
 use wisp_core::model::{ModelDescriptor, ModelFamily, ModelFile, ModelId, ModelStore, Quant};
 use wisp_core::params::{ParamKind, ParamSpec, ParamValue, ParamValues};
+use wisp_core::speakers::SpeakerNames;
 use wisp_core::task::run_within;
 use wisp_core::transcript::{AudioSourceKind, SegmentStatus, TranscriptEvent, TranscriptSegment};
 use wisp_engine_cloud::{
@@ -58,12 +61,15 @@ use wisp_pipeline::{
 use wisp_screencapture::ScreenCaptureSource;
 
 mod assist;
+mod audit;
 mod context;
 mod dictation;
 mod intel;
+mod meeting;
 mod permissions;
 mod reasoning;
 mod retention;
+mod tray;
 
 use assist::{normalize_assist, AssistParams};
 
@@ -113,6 +119,8 @@ struct AppState {
     sessions: Mutex<Vec<Session>>,
     /// The push-to-talk dictation session, while the hotkey is held; `None` otherwise.
     dictation: Mutex<Option<dictation::Dictation>>,
+    /// The loaded local batch model dictation decodes with (when Apple speech isn't available).
+    dictation_engine: dictation::EngineCache,
     /// The configured dictation hotkey, and whether it's currently registered.
     dictation_hotkey: Mutex<String>,
     dictation_enabled: Mutex<bool>,
@@ -148,12 +156,17 @@ struct AppState {
     /// Committed finals from the current/most-recent live session (both mic and system streams),
     /// retained so the meeting can be exported after it ends. Cleared when a new session starts.
     live_segments: Mutex<Vec<TranscriptSegment>>,
+    /// Names the user gave the live session's diarized speakers (id → name). Cleared when a new
+    /// session starts; `save_note` writes them into the library with the meeting.
+    live_speaker_names: Mutex<SpeakerNames>,
     /// App-owned copies of imported files; retention only ever deletes files inside it.
     managed_dir: PathBuf,
     /// Where the retention policy persists.
     retention_path: PathBuf,
     /// Which reasoning backend meeting intelligence uses.
     reasoning: reasoning::ReasoningState,
+    /// The AI activity log: the live meeting's id and the queue of calls waiting to be written.
+    audit: audit::AuditState,
     /// The on-disk meeting knowledge base (SQLite). Finished meetings are saved, listed, and searched
     /// here; a single connection behind a mutex (a personal library has no concurrency needs).
     library: Mutex<Library>,
@@ -1304,7 +1317,7 @@ struct CloudProviderDto {
 }
 
 /// The cloud provider with `id` from the built-in catalog, if any.
-fn cloud_provider_by_id(id: &str) -> Option<CloudProvider> {
+pub(crate) fn cloud_provider_by_id(id: &str) -> Option<CloudProvider> {
     cloud_catalog().into_iter().find(|p| p.id == id)
 }
 
@@ -2567,6 +2580,8 @@ fn select_model(state: State<'_, AppState>, id: String) -> Result<(), String> {
         .active
         .lock()
         .map_err(|_| "state lock poisoned".to_owned())? = Some(model_id);
+    // Dictation prefers the active model, so its loaded engine may be stale now.
+    dictation::drop_cached_engine(&state);
     Ok(())
 }
 
@@ -2591,6 +2606,7 @@ fn remove_model(state: State<'_, AppState>, id: String) -> Result<(), String> {
     state.store.remove(&model_id).map_err(|e| e.to_string())?;
 
     clear_active_if_removed(state.inner(), &model_id)?;
+    dictation::drop_cached_engine(&state);
 
     Ok(())
 }
@@ -2653,6 +2669,15 @@ fn restart_app(app: AppHandle) {
 #[tauri::command]
 fn microphone_blocked() -> bool {
     permissions::microphone_blocked()
+}
+
+/// Whether a live session is running (for the meeting detector's "never prompt while recording").
+fn live_session_running(app: &AppHandle) -> bool {
+    app.state::<AppState>()
+        .sessions
+        .lock()
+        .map(|sessions| !sessions.is_empty())
+        .unwrap_or(false)
 }
 
 #[tauri::command]
@@ -2825,6 +2850,9 @@ struct LiveOptions {
     /// How screenshot labels name this meeting ("Note · 9/28/2026, 2:03 PM").
     #[serde(default)]
     meeting_label: Option<String>,
+    /// The id the meeting will be saved under, so its AI calls are logged under it.
+    #[serde(default)]
+    meeting_id: Option<String>,
 }
 
 /// Resolves the engine a live session will run from `options` + app state: an on-device model, or a
@@ -2941,9 +2969,15 @@ fn start_session_blocking(app: AppHandle, options: LiveOptions) -> Result<Option
     if let Ok(mut retained) = state.live_segments.lock() {
         retained.clear();
     }
+    if let Ok(mut names) = state.live_speaker_names.lock() {
+        names.clear();
+    }
     // Intelligence starts before capture so it sees every final the transcript retains, from the
     // first; that keeps its line numbers aligned with the saved transcript.
     intel::reset(&state);
+    audit::set_live_meeting(&state, options.meeting_id.clone());
+    // Dictation is refused during a session; free its model so a large one isn't held twice.
+    dictation::drop_cached_engine(&state);
     if options.intel {
         intel::start(
             &app,
@@ -3217,6 +3251,7 @@ fn stop_session_blocking(app: AppHandle) -> Result<(), String> {
     // After capture, so the runtime has had every final; cancels a pass in flight.
     intel::stop(&state);
     context::end(&app);
+    audit::set_live_meeting(&state, None);
     result
 }
 
@@ -3724,9 +3759,17 @@ fn export_transcript_blocking(
     let format = ExportFormat::from_name(&format_name)
         .ok_or_else(|| format!("unknown format: {format_name}"))?;
 
-    let buffer = match source.as_deref() {
-        Some("live") => &state.live_segments,
-        _ => &state.file_segments,
+    let live = source.as_deref() == Some("live");
+    let buffer = if live {
+        &state.live_segments
+    } else {
+        &state.file_segments
+    };
+    // Only the live session has speaker names; a file transcript keeps "Speaker N".
+    let names = if live {
+        intel::live_speaker_names(&state)
+    } else {
+        SpeakerNames::new()
     };
     let mut segments = buffer
         .lock()
@@ -3741,8 +3784,10 @@ fn export_transcript_blocking(
     segments.sort_by_key(|s| s.start);
 
     let content = match format {
-        ExportFormat::Markdown => format_markdown(&segments, &meta.unwrap_or_default().into()),
-        other => format_transcript(&segments, other),
+        ExportFormat::Markdown => {
+            format_markdown_named(&segments, &meta.unwrap_or_default().into(), &names)
+        }
+        other => format_transcript_named(&segments, other, &names),
     };
 
     // `format_name` is one of the known formats (checked above), so it's a safe extension.
@@ -3762,9 +3807,12 @@ fn export_transcript_blocking(
 
 /// One stored meeting with its segments, for the Library detail view.
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct LibraryNoteDetail {
     meeting: Note,
     segments: Vec<Segment>,
+    /// Names the user gave the meeting's diarized speakers, keyed by speaker id.
+    speaker_names: SpeakerNames,
 }
 
 /// Saves the just-finished transcript (`source` `"live"` by default, or `"file"`) into the meeting
@@ -3807,12 +3855,72 @@ fn save_note(
         }
     }
     if live {
+        // Names given during the session; ones set later in the Library are kept.
+        for (speaker, name) in intel::live_speaker_names(&state) {
+            if let Err(e) = library.set_speaker_name(&id, speaker, &name) {
+                eprintln!("wisp: saving a speaker name failed: {e}");
+            }
+        }
         // The meeting itself is saved; a failure here only loses the derived state.
         if let Err(e) = intel::persist(&state, &mut library, &id, &retained) {
             eprintln!("wisp: saving meeting intelligence failed: {e}");
         }
     }
     Ok(())
+}
+
+/// Names (or with a blank `name`, un-names) a diarized speaker of the live session. Applies to the
+/// reasoning context and exports from now on, and is saved with the meeting.
+#[tauri::command]
+fn set_live_speaker_name(
+    state: State<'_, AppState>,
+    speaker: u32,
+    name: String,
+) -> Result<(), String> {
+    let mut names = state
+        .live_speaker_names
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())?;
+    let name = name.trim();
+    if name.is_empty() {
+        names.remove(&speaker);
+    } else {
+        names.insert(speaker, name.to_owned());
+    }
+    Ok(())
+}
+
+/// Names (or with a blank `name`, un-names) a speaker of a stored meeting.
+#[tauri::command]
+fn set_library_speaker_name(
+    state: State<'_, AppState>,
+    id: String,
+    speaker: u32,
+    name: String,
+) -> Result<(), String> {
+    state
+        .library
+        .lock()
+        .map_err(|_| "library lock poisoned".to_owned())?
+        .set_speaker_name(&id, speaker, &name)
+        .map_err(|e| e.to_string())
+}
+
+/// Folds speaker `from` into `into` in a stored meeting (diarization split one person in two).
+/// Returns how many segments moved.
+#[tauri::command]
+fn merge_library_speaker(
+    state: State<'_, AppState>,
+    id: String,
+    from: u32,
+    into: u32,
+) -> Result<usize, String> {
+    state
+        .library
+        .lock()
+        .map_err(|_| "library lock poisoned".to_owned())?
+        .merge_speaker(&id, from, into)
+        .map_err(|e| e.to_string())
 }
 
 /// Every stored meeting, newest first, for the Library list.
@@ -3832,14 +3940,19 @@ fn get_library_note(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<Option<LibraryNoteDetail>, String> {
-    let detail = state
+    let library = state
         .library
         .lock()
-        .map_err(|_| "library lock poisoned".to_owned())?
-        .get_note(&id)
-        .map_err(|e| e.to_string())?
-        .map(|(meeting, segments)| LibraryNoteDetail { meeting, segments });
-    Ok(detail)
+        .map_err(|_| "library lock poisoned".to_owned())?;
+    let Some((meeting, segments)) = library.get_note(&id).map_err(|e| e.to_string())? else {
+        return Ok(None);
+    };
+    let speaker_names = library.speaker_names(&id).map_err(|e| e.to_string())?;
+    Ok(Some(LibraryNoteDetail {
+        meeting,
+        segments,
+        speaker_names,
+    }))
 }
 
 /// Searches stored notes by the active mode — full-text, semantic, or hybrid (default cap 50 hits).
@@ -4247,6 +4360,9 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(dictation::shortcut_plugin())
+        .plugin(tauri_plugin_notification::init())
+        .manage(tray::TrayState::default())
+        .manage(meeting::MeetingState::default())
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             let active_model_path = data_dir.join("active-model");
@@ -4342,6 +4458,7 @@ pub fn run() {
                 download_settings_path,
                 sessions: Mutex::new(Vec::new()),
                 dictation: Mutex::new(None),
+                dictation_engine: Mutex::new(None),
                 dictation_hotkey: Mutex::new(dictation::DEFAULT_DICTATION_HOTKEY.to_owned()),
                 dictation_enabled: Mutex::new(false),
                 active: Mutex::new(active),
@@ -4360,9 +4477,11 @@ pub fn run() {
                 file_cancel: Arc::new(AtomicBool::new(false)),
                 file_busy: Arc::new(AtomicBool::new(false)),
                 live_segments: Mutex::new(Vec::new()),
+                live_speaker_names: Mutex::new(SpeakerNames::new()),
                 managed_dir: managed_dir.clone(),
                 retention_path,
                 reasoning: reasoning::ReasoningState::load(data_dir.join("reasoning.json")),
+                audit: audit::AuditState::default(),
                 library: Mutex::new(library),
                 embed_model: Mutex::new(embed_model),
                 embed_model_path,
@@ -4381,6 +4500,10 @@ pub fn run() {
                 custom_models: Mutex::new(custom_models),
                 custom_models_dir,
             });
+
+            audit::spawn_writer(app.handle());
+            tray::build(app)?;
+            meeting::spawn_poller(app.handle());
 
             // Restore the persisted embedding model in the background — loading may download and be
             // slow. Spawned after `manage` so the `state()` call inside `load_embedder` resolves.
@@ -4456,6 +4579,8 @@ pub fn run() {
             context::list_context,
             context::describe_context,
             context::remove_context,
+            context::context_image,
+            context::list_project_screenshots,
             reasoning::get_reasoning_settings,
             reasoning::set_reasoning_settings,
             reasoning::check_reasoning,
@@ -4473,6 +4598,12 @@ pub fn run() {
             intel::create_project,
             intel::list_project_memory,
             intel::delete_project_memory,
+            intel::rename_project,
+            intel::get_project_instructions,
+            intel::set_project_instructions,
+            reasoning::suggest_title,
+            intel::rename_note,
+            intel::set_note_project,
             intel::intel_learning_propose,
             intel::intel_learning_save,
             retention::get_retention,
@@ -4481,6 +4612,9 @@ pub fn run() {
             retention::prune_now,
             retention::delete_project_completely,
             assist::realtime::stop_assist_realtime,
+            audit::list_ai_activity,
+            audit::ai_activity_live_meeting,
+            audit::clear_ai_activity,
             assist::realtime::assist_hint_now,
             transcribe_file,
             cancel_file_transcription,
@@ -4491,6 +4625,9 @@ pub fn run() {
             set_stream_muted,
             save_note,
             list_library_notes,
+            set_live_speaker_name,
+            set_library_speaker_name,
+            merge_library_speaker,
             get_library_note,
             search_library,
             delete_library_note,
@@ -4501,11 +4638,32 @@ pub fn run() {
             delete_embedding_model,
             search_mode,
             set_search_mode,
-            frontend_ready
+            frontend_ready,
+            tray::set_tray_recording,
+            meeting::set_meeting_detection
         ])
+        // On macOS, closing the window hides it: Wisp stays in the menu bar (for meeting detection
+        // and a running session) until Quit.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if cfg!(target_os = "macos") && window.label() == "main" {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app_handle, event| {
+            // Clicking the Dock icon brings the hidden window back.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen {
+                has_visible_windows: false,
+                ..
+            } = event
+            {
+                tray::show_main_window(app_handle);
+            }
             // Release audio capture on quit so an abrupt exit never leaves the CoreAudio HAL or
             // ScreenCaptureKit wedged for the next launch. Bounded (it reuses the stop teardown), so a
             // stuck native handle can't hang the quit either; a no-op when nothing is running.

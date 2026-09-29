@@ -146,6 +146,8 @@ impl GapCategory {
 #[derive(Debug, Clone, Deserialize)]
 struct RawGap {
     category: GapCategory,
+    #[serde(default)]
+    headline: String,
     text: String,
     source_refs: Vec<String>,
     related_items: Vec<String>,
@@ -161,6 +163,9 @@ struct RawAudit {
 #[serde(rename_all = "camelCase")]
 pub struct Gap {
     pub category: GapCategory,
+    /// At most six words, shown first; see [`crate::headline`].
+    #[serde(default)]
+    pub headline: String,
     pub text: String,
     pub source_refs: Vec<SourceRef>,
     /// The evidence IDs as cited, for display.
@@ -216,10 +221,13 @@ with no owner or no date; promises later weakened; things the other side still o
 owe; contradictions (conflict).
 
 Rules:
-- Each gap is one short, plain sentence.
+- Each gap has a headline of at most six words that You can read at a glance while still \
+talking (an imperative or a noun phrase, like \"Confirm Azure EU region\" or \"Dataset date \
+slipped\"), and text: one short, plain sentence with the full point.
 - Cite the evidence IDs each gap rests on, exactly as shown. A \"missing\" gap is about something \
 nobody said, so it may cite nothing; every other gap cites at least one ID.
 - List related state item ids in related_items when a gap is about an item.
+- If the context has \"About You and this project\", list only gaps that matter to You there.
 - Most important first. If nothing is outstanding, return {\"gaps\": []}.";
 
 /// The output schema of an audit.
@@ -238,9 +246,10 @@ pub fn audit_schema() -> Value {
                 "items": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["category", "text", "source_refs", "related_items"],
+                    "required": ["category", "headline", "text", "source_refs", "related_items"],
                     "properties": {
                         "category": {"type": "string", "enum": categories},
+                        "headline": {"type": "string", "x-optional": true},
                         "text": {"type": "string"},
                         "source_refs": {"type": "array", "items": {"type": "string"}},
                         "related_items": {"type": "array", "items": {"type": "string"}}
@@ -259,6 +268,7 @@ pub struct AuditInput<'a> {
     pub retrieved: &'a [Snippet],
     /// The project's accepted knowledge.
     pub memory: &'a [wisp_library::MemoryEntry],
+    /// What matters to the user here (see [`crate::about_you`]).
     pub focus: Option<&'a str>,
     pub timeout: Duration,
 }
@@ -294,10 +304,7 @@ pub fn prepare_audit(input: &AuditInput) -> (ReasoningRequest, EvidencePacket) {
         render_snippets(&mut packet, input.retrieved)
     );
 
-    let mut context = String::new();
-    if let Some(focus) = input.focus.map(str::trim).filter(|f| !f.is_empty()) {
-        let _ = writeln!(context, "## What You wanted from this meeting\n\n{focus}\n");
-    }
+    let mut context = crate::about::render_about(input.focus);
     context.push_str(&crate::ask::render_items_for(input.state, &packet));
     context.push_str(&project);
     context.push_str(&transcript);
@@ -377,6 +384,7 @@ fn check_gap(
     }
     Ok(Gap {
         category: raw.category,
+        headline: crate::headline::headline(&raw.headline, &text),
         text,
         source_refs,
         cited,
@@ -467,9 +475,16 @@ mod tests {
         let (req, packet) = prepare_audit(&input(&t, &s));
         assert_eq!(req.task, TaskKind::EndgameAudit);
         assert!(req.instructions.contains("gap audit, not a summary"));
+        assert!(req.instructions.contains("headline of at most six words"));
+        let item = &req.output_schema["properties"]["gaps"]["items"];
+        assert!(item["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("headline")));
+        assert!(item["properties"]["headline"].is_object());
         assert!(req
             .context
-            .contains("## What You wanted from this meeting\n\nScope the migration"));
+            .contains("## About You and this project\n\nScope the migration"));
         assert!(req.context.contains("COM-1 [commitment"));
         assert!(req
             .context
@@ -486,19 +501,26 @@ mod tests {
         let s = state();
         let backend = ScriptedBackend::named("scripted");
         backend.push_ok(json!({"gaps": [
-            {"category": "commitment_without_date", "text": "You will send the revised architecture.",
+            {"category": "commitment_without_date", "headline": "Date the architecture revision",
+             "text": "You will send the revised architecture.",
              "source_refs": ["T1"], "related_items": ["COM-1"]},
-            {"category": "missing", "text": "Production deployment ownership was never established.",
+            {"category": "missing", "headline": "",
+             "text": "Production deployment ownership was never established by anyone here.",
              "source_refs": [], "related_items": []},
-            {"category": "clarify", "text": "Migration scope unclear.", "source_refs": [], "related_items": []},
-            {"category": "owed_by_them", "text": "Security questionnaire.", "source_refs": ["T9"], "related_items": []},
-            {"category": "conflict", "text": "x", "source_refs": ["T0"], "related_items": ["REQ-4"]}
+            {"category": "clarify", "headline": "", "text": "Migration scope unclear.", "source_refs": [], "related_items": []},
+            {"category": "owed_by_them", "headline": "", "text": "Security questionnaire.", "source_refs": ["T9"], "related_items": []},
+            {"category": "conflict", "headline": "", "text": "x", "source_refs": ["T0"], "related_items": ["REQ-4"]}
         ]}));
         let report = audit(&backend, &CancelToken::new(), &input(&t, &s)).unwrap();
         assert_eq!(report.gaps.len(), 2);
         assert_eq!(report.gaps[0].source_refs, ["Mlive:T1"]);
         assert_eq!(report.gaps[0].related_items, ["COM-1"]);
         assert!(report.gaps[1].cited.is_empty());
+        assert_eq!(report.gaps[0].headline, "Date the architecture revision");
+        assert_eq!(
+            report.gaps[1].headline, "Production deployment ownership was never established…",
+            "derived from the text when the model gave none"
+        );
         let reasons: Vec<&str> = report.rejected.iter().map(|(_, r)| r.as_str()).collect();
         assert_eq!(
             reasons,
@@ -510,7 +532,7 @@ mod tests {
         );
 
         let md = report.to_markdown();
-        assert!(md.starts_with("## Before you wrap\n\n**Missing**\n- Production deployment ownership was never established."));
+        assert!(md.starts_with("## Before you wrap\n\n**Missing**\n- Production deployment ownership was never established by anyone here."));
         assert!(md.contains(
             "**Commitment without date**\n- You will send the revised architecture. [T1]"
         ));
@@ -518,6 +540,34 @@ mod tests {
             md.find("**Missing**").unwrap() < md.find("**Commitment without date**").unwrap(),
             "categories in a fixed order"
         );
+    }
+
+    #[test]
+    fn a_reply_without_headlines_still_passes() {
+        // Small local models sometimes leave the field out; the pass must not fail over it.
+        let t = vec![
+            line(0, "Hello"),
+            line(1, "I'll send the revised architecture."),
+        ];
+        let s = state();
+        let backend = ScriptedBackend::named("scripted");
+        backend.push_ok(json!({"gaps": [
+            {"category": "commitment_without_date", "text": "You will send the revised architecture.",
+             "source_refs": ["T1"], "related_items": ["COM-1"]}
+        ]}));
+        let report = audit(&backend, &CancelToken::new(), &input(&t, &s)).unwrap();
+        assert_eq!(
+            report.gaps[0].headline,
+            "You will send the revised architecture."
+        );
+    }
+
+    #[test]
+    fn a_gap_saved_before_headlines_still_loads() {
+        let old = json!({"category": "clarify", "headline": "", "text": "Scope unclear.", "sourceRefs": [],
+                         "cited": [], "relatedItems": []});
+        let gap: Gap = serde_json::from_value(old).unwrap();
+        assert_eq!(gap.headline, "");
     }
 
     #[test]

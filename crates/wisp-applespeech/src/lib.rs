@@ -147,13 +147,28 @@ mod pure_tests {
 #[cfg(all(test, target_os = "macos", apple_speech_real))]
 mod tests {
     /// Calling across the FFI proves the Swift shim links (static lib + Speech/AVFoundation frameworks +
-    /// Swift runtime) and runs; on the build machine (macOS 26+) it should report available.
+    /// Swift runtime) and runs. A macOS-26 SDK can build on an older OS, so the expected answer
+    /// follows the running OS, not the SDK.
     #[test]
     fn reports_availability_on_this_os() {
-        assert!(
+        assert_eq!(
             super::is_available(),
-            "macOS 26+ should report Apple on-device speech available"
+            os_major_version() >= 26,
+            "Apple on-device speech should be available exactly on macOS 26+"
         );
+    }
+
+    fn os_major_version() -> u32 {
+        let out = std::process::Command::new("sw_vers")
+            .arg("-productVersion")
+            .output()
+            .expect("run sw_vers");
+        String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .split('.')
+            .next()
+            .and_then(|m| m.parse().ok())
+            .expect("parse macOS major version")
     }
 }
 

@@ -5,6 +5,7 @@
 
 use std::time::Duration;
 
+use crate::speakers::{speaker_display, speaker_name, SpeakerNames};
 use crate::transcript::{AudioSourceKind, SpeakerId, TranscriptSegment};
 
 /// A transcript export format.
@@ -48,11 +49,21 @@ impl ExportFormat {
 /// Renders `segments` into `format` as a single string. Empty/whitespace-only segments are skipped.
 /// Markdown uses empty [`MeetingMeta`]; call [`format_markdown`] directly to pass meeting metadata.
 pub fn format_transcript(segments: &[TranscriptSegment], format: ExportFormat) -> String {
+    format_transcript_named(segments, format, &SpeakerNames::new())
+}
+
+/// [`format_transcript`], labelling each diarized speaker by the name the user gave it (unnamed
+/// speakers stay `Speaker N`).
+pub fn format_transcript_named(
+    segments: &[TranscriptSegment],
+    format: ExportFormat,
+    names: &SpeakerNames,
+) -> String {
     match format {
-        ExportFormat::Txt => format_txt(segments),
-        ExportFormat::Srt => format_srt(segments),
-        ExportFormat::Vtt => format_vtt(segments),
-        ExportFormat::Markdown => format_markdown(segments, &MeetingMeta::default()),
+        ExportFormat::Txt => format_txt(segments, names),
+        ExportFormat::Srt => format_srt(segments, names),
+        ExportFormat::Vtt => format_vtt(segments, names),
+        ExportFormat::Markdown => format_markdown_named(segments, &MeetingMeta::default(), names),
     }
 }
 
@@ -129,10 +140,10 @@ fn join_text(prev: &str, next: &str) -> String {
 }
 
 /// Plain text: one paragraph per block (speaker-labelled when diarized), a blank line between blocks.
-fn format_txt(segments: &[TranscriptSegment]) -> String {
+fn format_txt(segments: &[TranscriptSegment], names: &SpeakerNames) -> String {
     let mut out: String = group_paragraphs(segments)
         .iter()
-        .map(labelled_paragraph)
+        .map(|para| labelled_paragraph(para, names))
         .collect::<Vec<_>>()
         .join("\n\n");
     if !out.is_empty() {
@@ -142,9 +153,9 @@ fn format_txt(segments: &[TranscriptSegment]) -> String {
 }
 
 /// A paragraph's text, prefixed with its speaker (`Speaker 1: …`) when diarization labelled it.
-fn labelled_paragraph(para: &Paragraph) -> String {
+fn labelled_paragraph(para: &Paragraph, names: &SpeakerNames) -> String {
     match para.speaker {
-        Some(speaker) => format!("{}: {}", speaker_label(speaker), para.text),
+        Some(speaker) => format!("{}: {}", speaker_display(speaker, names), para.text),
         None => para.text.clone(),
     }
 }
@@ -170,9 +181,18 @@ pub struct MeetingMeta {
 /// participants, engine, language), an optional `## Summary`, then a `## Transcript` of diarized,
 /// timestamped, Me/Them-labelled paragraphs — human-readable and clean for an LLM/agent to consume.
 pub fn format_markdown(segments: &[TranscriptSegment], meta: &MeetingMeta) -> String {
+    format_markdown_named(segments, meta, &SpeakerNames::new())
+}
+
+/// [`format_markdown`], labelling each diarized speaker by the name the user gave it.
+pub fn format_markdown_named(
+    segments: &[TranscriptSegment],
+    meta: &MeetingMeta,
+    names: &SpeakerNames,
+) -> String {
     let paragraphs = group_paragraphs(segments);
 
-    let mut out = front_matter(&paragraphs, meta);
+    let mut out = front_matter(&paragraphs, meta, names);
 
     out.push_str(&format!(
         "# {}\n\n",
@@ -193,7 +213,7 @@ pub fn format_markdown(segments: &[TranscriptSegment], meta: &MeetingMeta) -> St
     out.push_str("## Transcript\n\n");
     for para in &paragraphs {
         let stamp = short_timestamp(para.start);
-        match meeting_label(para) {
+        match meeting_label(para, names) {
             Some(who) => out.push_str(&format!("**[{stamp}] {who}:** {}\n\n", para.text)),
             None => out.push_str(&format!("**[{stamp}]** {}\n\n", para.text)),
         }
@@ -204,7 +224,7 @@ pub fn format_markdown(segments: &[TranscriptSegment], meta: &MeetingMeta) -> St
 
 /// The YAML front-matter block — only the fields present/derivable, so a bare file export stays minimal
 /// while a full meeting carries its context.
-fn front_matter(paragraphs: &[Paragraph], meta: &MeetingMeta) -> String {
+fn front_matter(paragraphs: &[Paragraph], meta: &MeetingMeta, names: &SpeakerNames) -> String {
     let mut lines: Vec<String> = Vec::new();
 
     lines.push(format!(
@@ -218,7 +238,7 @@ fn front_matter(paragraphs: &[Paragraph], meta: &MeetingMeta) -> String {
         lines.push(format!("duration: {}", full_timestamp(duration)));
     }
 
-    let participants = participants(paragraphs);
+    let participants = participants(paragraphs, names);
     if !participants.is_empty() {
         let joined = participants
             .iter()
@@ -238,10 +258,10 @@ fn front_matter(paragraphs: &[Paragraph], meta: &MeetingMeta) -> String {
 }
 
 /// The distinct speaker labels in first-seen order — the meeting's participant list.
-fn participants(paragraphs: &[Paragraph]) -> Vec<String> {
+fn participants(paragraphs: &[Paragraph], names: &SpeakerNames) -> Vec<String> {
     let mut seen: Vec<String> = Vec::new();
     for para in paragraphs {
-        if let Some(label) = meeting_label(para) {
+        if let Some(label) = meeting_label(para, names) {
             if !seen.contains(&label) {
                 seen.push(label);
             }
@@ -252,8 +272,12 @@ fn participants(paragraphs: &[Paragraph]) -> Vec<String> {
 
 /// A meeting-aware speaker label for a paragraph: the local mic is "Me"; the system/far end is "Them"
 /// (with the diarized speaker number when known); any other source (a file) is just "Speaker N" when
-/// diarized, else unlabelled.
-fn meeting_label(para: &Paragraph) -> Option<String> {
+/// diarized, else unlabelled. A speaker the user named reads as that name alone — on the mic too,
+/// where diarization only splits the stream when several people share it.
+fn meeting_label(para: &Paragraph, names: &SpeakerNames) -> Option<String> {
+    if let Some(name) = para.speaker.and_then(|s| speaker_name(s, names)) {
+        return Some(name.to_owned());
+    }
     match para.source {
         AudioSourceKind::Microphone => Some("Me".to_owned()),
         AudioSourceKind::System => Some(match para.speaker {
@@ -292,7 +316,7 @@ fn full_timestamp(d: Duration) -> String {
     )
 }
 
-fn format_srt(segments: &[TranscriptSegment]) -> String {
+fn format_srt(segments: &[TranscriptSegment], names: &SpeakerNames) -> String {
     let mut out = String::new();
     let mut index = 1;
     for segment in segments {
@@ -304,14 +328,14 @@ fn format_srt(segments: &[TranscriptSegment]) -> String {
             "{index}\n{} --> {}\n{}\n\n",
             timestamp(segment.start, ','),
             timestamp(segment.end, ','),
-            labelled_text(segment),
+            labelled_text(segment, names),
         ));
         index += 1;
     }
     out
 }
 
-fn format_vtt(segments: &[TranscriptSegment]) -> String {
+fn format_vtt(segments: &[TranscriptSegment], names: &SpeakerNames) -> String {
     let mut out = String::from("WEBVTT\n\n");
     for segment in segments {
         let text = segment.text.trim();
@@ -322,7 +346,7 @@ fn format_vtt(segments: &[TranscriptSegment]) -> String {
             "{} --> {}\n{}\n\n",
             timestamp(segment.start, '.'),
             timestamp(segment.end, '.'),
-            vtt_cue_body(segment),
+            vtt_cue_body(segment, names),
         ));
     }
     out
@@ -331,9 +355,9 @@ fn format_vtt(segments: &[TranscriptSegment]) -> String {
 /// VTT cue body: when the segment carries word-level timings, emit them as WebVTT inline timestamps
 /// (`<00:00:00.500>word`) for karaoke-style highlighting; otherwise the plain labelled text. The
 /// speaker label, if any, still prefixes the cue.
-fn vtt_cue_body(segment: &TranscriptSegment) -> String {
+fn vtt_cue_body(segment: &TranscriptSegment, names: &SpeakerNames) -> String {
     if segment.words.is_empty() {
-        return labelled_text(segment);
+        return labelled_text(segment, names);
     }
 
     let mut timed = String::new();
@@ -348,24 +372,24 @@ fn vtt_cue_body(segment: &TranscriptSegment) -> String {
     }
 
     match segment.speaker {
-        Some(speaker) => format!("{}: {timed}", speaker_label(speaker)),
+        Some(speaker) => format!("{}: {timed}", speaker_display(speaker, names)),
         None => timed,
     }
 }
 
 /// Segment text, prefixed with its speaker (`Speaker 1: …`) once diarization has labelled it; the
 /// raw text otherwise. Assumes the caller already skipped blank segments.
-fn labelled_text(segment: &TranscriptSegment) -> String {
+fn labelled_text(segment: &TranscriptSegment, names: &SpeakerNames) -> String {
     let text = segment.text.trim();
     match segment.speaker {
-        Some(speaker) => format!("{}: {text}", speaker_label(speaker)),
+        Some(speaker) => format!("{}: {text}", speaker_display(speaker, names)),
         None => text.to_owned(),
     }
 }
 
 /// Human label for a speaker, 1-based so `SpeakerId(0)` reads as `Speaker 1`.
 fn speaker_label(id: SpeakerId) -> String {
-    format!("Speaker {}", id.0 + 1)
+    speaker_display(id, &SpeakerNames::new())
 }
 
 /// `HH:MM:SS<sep>mmm` — `sep` is `,` for SRT and `.` for VTT.
@@ -529,6 +553,39 @@ mod tests {
             "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nSpeaker 1: hello\n\n\
              00:00:01.000 --> 00:00:02.000\nSpeaker 2: hi back\n\n"
         );
+    }
+
+    #[test]
+    fn named_exports_use_the_speaker_names() {
+        let segs = vec![
+            seg_with_speaker("hello", 0, 1_000, 0),
+            seg_with_speaker("hi back", 1_000, 2_000, 1),
+        ];
+        let names: SpeakerNames = [(0, "Alice".to_owned())].into_iter().collect();
+        assert_eq!(
+            format_transcript_named(&segs, ExportFormat::Txt, &names),
+            "Alice: hello\n\nSpeaker 2: hi back\n"
+        );
+        assert!(format_transcript_named(&segs, ExportFormat::Srt, &names).contains("Alice: hello"));
+    }
+
+    #[test]
+    fn named_markdown_replaces_them_and_me_labels_for_named_speakers() {
+        let mut them = seg_src("over here", 0, 1_000, AudioSourceKind::System);
+        them.speaker = Some(SpeakerId(1));
+        let mut room = seg_src("and me", 2_000, 3_000, AudioSourceKind::Microphone);
+        room.speaker = Some(SpeakerId(2));
+        let me = seg_src("sure", 4_000, 5_000, AudioSourceKind::Microphone);
+        let names: SpeakerNames = [(1, "Bob".to_owned()), (2, "Cara".to_owned())]
+            .into_iter()
+            .collect();
+        let md = format_markdown_named(&[them, room, me], &MeetingMeta::default(), &names);
+        assert!(
+            md.contains("participants: [\"Bob\", \"Cara\", \"Me\"]"),
+            "{md}"
+        );
+        assert!(md.contains("**[0:00] Bob:** over here"), "{md}");
+        assert!(md.contains("**[0:04] Me:** sure"), "{md}");
     }
 
     #[test]

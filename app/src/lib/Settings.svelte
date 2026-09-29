@@ -8,22 +8,31 @@
   import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
   import EndpointsManager from "$lib/EndpointsManager.svelte";
   import NotesSearch from "$lib/NotesSearch.svelte";
+  import AiActivity from "$lib/AiActivity.svelte";
   import { i18n } from "$lib/i18n.svelte";
 
   let {
     open = $bindable(false),
     autoSave = $bindable(false),
     intel = $bindable(false),
-  }: { open?: boolean; autoSave?: boolean; intel?: boolean } =
-    $props();
+    detectMeetings = $bindable(true),
+    detectMeetingsSupported = true,
+  }: {
+    open?: boolean;
+    autoSave?: boolean;
+    intel?: boolean;
+    detectMeetings?: boolean;
+    detectMeetingsSupported?: boolean;
+  } = $props();
 
-  type Section = "models" | "search" | "downloads" | "dictation" | "storage";
+  type Section = "models" | "search" | "downloads" | "dictation" | "storage" | "activity";
   const sections = $derived<{ id: Section; label: string }[]>([
     { id: "models", label: i18n.t.settings.aiModels },
     { id: "search", label: i18n.t.settings.search },
     { id: "downloads", label: i18n.t.settings.downloads },
     { id: "dictation", label: i18n.t.settings.dictation },
     { id: "storage", label: i18n.t.settings.storage },
+    { id: "activity", label: i18n.t.audit.title },
   ]);
   let section = $state<Section>("models");
 
@@ -40,6 +49,8 @@
   // ── Dictation category ──────────────────────────────────────────────────────────────────────────
   type DictationStatus = {
     available: boolean;
+    engineKind: "apple" | "local" | null;
+    engineName: string | null;
     accessibilityOk: boolean;
     enabled: boolean;
     hotkey: string;
@@ -162,10 +173,11 @@
     localEndpoint: string | null;
     localModel: string | null;
     localForLive: boolean;
+    aboutMe: string;
   };
   type EndpointChoice = { id: string; name: string; model: string; local: boolean };
   const REASONING_MODES: ReasoningMode[] = ["auto", "codex", "claude", "local"];
-  let reasoning = $state<ReasoningSettings>({ mode: "auto", localEndpoint: null, localModel: null, localForLive: true });
+  let reasoning = $state<ReasoningSettings>({ mode: "auto", localEndpoint: null, localModel: null, localForLive: true, aboutMe: "" });
   let reasoningEndpoints = $state<EndpointChoice[]>([]);
   let reasoningError = $state("");
   let reasoningHealth = $state<{ which: string; ready: boolean; detail: string }[]>([]);
@@ -269,12 +281,59 @@
     }
   }
 
+  // ── Installed local models (Storage) ─────────────────────────────────────────────────────────────
+  // Every downloaded transcription, speaker and noise model, so disk can be reclaimed in one place.
+  type InstalledModel = { id: string; name: string; sizeBytes: number; active: boolean; kind: string };
+  type ModelRow = InstalledModel & { installed: boolean; deletable: boolean };
+  let installedModels = $state<InstalledModel[]>([]);
+  let confirmModel = $state("");
+  let modelBusy = $state("");
+
+  async function loadInstalledModels() {
+    try {
+      const lists = await Promise.all([
+        invoke<ModelRow[]>("list_models"),
+        invoke<ModelRow[]>("list_diarization_models"),
+        invoke<ModelRow[]>("list_denoise_models"),
+      ]);
+      const kinds = [i18n.t.settings.kindTranscription, i18n.t.settings.kindSpeakers, i18n.t.settings.kindNoise];
+      const seen = new Set<string>();
+      installedModels = lists.flatMap((list, i) =>
+        list
+          .filter((m) => m.installed && m.deletable && !seen.has(m.id) && seen.add(m.id))
+          .map((m) => ({ id: m.id, name: m.name, sizeBytes: m.sizeBytes, active: m.active, kind: kinds[i] })),
+      );
+    } catch (e) {
+      storageError = String(e);
+    }
+  }
+
+  async function deleteModel(id: string) {
+    modelBusy = id;
+    try {
+      await invoke("remove_model", { id });
+      // The Live/File pickers keep their own lists; tell them to reload.
+      window.dispatchEvent(new CustomEvent("wisp:models-changed"));
+      await loadInstalledModels();
+    } catch (e) {
+      storageError = String(e);
+    } finally {
+      modelBusy = "";
+      confirmModel = "";
+    }
+  }
+
+  function fmtBytes(n: number): string {
+    return n >= 1e9 ? `${(n / 1e9).toFixed(1)} GB` : `${Math.max(1, Math.round(n / 1e6))} MB`;
+  }
+
   // Refresh dictation status + the storage paths whenever the dialog opens.
   $effect(() => {
     if (open) {
       loadDictation();
       loadDownloadSettings();
       loadPaths();
+      loadInstalledModels();
       loadRetention();
       loadReasoning();
     }
@@ -327,6 +386,8 @@
         <div class="settings-content">
           {#if section === "models"}
             <EndpointsManager />
+          {:else if section === "activity"}
+            <AiActivity />
           {:else if section === "search"}
             <NotesSearch />
           {:else if section === "downloads"}
@@ -414,6 +475,12 @@
             {#if dictation && !dictation.available}
               <p class="set-note">{i18n.t.settings.dictationNote}</p>
             {:else if dictation}
+              <p class="set-note">
+                {dictation.engineKind === "local" && dictation.engineName
+                  ? i18n.t.settings.dictationUsesModel(dictation.engineName)
+                  : i18n.t.settings.dictationUsesApple}
+              </p>
+
               <div class="set-row">
                 <span class="set-label">{i18n.t.settings.pushToTalk}</span>
                 <button
@@ -461,6 +528,21 @@
               </button>
             </div>
             <p class="set-intro">{i18n.t.settings.meetingIntelNote}</p>
+
+            <div class="set-row">
+              <span class="set-label">{i18n.t.settings.detectMeetings}</span>
+              <button
+                class="set-btn"
+                class:on={detectMeetings && detectMeetingsSupported}
+                disabled={!detectMeetingsSupported}
+                onclick={() => (detectMeetings = !detectMeetings)}
+              >
+                {detectMeetings && detectMeetingsSupported ? i18n.t.settings.on : i18n.t.settings.off}
+              </button>
+            </div>
+            <p class="set-intro">
+              {detectMeetingsSupported ? i18n.t.settings.detectMeetingsNote : i18n.t.settings.detectMeetingsUnsupported}
+            </p>
 
             <label class="set-row">
               <span class="set-label">{i18n.t.settings.reasoning}</span>
@@ -515,6 +597,17 @@
               <p class="set-intro">{i18n.t.settings.localHint}</p>
             {/if}
             <p class="set-intro">{i18n.t.settings.reasoningNote}</p>
+            <label class="set-row about-me-row">
+              <span class="set-label">{i18n.t.settings.aboutMe}</span>
+              <textarea
+                class="set-input about-me"
+                rows="3"
+                placeholder={i18n.t.settings.aboutMePlaceholder}
+                value={reasoning.aboutMe}
+                onchange={(e) => saveReasoning({ ...reasoning, aboutMe: e.currentTarget.value.trim() })}
+              ></textarea>
+            </label>
+            <p class="set-intro">{i18n.t.settings.aboutMeNote}</p>
             <div class="set-row">
               <span class="set-label">{i18n.t.settings.checkReasoningLabel}</span>
               <button class="set-btn check-reasoning" onclick={checkReasoning}>{i18n.t.settings.checkReasoning}</button>
@@ -604,6 +697,30 @@
             {#if retentionError}<p class="set-error">{retentionError}</p>{/if}
 
             {#if storageError}<p class="set-error">{storageError}</p>{/if}
+
+            <p class="set-label models-head">{i18n.t.settings.installedModels}</p>
+            {#if installedModels.length === 0}
+              <p class="set-note">{i18n.t.settings.noInstalledModels}</p>
+            {/if}
+            {#each installedModels as m (m.id)}
+              <div class="store-row">
+                <div class="store-info">
+                  <span class="set-label">{m.name}</span>
+                  <span class="store-path"
+                    >{m.kind} · {fmtBytes(m.sizeBytes)}{m.active ? ` · ${i18n.t.settings.modelInUse}` : ""}</span
+                  >
+                </div>
+                {#if confirmModel === m.id}
+                  <button class="set-btn danger" disabled={modelBusy === m.id} onclick={() => deleteModel(m.id)}>
+                    {modelBusy === m.id ? i18n.t.settings.deletingModel : i18n.t.settings.confirmDeleteModel}
+                  </button>
+                  <button class="set-btn" onclick={() => (confirmModel = "")}>{i18n.t.common.cancel}</button>
+                {:else}
+                  <button class="set-btn" onclick={() => (confirmModel = m.id)}>{i18n.t.settings.deleteModel}</button>
+                {/if}
+              </div>
+            {/each}
+
             {#if paths}
               {#each [{ label: i18n.t.settings.storageModels, path: paths.models, reveal: false }, { label: i18n.t.settings.storageNotes, path: paths.database, reveal: true }, { label: i18n.t.settings.storageData, path: paths.data, reveal: false }] as loc (loc.path)}
                 <div class="store-row">
@@ -625,6 +742,10 @@
 {/if}
 
 <style>
+  .models-head {
+    display: block;
+    margin-top: 14px;
+  }
   .backdrop {
     position: fixed;
     inset: 0;
@@ -865,6 +986,13 @@
 
   .set-input:disabled {
     opacity: 0.5;
+  }
+
+  .about-me {
+    width: 320px;
+    max-width: 100%;
+    font-family: inherit;
+    resize: vertical;
   }
 
   .set-select {
