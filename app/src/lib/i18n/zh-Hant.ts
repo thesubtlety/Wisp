@@ -62,6 +62,15 @@ export const zhHant: Messages = {
     deleteConfirm: "確定要刪除這則筆記?此動作無法復原。其他會議中引用過它的 AI 活動紀錄會保留到過期或你清除為止。",
     you: "你",
     them: "對方",
+    speakers: "說話人",
+    speakerTip: "點擊以重新命名或合併此說話人",
+    speakerName: "說話人名稱",
+    speakerNameHint: "在整場會議中重新命名此說話人。留空則恢復預設標籤。",
+    mergeInto: "合併到…",
+    merge: "合併",
+    mergeTitle: "合併說話人",
+    mergeConfirm: (from: string, into: string): string =>
+      `將 ${from} 的所有發言移到 ${into}？之後 ${from} 將從本場會議中消失。`,
   },
 
   audit: {
@@ -126,6 +135,8 @@ export const zhHant: Messages = {
 
     you: "我",
     them: "對方",
+    speakerTip: "點擊為此說話人命名",
+    speakerName: "說話人名稱",
     youTip: (on, running) =>
       on
         ? running
