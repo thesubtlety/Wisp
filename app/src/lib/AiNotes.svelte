@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { copyText } from "$lib/clipboard";
   // AI assist over the transcript via a chosen provider + model — the same catalog the cloud
   // transcription picker uses (OpenAI, Groq, …, and custom endpoints) — through the shared
   // `runLlmTask` (chat) path. Independent of whatever engine is transcribing (device or cloud).
@@ -625,7 +626,7 @@ in the meeting's language. Output only the summary.";
 
   async function copyEntry(text: string) {
     try {
-      await navigator.clipboard.writeText(text);
+      await copyText(text);
     } catch {
       // clipboard unavailable — silently ignore.
     }

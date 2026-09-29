@@ -1,3 +1,4 @@
+import { copyText } from "$lib/clipboard";
 // Meeting intelligence on the webview side: the live state as `intel://update` reports it, and the
 // Ask conversation. Module-level, so nothing is lost while the panel is closed; reset per session.
 import { invoke } from "@tauri-apps/api/core";
@@ -245,7 +246,7 @@ function exportArgs(kind: ExportKind, running: boolean, liveTitle: (when: string
 export async function copyExport(kind: ExportKind, running: boolean, liveTitle: (when: string) => string) {
   try {
     const text = await invoke<string>("intel_export", exportArgs(kind, running, liveTitle));
-    await navigator.clipboard.writeText(text);
+    await copyText(text);
     intel.exportNote = "copied";
   } catch (e) {
     intel.exportNote = `error:${e}`;

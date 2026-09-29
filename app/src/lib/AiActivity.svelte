@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { copyText } from "$lib/clipboard";
   // The AI activity log: every call Wisp made to a model — on this machine or a remote service —
   // with the full text sent and the reply, newest first. Shown in Settings and from the intelligence
   // panel. The backend caps the list; each entry can hold a whole transcript, so bodies render only
@@ -68,7 +69,7 @@
 
   async function copy(key: string, text: string) {
     try {
-      await navigator.clipboard.writeText(text);
+      await copyText(text);
       copied = key;
       setTimeout(() => {
         if (copied === key) copied = "";

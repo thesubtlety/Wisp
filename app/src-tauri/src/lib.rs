@@ -2585,6 +2585,13 @@ fn select_model(state: State<'_, AppState>, id: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Copies `text` to the system clipboard natively. The page's own clipboard API is refused by
+/// WebKit after an `await`, which every "copy an export" button needs.
+#[tauri::command]
+fn copy_to_clipboard(text: String) -> Result<(), String> {
+    wisp_textinject::copy_text(&text)
+}
+
 /// Deletes an installed local model's downloaded files to reclaim disk space. If it was the active
 /// model the active selection is cleared (in memory and on disk), so the app honestly shows "no model"
 /// rather than pointing at files that are gone. The model stays in the catalog — re-downloadable anytime.
@@ -4640,6 +4647,7 @@ pub fn run() {
             set_search_mode,
             frontend_ready,
             tray::set_tray_recording,
+            copy_to_clipboard,
             meeting::set_meeting_detection
         ])
         // On macOS, closing the window hides it: Wisp stays in the menu bar (for meeting detection
