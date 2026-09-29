@@ -58,6 +58,7 @@ use wisp_pipeline::{
 use wisp_screencapture::ScreenCaptureSource;
 
 mod assist;
+mod audit;
 mod context;
 mod dictation;
 mod intel;
@@ -154,6 +155,8 @@ struct AppState {
     retention_path: PathBuf,
     /// Which reasoning backend meeting intelligence uses.
     reasoning: reasoning::ReasoningState,
+    /// The AI activity log: the live meeting's id and the queue of calls waiting to be written.
+    audit: audit::AuditState,
     /// The on-disk meeting knowledge base (SQLite). Finished meetings are saved, listed, and searched
     /// here; a single connection behind a mutex (a personal library has no concurrency needs).
     library: Mutex<Library>,
@@ -2825,6 +2828,9 @@ struct LiveOptions {
     /// How screenshot labels name this meeting ("Note · 9/28/2026, 2:03 PM").
     #[serde(default)]
     meeting_label: Option<String>,
+    /// The id the meeting will be saved under, so its AI calls are logged under it.
+    #[serde(default)]
+    meeting_id: Option<String>,
 }
 
 /// Resolves the engine a live session will run from `options` + app state: an on-device model, or a
@@ -2944,6 +2950,7 @@ fn start_session_blocking(app: AppHandle, options: LiveOptions) -> Result<Option
     // Intelligence starts before capture so it sees every final the transcript retains, from the
     // first; that keeps its line numbers aligned with the saved transcript.
     intel::reset(&state);
+    audit::set_live_meeting(&state, options.meeting_id.clone());
     if options.intel {
         intel::start(
             &app,
@@ -3217,6 +3224,7 @@ fn stop_session_blocking(app: AppHandle) -> Result<(), String> {
     // After capture, so the runtime has had every final; cancels a pass in flight.
     intel::stop(&state);
     context::end(&app);
+    audit::set_live_meeting(&state, None);
     result
 }
 
@@ -4363,6 +4371,7 @@ pub fn run() {
                 managed_dir: managed_dir.clone(),
                 retention_path,
                 reasoning: reasoning::ReasoningState::load(data_dir.join("reasoning.json")),
+                audit: audit::AuditState::default(),
                 library: Mutex::new(library),
                 embed_model: Mutex::new(embed_model),
                 embed_model_path,
@@ -4381,6 +4390,8 @@ pub fn run() {
                 custom_models: Mutex::new(custom_models),
                 custom_models_dir,
             });
+
+            audit::spawn_writer(app.handle());
 
             // Restore the persisted embedding model in the background — loading may download and be
             // slow. Spawned after `manage` so the `state()` call inside `load_embedder` resolves.
@@ -4487,6 +4498,9 @@ pub fn run() {
             retention::prune_now,
             retention::delete_project_completely,
             assist::realtime::stop_assist_realtime,
+            audit::list_ai_activity,
+            audit::ai_activity_live_meeting,
+            audit::clear_ai_activity,
             assist::realtime::assist_hint_now,
             transcribe_file,
             cancel_file_transcription,

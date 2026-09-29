@@ -10,6 +10,7 @@
 //! sources and meetings for reasoning.
 
 mod embed;
+mod llm_log;
 mod memory;
 mod record;
 mod retention;
@@ -18,6 +19,7 @@ mod state_log;
 mod store;
 
 pub use embed::Embedder;
+pub use llm_log::LlmCall;
 pub use memory::{MemoryEntry, MemoryInput, ProvenanceRef};
 pub use record::{Note, NoteSummary, Project, SearchHit, Segment, Source};
 pub use retention::{

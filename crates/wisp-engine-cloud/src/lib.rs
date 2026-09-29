@@ -832,6 +832,23 @@ pub fn chat_completion(
     api_key: &str,
     req: &ChatRequest,
 ) -> Result<String> {
+    chat_completion_with_usage(provider, model, api_key, req).map(|(text, _)| text)
+}
+
+/// The tokens a chat completion reported in its `usage` object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChatUsage {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+}
+
+/// [`chat_completion`], plus the token usage the provider reported, if any.
+pub fn chat_completion_with_usage(
+    provider: &CloudProvider,
+    model: &str,
+    api_key: &str,
+    req: &ChatRequest,
+) -> Result<(String, Option<ChatUsage>)> {
     let endpoint = chat_endpoint(provider);
     let body = build_chat_body(model, req, false);
 
@@ -841,7 +858,18 @@ pub fn chat_completion(
         .timeout(Duration::from_secs(300))
         .send_string(&body);
 
-    parse_chat_completion(&body_or_error(sent)?)
+    let json = body_or_error(sent)?;
+    Ok((parse_chat_completion(&json)?, parse_chat_usage(&json)))
+}
+
+/// The `usage` of an OpenAI-style chat completion, when it has one.
+fn parse_chat_usage(json: &str) -> Option<ChatUsage> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let usage = v.get("usage")?;
+    Some(ChatUsage {
+        prompt_tokens: usage.get("prompt_tokens")?.as_u64()?,
+        completion_tokens: usage.get("completion_tokens")?.as_u64()?,
+    })
 }
 
 /// Streaming variant of [`chat_completion`]: POSTs with `stream: true`, reads the SSE response, and
@@ -1422,6 +1450,16 @@ mod tests {
             "hi there"
         );
         assert_eq!(parse_chat_completion(r#"{"choices":[]}"#).unwrap(), "");
+        assert_eq!(
+            parse_chat_usage(
+                r#"{"choices":[],"usage":{"prompt_tokens":30,"completion_tokens":5,"total_tokens":35}}"#
+            ),
+            Some(ChatUsage {
+                prompt_tokens: 30,
+                completion_tokens: 5
+            })
+        );
+        assert_eq!(parse_chat_usage(r#"{"choices":[]}"#), None);
     }
 
     #[test]

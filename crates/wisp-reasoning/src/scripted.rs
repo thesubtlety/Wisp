@@ -93,6 +93,7 @@ impl ReasoningBackend for ScriptedBackend {
             output: result,
             backend: self.name.clone(),
             elapsed: Duration::ZERO,
+            usage: None,
         })
     }
 }

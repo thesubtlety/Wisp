@@ -64,6 +64,48 @@ export const zhHant: Messages = {
     them: "對方",
   },
 
+  audit: {
+    title: "AI 活動",
+    intro:
+      "Wisp 向 AI 模型發出的每一次呼叫，包括傳送的完整內容和回覆。「本機」呼叫留在這台 Mac 上；「遠端」呼叫傳往線上服務（Codex 和 Claude 命令列工具會傳送到 OpenAI 和 Anthropic）。記錄與逐字稿保留同樣長的時間，刪除會議會一併刪除其記錄。",
+    all: "全部",
+    thisMeeting: "本次會議",
+    refresh: "重新整理",
+    clear: "清除記錄",
+    clearConfirm: "刪除全部 AI 活動記錄？此操作無法復原。",
+    clearYes: "清除",
+    cancel: "取消",
+    empty: "還沒有 AI 呼叫記錄。",
+    noMeeting: "目前沒有進行中或剛儲存的會議。",
+    capped: (n: number) => `僅顯示最新的 ${n} 筆。`,
+    local: "本機",
+    remote: "遠端",
+    ok: "成功",
+    failed: "出錯",
+    defaultModel: "預設模型",
+    tokens: (input: number, output: number, estimated: boolean) =>
+      `輸入 ${estimated ? "≈" : ""}${input.toLocaleString()} / 輸出 ${estimated ? "≈" : ""}${output.toLocaleString()}`,
+    estimatedNote: "該後端未回報 token 數，因此依文字估算（約 4 個字元 1 個 token）。",
+    sent: "傳送內容",
+    instructions: "指令",
+    context: "上下文",
+    images: "圖片",
+    reply: "回覆",
+    error: "錯誤",
+    copy: "複製",
+    copied: "已複製",
+    tasks: {
+      observe: "即時更新",
+      ask: "提問",
+      endgame_audit: "收尾檢查",
+      post_call: "會後回顧",
+      project_learning: "專案學習",
+      screenshot_context: "截圖描述",
+      assist: "AI 助手",
+      realtime_assist: "即時助手",
+    },
+  },
+
   live: {
     loadingModels: "正在載入模型…",
 

@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 
 use crate::backend::{
     finish, truncate, CancelToken, Capabilities, Health, ReasoningBackend, ReasoningError,
-    ReasoningRequest, ReasoningResponse,
+    ReasoningRequest, ReasoningResponse, TokenUsage,
 };
 
 /// How long the health check waits for `/models`.
@@ -119,6 +119,16 @@ fn message_text(body: &str) -> Result<String, ReasoningError> {
         .ok_or_else(|| ReasoningError::BadOutput(truncate(body, 400)))
 }
 
+/// The `usage` a chat-completions response reports, if any.
+fn message_usage(body: &str) -> Option<TokenUsage> {
+    let v: Value = serde_json::from_str(body).ok()?;
+    let usage = v.get("usage")?;
+    Some(TokenUsage {
+        input: usage.get("prompt_tokens")?.as_u64()?,
+        output: usage.get("completion_tokens")?.as_u64()?,
+    })
+}
+
 /// Whether the endpoint is on this machine: a loopback host.
 pub fn is_loopback(base_url: &str) -> bool {
     let rest = base_url
@@ -168,6 +178,10 @@ impl ReasoningBackend for OpenAiCompatBackend {
         }
     }
 
+    fn model(&self) -> Option<&str> {
+        Some(&self.config.model)
+    }
+
     fn invoke(
         &self,
         req: &ReasoningRequest,
@@ -210,6 +224,7 @@ impl ReasoningBackend for OpenAiCompatBackend {
             message_text(&body)?,
             None,
             start.elapsed(),
+            message_usage(&body),
         )
     }
 }
@@ -280,7 +295,11 @@ mod tests {
     }
 
     fn reply(content: &str) -> String {
-        json!({"choices": [{"message": {"role": "assistant", "content": content}}]}).to_string()
+        json!({
+            "choices": [{"message": {"role": "assistant", "content": content}}],
+            "usage": {"prompt_tokens": 120, "completion_tokens": 7, "total_tokens": 127},
+        })
+        .to_string()
     }
 
     fn backend(base: String) -> OpenAiCompatBackend {
@@ -297,6 +316,13 @@ mod tests {
         let r = backend(base).invoke(&req(), &CancelToken::new()).unwrap();
         assert_eq!(r.output, json!({"ok": true}));
         assert_eq!(r.backend, "local");
+        assert_eq!(
+            r.usage,
+            Some(TokenUsage {
+                input: 120,
+                output: 7
+            })
+        );
         let sent = seen.lock().unwrap()[0].clone();
         assert!(sent.starts_with("POST /v1/chat/completions"));
         let body: Value = serde_json::from_str(&sent[sent.find('{').unwrap()..]).unwrap();

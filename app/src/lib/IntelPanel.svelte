@@ -3,6 +3,8 @@
   // copyable) and State (the structured meeting state, with Analyze now). Lives inside AssistPanel.
   import { i18n } from "$lib/i18n.svelte";
   import ShotThumb from "$lib/ShotThumb.svelte";
+  import Modal from "$lib/Modal.svelte";
+  import AiActivity from "$lib/AiActivity.svelte";
   import {
     intel,
     askQuestion,
@@ -60,6 +62,7 @@
       .map((f) => `${f.n}. [${i18n.t.intel.classes[f.class]}] ${f.text}`)
       .join("\n");
   }
+  let activityOpen = $state(false);
   let copiedAt = $state(-1);
   // Ask answers opened past their short form, by turn.
   let expanded = $state(new Set<number>());
@@ -138,7 +141,12 @@
         {i18n.t.intel.tabReview}
       </button>
     {/if}
+    <button class="activity" onclick={() => (activityOpen = true)}>{i18n.t.audit.title}</button>
   </div>
+
+  <Modal bind:open={activityOpen} title={i18n.t.audit.title}>
+    <AiActivity meetingId={intel.savedMeetingId ?? ""} />
+  </Modal>
 
   {#if intel.tab === "insights"}
     <div class="feed">
@@ -530,6 +538,10 @@
     border-bottom: 2px solid transparent;
     padding: 6px 10px;
     cursor: pointer;
+  }
+
+  .tabs button.activity {
+    margin-left: auto;
   }
 
   .tabs button.on {
