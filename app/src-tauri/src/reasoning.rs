@@ -11,9 +11,10 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
 use wisp_reasoning::{
-    is_loopback, CancelToken, Capabilities, ClaudeCodeBackend, ClaudeConfig, CodexCliBackend,
-    CodexConfig, FallbackBackend, Health, LocalConfig, OpenAiCompatBackend, ReasoningBackend,
-    ReasoningError, ReasoningRequest, ReasoningResponse, TaskKind, TaskRouter,
+    is_loopback, AuditSink, AuditingBackend, CancelToken, Capabilities, ClaudeCodeBackend,
+    ClaudeConfig, CodexCliBackend, CodexConfig, FallbackBackend, Health, LocalConfig,
+    OpenAiCompatBackend, ReasoningBackend, ReasoningError, ReasoningRequest, ReasoningResponse,
+    TaskKind, TaskRouter,
 };
 
 use crate::AppState;
@@ -147,12 +148,22 @@ fn local_config(state: &AppState, settings: &ReasoningSettings) -> Option<LocalC
     })
 }
 
-/// The backend for `settings`, given the local model's config (if any).
-fn build(settings: &ReasoningSettings, local: Option<LocalConfig>) -> Arc<dyn ReasoningBackend> {
+/// The backend for `settings`, given the local model's config (if any). Every backend that sends
+/// data is wrapped to log each call to `audit`, each attempt under its own name.
+fn build(
+    settings: &ReasoningSettings,
+    local: Option<LocalConfig>,
+    audit: &AuditSink,
+) -> Arc<dyn ReasoningBackend> {
+    let logged = |b: Box<dyn ReasoningBackend>| -> Box<dyn ReasoningBackend> {
+        Box::new(AuditingBackend::new(b, audit.clone()))
+    };
+    let codex = || logged(codex());
+    let claude = || logged(claude());
     let local = || -> Option<Box<dyn ReasoningBackend>> {
         local
             .clone()
-            .map(|c| Box::new(OpenAiCompatBackend::new(c)) as Box<dyn ReasoningBackend>)
+            .map(|c| logged(Box::new(OpenAiCompatBackend::new(c))))
     };
     match settings.mode {
         Mode::Codex => Arc::new(FallbackBackend::new(vec![codex()])),
@@ -195,11 +206,17 @@ pub(crate) fn local_only_context(state: &AppState) -> Option<Option<u32>> {
     Some(endpoint.and_then(|e| e.assist.context_tokens))
 }
 
-/// The backend meeting intelligence should use now.
+/// The backend meeting intelligence should use now. Its calls are logged under the live meeting,
+/// if one is running.
 pub(crate) fn backend(state: &AppState) -> Arc<dyn ReasoningBackend> {
+    backend_for(state, crate::audit::live_meeting(state))
+}
+
+/// The backend, with its calls logged under `meeting`.
+pub(crate) fn backend_for(state: &AppState, meeting: Option<String>) -> Arc<dyn ReasoningBackend> {
     let settings = state.reasoning.get();
     let local = local_config(state, &settings);
-    build(&settings, local)
+    build(&settings, local, &crate::audit::sink(state, meeting))
 }
 
 /// A custom endpoint the local model can use.
@@ -333,9 +350,15 @@ mod tests {
         );
     }
 
+    fn no_audit() -> AuditSink {
+        Arc::new(|_| {})
+    }
+
     #[test]
     fn each_mode_builds_its_chain() {
-        let name = |s: &ReasoningSettings, l: Option<LocalConfig>| build(s, l).name().to_owned();
+        let name = |s: &ReasoningSettings, l: Option<LocalConfig>| {
+            build(s, l, &no_audit()).name().to_owned()
+        };
         assert_eq!(name(&settings(Mode::Auto, true), None), "auto");
         assert_eq!(name(&settings(Mode::Auto, true), local()), "routed");
         assert_eq!(name(&settings(Mode::Auto, false), local()), "auto");
@@ -343,7 +366,7 @@ mod tests {
         assert_eq!(name(&settings(Mode::Local, true), None), "none");
         assert_eq!(name(&settings(Mode::Codex, true), local()), "auto");
 
-        let missing = build(&settings(Mode::Local, true), None);
+        let missing = build(&settings(Mode::Local, true), None, &no_audit());
         let req = ReasoningRequest {
             task: TaskKind::Observe,
             instructions: String::new(),
@@ -354,5 +377,31 @@ mod tests {
         };
         let err = missing.invoke(&req, &CancelToken::new()).unwrap_err();
         assert!(err.to_string().contains("Settings › Storage"));
+    }
+
+    #[test]
+    fn every_attempt_is_logged_under_the_backend_that_got_it() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = seen.clone();
+        let audit: AuditSink = Arc::new(move |r| log.lock().unwrap().push(r));
+        // Nothing listens on port 9, so the call fails after trying the local model.
+        let local = build(&settings(Mode::Local, true), local(), &audit);
+        let req = ReasoningRequest {
+            task: TaskKind::Ask,
+            instructions: "Answer.".into(),
+            context: "L1 You: hi".into(),
+            output_schema: serde_json::json!({}),
+            timeout: std::time::Duration::from_secs(5),
+            images: Vec::new(),
+        };
+        assert!(local.invoke(&req, &CancelToken::new()).is_err());
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].backend, "local");
+        assert_eq!(seen[0].model.as_deref(), Some("m"));
+        assert!(seen[0].local, "a loopback endpoint stays on this machine");
+        assert_eq!(seen[0].task, "ask");
+        assert_eq!(seen[0].context, "L1 You: hi");
+        assert!(seen[0].error.is_some());
     }
 }

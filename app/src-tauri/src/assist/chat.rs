@@ -12,8 +12,13 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use wisp_core::cloud::CloudProvider;
 use wisp_core::params::ParamValues;
-use wisp_engine_cloud::{assist_param_specs, chat_completion, chat_completion_stream, ChatRequest};
-use wisp_reasoning::{is_loopback, CancelToken, ReasoningBackend, ReasoningRequest, TaskKind};
+use wisp_engine_cloud::{
+    assist_param_specs, chat_completion_stream, chat_completion_with_usage, ChatRequest,
+};
+use wisp_reasoning::{
+    audited, is_loopback, task_label, AuditSink, CallInfo, CancelToken, ReasoningBackend,
+    ReasoningRequest, TaskKind, TokenUsage,
+};
 
 use super::{ASSIST_DELTA_EVENT, ASSIST_TEXT_EVENT};
 use crate::{build_param_values, param_spec_dto, resolve_cloud_provider, AppState, ParamSpecDto};
@@ -40,6 +45,8 @@ enum AssistTarget {
         provider: Box<CloudProvider>,
         model: String,
         key: String,
+        /// Where each call is logged.
+        audit: AuditSink,
     },
     /// The reasoning backend from Settings › Reasoning. Replies arrive whole, not streamed.
     Subscription(Arc<dyn ReasoningBackend>),
@@ -193,6 +200,7 @@ fn resolve_assist_target(
         provider: Box::new(provider),
         model: model.to_owned(),
         key,
+        audit: crate::audit::sink(state, crate::audit::live_meeting(state)),
     };
     Ok((target, assist))
 }
@@ -290,6 +298,7 @@ fn run_assist_stream_blocking(
                 provider,
                 model,
                 key,
+                audit,
             },
             _,
         ) => {
@@ -303,9 +312,17 @@ fn run_assist_stream_blocking(
                 frequency_penalty: assist.frequency_penalty,
                 presence_penalty: assist.presence_penalty,
             };
-            chat_completion_stream(provider, model, key, &req, |chunk| {
-                let _ = app_delta.emit(ASSIST_DELTA_EVENT, chunk.to_owned());
-            })
+            // A stream reports no usage, so its tokens are estimated.
+            audited(
+                audit,
+                call_info(provider, model, &system, transcript),
+                || {
+                    chat_completion_stream(provider, model, key, &req, |chunk| {
+                        let _ = app_delta.emit(ASSIST_DELTA_EVENT, chunk.to_owned());
+                    })
+                },
+                |text| (text.clone(), None),
+            )
             .map_err(|e| e.to_string())?
         }
     };
@@ -386,31 +403,53 @@ fn chat_once(
     user: &str,
     assist: &AssistParams,
 ) -> Result<String, String> {
-    let (provider, model, key) = match target {
+    let (provider, model, key, audit) = match target {
         AssistTarget::Http {
             provider,
             model,
             key,
-        } => (provider, model, key),
+            audit,
+        } => (provider, model, key, audit),
         AssistTarget::Subscription(backend) => {
             return subscription_once(backend.as_ref(), system, user)
         }
     };
-    chat_completion(
-        provider,
-        model,
-        key,
-        &ChatRequest {
-            system,
-            user,
-            temperature: assist.temperature,
-            max_tokens: assist.max_tokens,
-            top_p: assist.top_p,
-            frequency_penalty: assist.frequency_penalty,
-            presence_penalty: assist.presence_penalty,
+    let req = ChatRequest {
+        system,
+        user,
+        temperature: assist.temperature,
+        max_tokens: assist.max_tokens,
+        top_p: assist.top_p,
+        frequency_penalty: assist.frequency_penalty,
+        presence_penalty: assist.presence_penalty,
+    };
+    audited(
+        audit,
+        call_info(provider, model, system, user),
+        || chat_completion_with_usage(provider, model, key, &req),
+        |(text, usage)| {
+            let usage = usage.map(|u| TokenUsage {
+                input: u.prompt_tokens,
+                output: u.completion_tokens,
+            });
+            (text.clone(), usage)
         },
     )
+    .map(|(text, _)| text)
     .map_err(|e| e.to_string())
+}
+
+/// What the activity log records about one assist call over HTTP. The key is never part of it.
+fn call_info(provider: &CloudProvider, model: &str, system: &str, user: &str) -> CallInfo {
+    CallInfo {
+        task: task_label(TaskKind::Assist),
+        backend: provider.display_name.clone(),
+        model: Some(model.to_owned()),
+        local: is_loopback(&provider.base_url),
+        instructions: system.to_owned(),
+        context: user.to_owned(),
+        images: Vec::new(),
+    }
 }
 
 /// Map-reduce for a transcript that exceeds the context window: run the task on each chunk (map),
@@ -599,6 +638,13 @@ mod tests {
         let remote = provider_at("https://api.openai.com/v1");
         assert_eq!(assist_key(&remote, Some("sk-1".into())).unwrap(), "sk-1");
         assert!(assist_key(&remote, None).is_err());
+        let info = call_info(&remote, "gpt-x", "Summarize.", "You: hi");
+        assert!(!info.local);
+        assert_eq!(
+            (info.task.as_str(), info.model.as_deref()),
+            ("assist", Some("gpt-x"))
+        );
+        assert!(call_info(&provider_at("http://127.0.0.1:11434/v1"), "m", "", "").local);
         assert!(
             assist_key(&remote, Some("  ".into())).is_err(),
             "a blank key is no key"

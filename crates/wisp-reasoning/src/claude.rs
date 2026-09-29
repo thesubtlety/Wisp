@@ -1,6 +1,6 @@
 use crate::backend::{
     check_images, finish, image_media_type, truncate, CancelToken, Capabilities, Health,
-    ReasoningBackend, ReasoningError, ReasoningRequest, ReasoningResponse,
+    ReasoningBackend, ReasoningError, ReasoningRequest, ReasoningResponse, TokenUsage,
 };
 use crate::codex::version_health;
 use crate::runner::{run_command, CommandSpec, SUBSCRIPTION_STRIPPED_ENV};
@@ -131,6 +131,10 @@ impl ReasoningBackend for ClaudeCodeBackend {
         }
     }
 
+    fn model(&self) -> Option<&str> {
+        self.config.model.as_deref()
+    }
+
     fn invoke(
         &self,
         req: &ReasoningRequest,
@@ -143,14 +147,14 @@ impl ReasoningBackend for ClaudeCodeBackend {
             spec.stdin = Some(stream_input(req)?);
         }
         let out = run_command(&spec, req.timeout, cancel)?;
-        let (text, structured) = parse_envelope(result_line(&out.stdout))?;
+        let (text, structured, usage) = parse_envelope(result_line(&out.stdout))?;
         if out.code != Some(0) && structured.is_none() && text.is_empty() {
             return Err(ReasoningError::Process {
                 code: out.code,
                 stderr: truncate(&out.stderr, 800),
             });
         }
-        finish(self.name(), req, text, structured, out.elapsed)
+        finish(self.name(), req, text, structured, out.elapsed, usage)
     }
 }
 
@@ -194,13 +198,16 @@ fn result_line(stdout: &str) -> &str {
         .unwrap_or(stdout)
 }
 
-/// Parse `claude -p --output-format json`. Returns the result text and the
-/// `structured_output` value when present.
-fn parse_envelope(stdout: &str) -> Result<(String, Option<serde_json::Value>), ReasoningError> {
+/// What a result envelope carries: the result text, `structured_output` when present, and the
+/// token usage when reported.
+type Envelope = (String, Option<serde_json::Value>, Option<TokenUsage>);
+
+/// Parse `claude -p --output-format json`.
+fn parse_envelope(stdout: &str) -> Result<Envelope, ReasoningError> {
     let env: serde_json::Value = match serde_json::from_str(stdout.trim()) {
         Ok(v) => v,
         // Not an envelope; let the caller hunt for JSON in the raw text.
-        Err(_) => return Ok((stdout.to_string(), None)),
+        Err(_) => return Ok((stdout.to_string(), None, None)),
     };
     if env.get("is_error").and_then(|v| v.as_bool()) == Some(true) {
         let msg = env
@@ -222,7 +229,18 @@ fn parse_envelope(stdout: &str) -> Result<(String, Option<serde_json::Value>), R
         .get("structured_output")
         .filter(|v| v.is_object())
         .cloned();
-    Ok((text, structured))
+    Ok((text, structured, envelope_usage(&env)))
+}
+
+/// The envelope's `usage`: every kind of input token (fresh, cache writes, cache reads) counts as
+/// input, since all of it was sent.
+fn envelope_usage(env: &serde_json::Value) -> Option<TokenUsage> {
+    let usage = env.get("usage")?;
+    let n = |k: &str| usage.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+    Some(TokenUsage {
+        input: n("input_tokens") + n("cache_creation_input_tokens") + n("cache_read_input_tokens"),
+        output: usage.get("output_tokens")?.as_u64()?,
+    })
 }
 
 #[cfg(test)]
@@ -266,7 +284,7 @@ mod tests {
         assert_eq!(content[1]["type"], "text");
 
         let out = "{\"type\":\"system\"}\n{\"type\":\"assistant\"}\n{\"type\":\"result\",\"result\":\"\",\"structured_output\":{\"ok\":true}}\n";
-        let (_, structured) = parse_envelope(result_line(out)).unwrap();
+        let (_, structured, _) = parse_envelope(result_line(out)).unwrap();
         assert_eq!(structured.unwrap()["ok"], true);
         assert_eq!(result_line("{\"result\":\"x\"}"), "{\"result\":\"x\"}");
     }
@@ -296,12 +314,28 @@ mod tests {
 
     #[test]
     fn envelope_prefers_structured_output() {
-        let (t, s) = parse_envelope(
+        let (t, s, u) = parse_envelope(
             r#"{"type":"result","is_error":false,"result":"hi","structured_output":{"ok":true}}"#,
         )
         .unwrap();
         assert_eq!(t, "hi");
         assert_eq!(s, Some(serde_json::json!({"ok": true})));
+        assert_eq!(u, None, "no usage reported");
+    }
+
+    #[test]
+    fn envelope_usage_counts_cached_input() {
+        let (_, _, u) = parse_envelope(
+            r#"{"type":"result","result":"{}","usage":{"input_tokens":10,"cache_creation_input_tokens":200,"cache_read_input_tokens":3000,"output_tokens":42}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            u,
+            Some(TokenUsage {
+                input: 3210,
+                output: 42
+            })
+        );
     }
 
     #[test]

@@ -810,6 +810,7 @@ mod tests {
                      DROP TABLE state_op;
                      DROP TABLE candidate_log;
                      DROP TABLE project_memory;
+                     DROP TABLE llm_call;
                      PRAGMA user_version = 3;",
                 )
                 .unwrap();

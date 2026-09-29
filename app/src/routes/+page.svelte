@@ -838,6 +838,8 @@
         resetIntel();
         await ensureIntelListener();
       }
+      // The id this meeting will be saved under; the backend logs its AI calls under it.
+      const nextMeetingId = crypto.randomUUID();
       const notice = await invoke<string | null>("start_session", {
         options: {
           engine: liveEngine,
@@ -851,12 +853,13 @@
           intel: intelEnabled,
           projectId: intelEnabled && intel.projectId ? intel.projectId : null,
           meetingLabel: i18n.t.library.newNoteTitle(new Date().toLocaleString()),
+          meetingId: nextMeetingId,
         },
       });
       liveNotice = notice ?? "";
       running = true;
       // A new live session is a new library entry; stamp its id + start now (a re-save replaces it).
-      meetingId = crypto.randomUUID();
+      meetingId = nextMeetingId;
       meetingStartedAt = Date.now();
       intel.startedAt = meetingStartedAt;
       // Both streams start unmuted; the live You/Them chips flip these mid-session.

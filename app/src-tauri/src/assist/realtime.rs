@@ -18,7 +18,8 @@ use wisp_core::audio::{AudioFrame, AudioSource, AudioSourceInfo};
 use wisp_core::channel::FrameReceiver;
 use wisp_core::engine::StreamingAsrEngine;
 use wisp_core::transcript::{AudioSourceKind, TranscriptSegment};
-use wisp_engine_cloud::{assist_realtime_param_specs, build_assist_engine};
+use wisp_engine_cloud::{assist_realtime_param_specs, build_assist_engine, REALTIME_URL_ENV};
+use wisp_reasoning::{is_loopback, now_ms, AuditRecord, AuditSink, CallInfo};
 
 use super::{ASSIST_DELTA_EVENT, ASSIST_ERROR_EVENT, ASSIST_TEXT_EVENT};
 use crate::{build_param_values, cloud_key, param_spec_dto, AppState, ParamSpecDto};
@@ -320,11 +321,15 @@ fn take_assist_worker(state: &AssistState) -> Result<Option<AssistWorker>, Strin
 /// Replies fire on `response.create` (the session is configured `create_response:false`), so the
 /// model answers on this cadence instead of every utterance. Exits when stopped or when the capture
 /// closes (the live session ended), returning the source so the assist can restart.
+///
+/// When the loop ends, the session goes to the activity log as one call: the transcript lines
+/// injected as context and every reply.
 fn spawn_assist_worker(
     app: AppHandle,
     mut engine: Box<dyn StreamingAsrEngine>,
     mut source: Box<dyn AudioSource>,
     finals_rx: std::sync::mpsc::Receiver<String>,
+    audit: (AuditSink, CallInfo),
 ) -> AssistWorker {
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -339,11 +344,16 @@ fn spawn_assist_worker(
         let mut awaiting = false; // a reply is in flight (don't stack another)
         let mut awaiting_since = std::time::Instant::now();
         let mut streamed = 0usize; // chars of the in-progress reply already streamed to the UI
+        let (sink, mut info) = audit;
+        let (at_ms, started) = (now_ms(), std::time::Instant::now());
+        let mut replies: Vec<String> = Vec::new();
 
         while !stop_worker.load(Ordering::Relaxed) {
             // 1. Inject every authoritative final waiting — the diarized anchor the model trusts.
             while let Ok(text) = finals_rx.try_recv() {
                 engine.inject_text(&text);
+                info.context.push('\n');
+                info.context.push_str(&text);
                 new_speech = true;
             }
 
@@ -359,6 +369,7 @@ fn spawn_assist_worker(
                 let text = result.text.trim();
                 if !text.is_empty() {
                     let _ = app.emit(ASSIST_TEXT_EVENT, text.to_owned());
+                    replies.push(text.to_owned());
                 }
                 streamed = 0; // the reply closed; the next one starts a fresh stream
                 awaiting = false; // the reply completed
@@ -393,6 +404,12 @@ fn spawn_assist_worker(
             }
         }
 
+        sink(AuditRecord::finished(
+            info,
+            at_ms,
+            started.elapsed(),
+            Ok((replies.join("\n\n"), None)),
+        ));
         source
     });
 
@@ -458,9 +475,17 @@ fn start_assist_realtime_blocking(
     });
 
     let assist_params = build_param_values(&assist_realtime_param_specs(), &params);
+    let audit = crate::audit::sink(&state, crate::audit::live_meeting(&state));
+    let info = realtime_call_info(&model, &instructions);
     let engine = match build_assist_engine(&model, &key, &instructions, &assist_params, on_error) {
         Ok(engine) => engine,
         Err(e) => {
+            audit(AuditRecord::finished(
+                info,
+                now_ms(),
+                std::time::Duration::ZERO,
+                Err(e.to_string()),
+            ));
             *state
                 .assist
                 .audio
@@ -478,7 +503,7 @@ fn start_assist_realtime_blocking(
         .lock()
         .map_err(|_| "state lock poisoned".to_owned())? = Some(finals_tx);
 
-    let worker = spawn_assist_worker(app.clone(), engine, source, finals_rx);
+    let worker = spawn_assist_worker(app.clone(), engine, source, finals_rx, (audit, info));
     *state
         .assist
         .worker
@@ -486,6 +511,25 @@ fn start_assist_realtime_blocking(
         .map_err(|_| "state lock poisoned".to_owned())? = Some(worker);
 
     Ok(())
+}
+
+/// Heads the logged context of a realtime session: what it sent that the log can't show.
+const REALTIME_AUDIO_NOTE: &str =
+    "[Live meeting audio streamed to the model for the whole session; audio is not stored here. \
+     Transcript lines sent as text follow. Tokens are estimated from text only.]";
+
+/// What the activity log records about a realtime session, before any transcript line is sent.
+fn realtime_call_info(model: &str, instructions: &str) -> CallInfo {
+    let local = std::env::var(REALTIME_URL_ENV).is_ok_and(|url| is_loopback(&url));
+    CallInfo {
+        task: "realtime_assist".to_owned(),
+        backend: "OpenAI Realtime".to_owned(),
+        model: Some(model.to_owned()),
+        local,
+        instructions: instructions.to_owned(),
+        context: REALTIME_AUDIO_NOTE.to_owned(),
+        images: Vec::new(),
+    }
 }
 
 /// Pulls a realtime-assist reply on demand — the "give me a hint now" button. Sets the worker's

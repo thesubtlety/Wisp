@@ -129,6 +129,10 @@ impl ReasoningBackend for CodexCliBackend {
         }
     }
 
+    fn model(&self) -> Option<&str> {
+        self.config.model.as_deref()
+    }
+
     fn invoke(
         &self,
         req: &ReasoningRequest,
@@ -145,7 +149,7 @@ impl ReasoningBackend for CodexCliBackend {
             });
         }
         let raw = std::fs::read_to_string(ws.last_message_path()).unwrap_or(out.stdout);
-        finish(self.name(), req, raw, None, out.elapsed)
+        finish(self.name(), req, raw, None, out.elapsed, None)
     }
 }
 

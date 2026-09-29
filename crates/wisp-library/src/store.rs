@@ -13,7 +13,7 @@ use crate::retention::RetentionPolicy;
 use crate::Result;
 
 /// On-disk schema version, bumped on schema changes (drives migration via `PRAGMA user_version`).
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 
 /// Characters of transcript kept as a list preview.
 const PREVIEW_CHARS: usize = 160;
@@ -207,6 +207,34 @@ CREATE TABLE project_memory (
 CREATE INDEX project_memory_project ON project_memory (project_id);
 ";
 
+/// Schema v8 — the AI activity log: every model call with the full text sent and received, for
+/// the user to audit. It holds transcript text, so it is short-lived like a transcript: a call made
+/// for a meeting goes when that meeting's transcript expires or the meeting is deleted; any other
+/// call expires by its own time. No foreign key: a call is logged while its meeting is still live,
+/// before the meeting row exists.
+pub(crate) const SCHEMA_V8: &str = "\
+CREATE TABLE llm_call (
+    id               INTEGER PRIMARY KEY,
+    at_ms            INTEGER NOT NULL,
+    meeting_id       TEXT,
+    task             TEXT NOT NULL,
+    backend          TEXT NOT NULL,
+    model            TEXT,
+    local            INTEGER NOT NULL,
+    instructions     TEXT NOT NULL,
+    context          TEXT NOT NULL,
+    images           TEXT NOT NULL,
+    output           TEXT NOT NULL,
+    error            TEXT,
+    elapsed_ms       INTEGER NOT NULL,
+    tokens_in        INTEGER NOT NULL,
+    tokens_out       INTEGER NOT NULL,
+    tokens_estimated INTEGER NOT NULL
+);
+CREATE INDEX llm_call_meeting ON llm_call (meeting_id);
+CREATE INDEX llm_call_at ON llm_call (at_ms);
+";
+
 /// A handle to the meeting knowledge base. Open once and reuse across queries. With no embedder it
 /// is full-text only; configure one via [`Library::set_embedder`] to enable semantic and hybrid
 /// search.
@@ -271,7 +299,7 @@ impl Library {
             .pragma_query_value(None, "user_version", |r| r.get(0))?;
         // Each step commits with its version, so a failed step leaves the database at the previous
         // version rather than half-migrated (a re-run ALTER TABLE would fail on the duplicate column).
-        let steps: [(i64, &str); 7] = [
+        let steps: [(i64, &str); 8] = [
             (1, SCHEMA_V1),
             (2, SCHEMA_V2),
             (3, SCHEMA_V3),
@@ -279,6 +307,7 @@ impl Library {
             (5, SCHEMA_V5),
             (6, SCHEMA_V6),
             (7, SCHEMA_V7),
+            (8, SCHEMA_V8),
         ];
         for (step, sql) in steps {
             if version >= step {
@@ -750,6 +779,8 @@ impl Library {
             .execute("DELETE FROM state_op WHERE meeting_id = ?1", [id])?;
         self.conn
             .execute("DELETE FROM candidate_log WHERE meeting_id = ?1", [id])?;
+        self.conn
+            .execute("DELETE FROM llm_call WHERE meeting_id = ?1", [id])?;
         let affected = self
             .conn
             .execute("DELETE FROM meeting WHERE id = ?1", [id])?;

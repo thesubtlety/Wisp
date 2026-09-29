@@ -8,6 +8,7 @@
   import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
   import EndpointsManager from "$lib/EndpointsManager.svelte";
   import NotesSearch from "$lib/NotesSearch.svelte";
+  import AiActivity from "$lib/AiActivity.svelte";
   import { i18n } from "$lib/i18n.svelte";
 
   let {
@@ -17,13 +18,14 @@
   }: { open?: boolean; autoSave?: boolean; intel?: boolean } =
     $props();
 
-  type Section = "models" | "search" | "downloads" | "dictation" | "storage";
+  type Section = "models" | "search" | "downloads" | "dictation" | "storage" | "activity";
   const sections = $derived<{ id: Section; label: string }[]>([
     { id: "models", label: i18n.t.settings.aiModels },
     { id: "search", label: i18n.t.settings.search },
     { id: "downloads", label: i18n.t.settings.downloads },
     { id: "dictation", label: i18n.t.settings.dictation },
     { id: "storage", label: i18n.t.settings.storage },
+    { id: "activity", label: i18n.t.audit.title },
   ]);
   let section = $state<Section>("models");
 
@@ -327,6 +329,8 @@
         <div class="settings-content">
           {#if section === "models"}
             <EndpointsManager />
+          {:else if section === "activity"}
+            <AiActivity />
           {:else if section === "search"}
             <NotesSearch />
           {:else if section === "downloads"}

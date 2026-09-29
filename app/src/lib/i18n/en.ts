@@ -62,6 +62,49 @@ export const en = {
     them: "Them",
   },
 
+  // AI activity log (Settings › AI activity, and from the intelligence panel).
+  audit: {
+    title: "AI activity",
+    intro:
+      "Every call Wisp made to an AI model, with the full text sent and the reply. LOCAL calls stayed on this Mac; REMOTE calls went to an online service (the Codex and Claude CLIs send to OpenAI and Anthropic). Entries are kept as long as transcripts, and deleting a meeting deletes its entries.",
+    all: "All",
+    thisMeeting: "This meeting",
+    refresh: "Refresh",
+    clear: "Clear log",
+    clearConfirm: "Delete the whole AI activity log? This can't be undone.",
+    clearYes: "Clear",
+    cancel: "Cancel",
+    empty: "No AI calls logged yet.",
+    noMeeting: "No meeting is running or just saved.",
+    capped: (n: number) => `Showing the newest ${n}.`,
+    local: "LOCAL",
+    remote: "REMOTE",
+    ok: "OK",
+    failed: "Error",
+    defaultModel: "default model",
+    tokens: (input: number, output: number, estimated: boolean) =>
+      `${estimated ? "≈" : ""}${input.toLocaleString()} in / ${estimated ? "≈" : ""}${output.toLocaleString()} out`,
+    estimatedNote: "The backend reported no token counts, so they are estimated from the text (about 4 characters per token).",
+    sent: "Sent",
+    instructions: "Instructions",
+    context: "Context",
+    images: "Images",
+    reply: "Reply",
+    error: "Error",
+    copy: "Copy",
+    copied: "Copied",
+    tasks: {
+      observe: "Live update",
+      ask: "Question",
+      endgame_audit: "Wrap-up check",
+      post_call: "Post-call review",
+      project_learning: "Project learning",
+      screenshot_context: "Screenshot description",
+      assist: "AI assist",
+      realtime_assist: "Realtime assist",
+    },
+  },
+
   // Live transcription screen.
   live: {
     loadingModels: "Loading models…",

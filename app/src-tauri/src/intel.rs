@@ -624,7 +624,7 @@ pub(crate) async fn intel_review_start(app: AppHandle, id: String) -> Result<Rev
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let (meeting, lines) = saved_meeting(&state, &id)?;
-        let backend = crate::reasoning::backend(&state);
+        let backend = crate::reasoning::backend_for(&state, Some(id.clone()));
         let (followups, source, note) = match generate_followups(
             backend.as_ref(),
             &CancelToken::new(),
@@ -662,19 +662,18 @@ pub(crate) struct ReplyDto {
 pub(crate) async fn intel_review_reply(app: AppHandle, reply: String) -> Result<ReplyDto, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
-        let followups = state
+        let (meeting_id, followups) = state
             .intel
             .review
             .lock()
             .map_err(|_| "state lock poisoned".to_owned())?
-            .as_ref()
-            .map(|(_, f)| f.clone())
+            .clone()
             .ok_or("no review in progress")?;
         let (edits, via) = match parse_reply(&reply, followups.len()) {
             Some(edits) => (edits, "local"),
             None => (
                 interpret_reply(
-                    crate::reasoning::backend(&state).as_ref(),
+                    crate::reasoning::backend_for(&state, Some(meeting_id)).as_ref(),
                     &CancelToken::new(),
                     &followups,
                     &reply,
@@ -976,7 +975,7 @@ pub(crate) async fn intel_learning_propose(
             .map(|f| f.clone())
             .unwrap_or_default();
         propose_learning(
-            crate::reasoning::backend(&state).as_ref(),
+            crate::reasoning::backend_for(&state, Some(id.clone())).as_ref(),
             &CancelToken::new(),
             &LearningInput {
                 state: &meeting,
