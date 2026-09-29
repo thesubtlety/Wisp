@@ -1040,7 +1040,7 @@ mod tests {
     #[test]
     fn candidates_pass_the_filter_into_cards_and_dismissals_reach_the_log() {
         let strong = |title: &str| {
-            json!({"kind": "missing_owner", "title": title, "detail": "", "suggested_question": null,
+            json!({"kind": "missing_owner", "headline": "", "title": title, "detail": "", "suggested_question": null,
                    "source_refs": ["T0"], "related_items": [], "importance": 0.9, "urgency": 0.9,
                    "confidence": 0.9, "future_work_risk": 0.9})
         };
@@ -1079,7 +1079,7 @@ mod tests {
         let backend = Arc::new(ScriptedBackend::with_responder("scripted", |req| {
             Ok(match req.task {
                 wisp_reasoning::TaskKind::EndgameAudit => json!({"gaps": [
-                    {"category": "missing", "text": "Nobody owns deployment.", "source_refs": [], "related_items": []}
+                    {"category": "missing", "headline": "", "text": "Nobody owns deployment.", "source_refs": [], "related_items": []}
                 ]}),
                 _ => json!({"ops": [], "candidates": []}),
             })

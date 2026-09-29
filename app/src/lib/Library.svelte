@@ -6,6 +6,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { i18n } from "$lib/i18n.svelte";
   import Modal from "$lib/Modal.svelte";
+  import ShotThumb from "$lib/ShotThumb.svelte";
   import { intel, loadProjects, createProject, renameProject, type MemoryItem } from "$lib/intel.svelte";
 
   // "New meeting in this project": the page switches to Live with the project selected.
@@ -75,6 +76,17 @@
   const shownHits = $derived((hits ?? []).filter((h) => projectFilter === "" || shownIds.has(h.meeting_id)));
   const filterProject = $derived(intel.projects.find((p) => p.id === projectFilter));
   let memory = $state<MemoryItem[]>([]);
+  type ProjectShot = {
+    sourceId: number;
+    label: string;
+    title: string | null;
+    snippet: string | null;
+    addedAtMs: number;
+    expiresAtMs: number | null;
+  };
+  let shots = $state<ProjectShot[]>([]);
+  let pendingShot = $state<ProjectShot | null>(null);
+  let shotConfirmOpen = $state(false);
   let renamingProject = $state(false);
   let projectDraft = $state("");
   let projectError = $state("");
@@ -116,6 +128,40 @@
       })
       .catch(() => {});
   });
+
+  // The selected project's screenshots.
+  async function loadShots(id: string) {
+    try {
+      const list = await invoke<ProjectShot[]>("list_project_screenshots", { projectId: id });
+      if (projectFilter === id) shots = list;
+    } catch {
+      // the section just stays empty
+    }
+  }
+
+  $effect(() => {
+    const id = filterProject?.id;
+    shots = [];
+    if (id) loadShots(id);
+  });
+
+  function askDeleteShot(shot: ProjectShot) {
+    pendingShot = shot;
+    shotConfirmOpen = true;
+  }
+
+  async function doDeleteShot() {
+    const shot = pendingShot;
+    shotConfirmOpen = false;
+    pendingShot = null;
+    if (!shot) return;
+    try {
+      await invoke("remove_context", { sourceId: shot.sourceId });
+      shots = shots.filter((s) => s.sourceId !== shot.sourceId);
+    } catch (e) {
+      error = String(e);
+    }
+  }
 
   function projectName(id: string | null): string {
     return (id && intel.projects.find((p) => p.id === id)?.name) || "";
@@ -445,6 +491,30 @@
           </ul>
         </details>
       {/if}
+      {#if shots.length}
+        <details class="knowledge shots">
+          <summary>{i18n.t.library.screenshots} ({shots.length})</summary>
+          <ul>
+            {#each shots as shot (shot.sourceId)}
+              <li>
+                <ShotThumb sourceId={shot.sourceId} title={shot.title ?? shot.label} />
+                <div class="shot-body">
+                  <span class="shot-title" title={shot.snippet ?? ""}>{shot.title ?? shot.label}</span>
+                  {#if shot.title}<span class="k-kind">{shot.label}</span>{/if}
+                  <span class="k-kind"
+                    >{shot.expiresAtMs
+                      ? i18n.t.library.shotExpires(new Date(shot.expiresAtMs).toLocaleDateString())
+                      : i18n.t.library.shotKept}</span
+                  >
+                </div>
+                <button class="btn" aria-label={i18n.t.library.deleteShotTitle} onclick={() => askDeleteShot(shot)}
+                  >×</button
+                >
+              </li>
+            {/each}
+          </ul>
+        </details>
+      {/if}
     {/if}
 
     {#if error}
@@ -544,6 +614,14 @@
       <button class="btn danger" onclick={doDelete}>{i18n.t.library.delete}</button>
     </div>
   </Modal>
+
+  <Modal bind:open={shotConfirmOpen} title={i18n.t.library.deleteShotTitle}>
+    <p class="confirm-text">{i18n.t.library.deleteShotConfirm}</p>
+    <div class="confirm-actions">
+      <button class="btn" onclick={() => (shotConfirmOpen = false)}>{i18n.t.library.cancel}</button>
+      <button class="btn danger" onclick={doDeleteShot}>{i18n.t.library.delete}</button>
+    </div>
+  </Modal>
 </section>
 
 <style>
@@ -601,6 +679,29 @@
   .knowledge ul {
     margin: 6px 0 0;
     padding-left: 18px;
+  }
+  .shots ul {
+    list-style: none;
+    padding-left: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .shots li {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .shot-body {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .shot-title {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .library {
     flex: 1;

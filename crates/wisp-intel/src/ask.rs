@@ -33,7 +33,9 @@ You answer questions from one participant, labelled \"You\", about a meeting the
 had. Answer from the context only: the meeting state, the transcript lines and any project context.
 
 Rules:
-- Be brief and concrete. Plain words. No preamble.
+- short: the answer in at most twelve words, for reading at a glance while still listening. \
+No evidence IDs in it. Example: \"Yes: Azure EU West, pending legal review.\"
+- answer: the full answer. Be brief and concrete. Plain words. No preamble.
 - Cite the evidence each claim rests on, inline, with its ID in square brackets exactly as shown: \
 [T12], [D17:C4], [M1:T221], or a state item id like [REQ-3]. List every ID you cite in evidence.
 - If the context does not answer the question, say so plainly and say what would. Do not fill gaps \
@@ -91,6 +93,9 @@ pub struct Citation {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AskAnswer {
+    /// The answer in at most twelve words, shown first; see [`crate::headline`].
+    #[serde(default)]
+    pub short: String,
     /// The answer, with unknown citations removed.
     pub answer: String,
     /// Every valid citation, in the order first cited.
@@ -123,8 +128,9 @@ pub fn ask_schema() -> Value {
     json!({
         "type": "object",
         "additionalProperties": false,
-        "required": ["answer", "evidence", "grounded"],
+        "required": ["short", "answer", "evidence", "grounded"],
         "properties": {
+            "short": {"type": "string"},
             "answer": {"type": "string"},
             "evidence": {"type": "array", "items": {"type": "string"}},
             "grounded": {"type": "boolean"}
@@ -134,6 +140,8 @@ pub fn ask_schema() -> Value {
 
 #[derive(Deserialize)]
 struct RawAnswer {
+    #[serde(default)]
+    short: String,
     answer: String,
     evidence: Vec<String>,
     grounded: bool,
@@ -314,12 +322,45 @@ fn check_answer(raw: RawAnswer, packet: &EvidencePacket, state: &MeetingState) -
         answer = answer.replace(&format!(" [{id}]"), "");
         answer = answer.replace(&format!("[{id}]"), "");
     }
+    let answer = answer.trim().to_owned();
     AskAnswer {
-        answer: answer.trim().to_owned(),
+        short: short_answer(&raw.short, &answer),
+        answer,
         grounded: raw.grounded && unknown.is_empty(),
         citations,
         unknown_citations: unknown,
     }
+}
+
+/// The model's short answer without any bracketed evidence IDs, within
+/// [`crate::headline::SHORT_ANSWER_WORDS`]; derived from `answer` when missing or too long.
+fn short_answer(given: &str, answer: &str) -> String {
+    crate::headline::fit(
+        &strip_ids(given),
+        &strip_ids(answer),
+        crate::headline::SHORT_ANSWER_WORDS,
+    )
+}
+
+/// `text` without bracketed evidence ID groups (`[T12]`, `[T3, T4]`) and the space before them.
+fn strip_ids(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(open) = rest.find('[') {
+        let Some(close) = rest[open..].find(']') else {
+            break;
+        };
+        let group = &rest[open..open + close + 1];
+        out.push_str(&rest[..open]);
+        if inline_ids(group).is_empty() {
+            out.push_str(group);
+        } else {
+            out.truncate(out.trim_end().len());
+        }
+        rest = &rest[open + close + 1..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Bracketed IDs in the text: `[T12]`, `[D17:C4]`, `[REQ-3]`, and each part of `[T3, T4]`.
@@ -585,6 +626,7 @@ mod tests {
         let (t, s, r) = (transcript(), state(), vec![doc()]);
         let backend = ScriptedBackend::named("scripted");
         backend.push_ok(json!({
+            "short": "Not yet: Friday promised, then withdrawn [T1] [T99].",
             "answer": "Not yet. They first promised Friday [T1], then withdrew the date [T3] [COM-2]. Peak load sets cluster size [D2:C0]. They run 40 nodes [T99].",
             "evidence": ["T1", "T3", "COM-2", "D2:C0", "T99", "S2:C0"],
             "grounded": true
@@ -604,6 +646,7 @@ mod tests {
         );
         assert!(out.answer.ends_with("They run 40 nodes."), "{}", out.answer);
         assert!(!out.answer.contains("T99"));
+        assert_eq!(out.short, "Not yet: Friday promised, then withdrawn.");
 
         let t1 = &out.citations[0];
         assert_eq!(t1.label, "This meeting 00:10, Them");
@@ -622,6 +665,67 @@ mod tests {
     }
 
     #[test]
+    fn the_short_answer_is_asked_for_and_kept_when_short() {
+        let schema = ask_schema();
+        assert!(schema["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("short")));
+        assert!(INSTRUCTIONS.contains("at most twelve words"));
+        let s = MeetingState::new("live");
+        let a = check_answer(
+            RawAnswer {
+                short: "Azure EU West [T1], pending legal.".into(),
+                answer: "They chose Azure EU West [T1], pending a legal review.".into(),
+                evidence: vec![],
+                grounded: true,
+            },
+            &EvidencePacket::default(),
+            &s,
+        );
+        assert_eq!(a.short, "Azure EU West, pending legal.");
+    }
+
+    #[test]
+    fn a_missing_or_long_short_answer_is_derived_without_evidence_ids() {
+        let s = MeetingState::new("live");
+        let long = "They chose Azure EU West [T1, T2] for production, pending a legal review of \
+                    the data processing addendum next week [D3:C0].";
+        let a = check_answer(
+            RawAnswer {
+                short: String::new(),
+                answer: long.into(),
+                evidence: vec![],
+                grounded: true,
+            },
+            &EvidencePacket::default(),
+            &s,
+        );
+        assert_eq!(
+            a.short,
+            "They chose Azure EU West for production, pending a legal review of…"
+        );
+        let b = check_answer(
+            RawAnswer {
+                short: long.into(),
+                answer: "Yes.".into(),
+                evidence: vec![],
+                grounded: true,
+            },
+            &EvidencePacket::default(),
+            &s,
+        );
+        assert_eq!(
+            b.short, a.short,
+            "a too-long short answer is cut the same way"
+        );
+        let old: AskAnswer = serde_json::from_value(json!({"answer": "Yes.", "citations": [],
+            "unknownCitations": [], "grounded": true}))
+        .unwrap();
+        assert_eq!(old.short, "");
+    }
+
+    #[test]
     fn inline_ids_handle_lists_and_ignore_ordinary_brackets() {
         assert_eq!(
             inline_ids("see [T3, T4] and [REQ-2]"),
@@ -636,7 +740,9 @@ mod tests {
     fn a_clean_grounded_answer_copies_without_a_warning() {
         let (t, s) = (transcript(), state());
         let backend = ScriptedBackend::named("scripted");
-        backend.push_ok(json!({"answer": "No date yet [T3].", "evidence": [], "grounded": true}));
+        backend.push_ok(
+            json!({"short": "", "answer": "No date yet [T3].", "evidence": [], "grounded": true}),
+        );
         let out = ask(
             &backend,
             &CancelToken::new(),
@@ -644,6 +750,7 @@ mod tests {
         )
         .unwrap();
         assert!(out.grounded);
+        assert_eq!(out.short, "No date yet.");
         assert_eq!(
             out.to_markdown(),
             "No date yet [T3].\n\nSources:\n- [T3] This meeting 00:30, Them: Actually no date for the traffic numbers yet."

@@ -6,10 +6,13 @@
   let {
     open = $bindable(false),
     title = "",
+    wide = false,
     children,
   }: {
     open?: boolean;
     title?: string;
+    /** A wider card, for an image. */
+    wide?: boolean;
     children?: Snippet;
   } = $props();
 
@@ -39,6 +42,7 @@
   >
     <div
       class="modal"
+      class:wide
       role="dialog"
       aria-modal="true"
       aria-label={title}
@@ -95,6 +99,11 @@
        in WKWebView (the cause of the flicker when the dialog closes). */
     will-change: transform;
     backface-visibility: hidden;
+  }
+
+  .modal.wide {
+    max-width: min(92vw, 1100px);
+    max-height: 92vh;
   }
 
   .modal-head {

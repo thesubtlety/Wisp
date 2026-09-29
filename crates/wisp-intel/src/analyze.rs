@@ -53,8 +53,10 @@ relies on that nobody confirmed; two statements (or a statement and a document) 
 commitment with no owner or date; a decision discussed but never made; scope that changed without \
 agreement; information needed to proceed that nobody asked for. Never propose generic observations \
 (\"they seem interested\", \"ask for more detail\"). Most passes should propose none; at most a few. \
-Give each a one-line title, a short detail, a suggested question if there is one, its evidence IDs, \
-existing item ids in related_items, and honest scores from 0 to 1: importance (later work saved), \
+Give each a headline of at most six words that You can read at a glance while listening (an \
+imperative or a noun phrase, like \"Confirm Azure EU region\" or \"Dataset date slipped\"), a \
+one-sentence title with the full point, a short detail, a suggested question if there is one, its \
+evidence IDs, existing item ids in related_items, and honest scores from 0 to 1: importance (later work saved), \
 urgency (why now), confidence (that the issue is real), future_work_risk (chance of rework if left).
 
 If nothing is worth recording or raising, return {\"ops\": [], \"candidates\": []}.
@@ -352,11 +354,12 @@ mod tests {
             model_add("conflict", "US East hosting conflicts with EU-only data", "inferred", &["T1", "D5:C0"]),
             model_add("fact", "They run Kubernetes", "stated", &["T7"]),
         ], "candidates": [
-            {"kind": "conflict", "title": "US East hosting breaks the EU-only data rule",
+            {"kind": "conflict", "headline": "US East breaks EU-only rule",
+             "title": "US East hosting breaks the EU-only data rule",
              "detail": "security.md requires EU regions.", "suggested_question": "Can production run in an EU region?",
              "source_refs": ["T1", "D5:C0"], "related_items": [], "importance": 0.9, "urgency": 0.9,
              "confidence": 0.85, "future_work_risk": 0.9},
-            {"kind": "follow_up", "title": "Made-up evidence", "detail": "", "suggested_question": null,
+            {"kind": "follow_up", "headline": "", "title": "Made-up evidence", "detail": "", "suggested_question": null,
              "source_refs": ["T8"], "related_items": [], "importance": 0.9, "urgency": 0.9,
              "confidence": 0.9, "future_work_risk": 0.9}
         ]}));
@@ -386,6 +389,7 @@ mod tests {
         assert_eq!(state.item("CONF-1").unwrap().kind, ItemKind::Conflict);
         assert_eq!(out.candidates.len(), 1);
         assert_eq!(out.candidates[0].source_refs, ["Mlive:T1", "S5:C0"]);
+        assert_eq!(out.candidates[0].headline, "US East breaks EU-only rule");
         assert_eq!(
             out.rejected_candidates,
             [(
@@ -482,6 +486,14 @@ mod tests {
         let live: Vec<&str> = state.live_items().iter().map(|i| i.id.as_str()).collect();
         assert_eq!(live, ["COM-2"]);
         assert_eq!(state.analyzed_through, Some(2));
+    }
+
+    #[test]
+    fn the_instructions_ask_for_a_six_word_headline_per_candidate() {
+        assert!(INSTRUCTIONS.contains("headline of at most six words"));
+        let schema = crate::ops::output_schema();
+        let required = &schema["properties"]["candidates"]["items"]["required"];
+        assert!(required.as_array().unwrap().contains(&json!("headline")));
     }
 
     #[test]

@@ -55,6 +55,8 @@ export type Card = {
   shownAtMs: number;
   candidate: {
     kind: string;
+    /** At most six words, for a glance. */
+    headline: string;
     title: string;
     detail: string;
     suggestedQuestion: string | null;
@@ -84,7 +86,7 @@ export const GAP_ORDER: GapCategory[] = [
   "conflict",
 ];
 
-export type Gap = { category: GapCategory; text: string; cited: string[] };
+export type Gap = { category: GapCategory; headline: string; text: string; cited: string[] };
 
 export type FollowUpClass = "mine" | "theirs" | "open_question" | "not_a_task" | "project_memory";
 export const CLASS_ORDER: FollowUpClass[] = ["mine", "theirs", "open_question", "not_a_task", "project_memory"];
@@ -134,6 +136,8 @@ type IntelUpdate =
 
 export type Citation = { id: string; label: string; text: string; sourceRef: string | null; itemId: string | null };
 export type AskAnswer = {
+  /** At most twelve words, shown first. */
+  short: string;
   answer: string;
   citations: Citation[];
   unknownCitations: string[];
