@@ -148,6 +148,10 @@ export const en = {
     them: "Them",
     speakerTip: "Click to name this speaker",
     speakerName: "Speaker name",
+    speakerSuggest: (label: string, name: string): string => `${label} → ${name}?`,
+    speakerSuggestTip: (quote: string): string => `From the transcript: “${quote}”`,
+    speakerSuggestAccept: "Accept",
+    speakerSuggestDismiss: "Dismiss suggestion",
     // Tooltip for the You/Them capture toggles — depends on whether the source is on and whether a
     // session is running (running → mute/unmute; idle → include/exclude from transcription).
     youTip: (on: boolean, running: boolean): string =>

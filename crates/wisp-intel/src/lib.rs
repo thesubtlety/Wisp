@@ -20,6 +20,7 @@
 //! - [`review`] — post-call follow-up review, corrected in plain words, applied to the state.
 //! - [`headline`] — short forms (headlines, short answers) for reading at a glance.
 //! - [`screenshot`] — a screenshot attached as context, described once by a vision backend.
+//! - [`speakers`] — speaker-name suggestions from the transcript, checked and deduplicated.
 //! - [`runtime`] — the live worker: final lines in over a channel that never blocks, batched
 //!   passes out, one at a time.
 //!
@@ -40,6 +41,7 @@ pub mod reducer;
 pub mod review;
 pub mod runtime;
 pub mod screenshot;
+pub mod speakers;
 
 pub use about::{about_you, ABOUT_HEADING};
 pub use analyze::{
@@ -70,3 +72,6 @@ pub use runtime::{
     RuntimeConfig, TriggerPolicy, LIVE_MEETING_ID,
 };
 pub use screenshot::{describe_screenshot, ScreenshotDescription, ScreenshotInput};
+pub use speakers::{
+    validate_speaker_name, RawSpeakerName, SpeakerReject, SpeakerSuggestion, SpeakerSuggestions,
+};

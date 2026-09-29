@@ -142,6 +142,10 @@ export const zhHant: Messages = {
     them: "對方",
     speakerTip: "點擊為此說話人命名",
     speakerName: "說話人名稱",
+    speakerSuggest: (label, name) => `${label} → ${name}？`,
+    speakerSuggestTip: (quote) => `來自轉寫：「${quote}」`,
+    speakerSuggestAccept: "接受",
+    speakerSuggestDismiss: "忽略建議",
     youTip: (on, running) =>
       on
         ? running

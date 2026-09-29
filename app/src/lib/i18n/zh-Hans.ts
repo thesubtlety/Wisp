@@ -142,6 +142,10 @@ export const zhHans: Messages = {
     them: "对方",
     speakerTip: "点击为此说话人命名",
     speakerName: "说话人名称",
+    speakerSuggest: (label, name) => `${label} → ${name}？`,
+    speakerSuggestTip: (quote) => `来自转写：“${quote}”`,
+    speakerSuggestAccept: "接受",
+    speakerSuggestDismiss: "忽略建议",
     youTip: (on, running) =>
       on
         ? running

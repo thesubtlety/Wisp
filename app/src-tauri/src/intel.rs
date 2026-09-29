@@ -12,13 +12,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
-use wisp_core::speakers::{line_speaker, SpeakerNames};
-use wisp_core::transcript::{AudioSourceKind, TranscriptSegment};
+use wisp_core::speakers::{line_speaker, speaker_display, SpeakerNames};
+use wisp_core::transcript::{AudioSourceKind, SpeakerId, TranscriptSegment};
 use wisp_intel::{
     apply_edits, ask, fallback_followups, generate_followups, interpret_reply, parse_reply,
     remap_refs, review_ops, saved_positions, AppliedOp, AskAnswer, AskInput, AskTurn, Card,
     EndgameTrigger, Finished, FollowUp, FollowUpClass, Gap, IntelRuntime, IntelUpdate, LogEntry,
-    MeetingState, Retriever, ReviewEdit, RuntimeConfig, StateItem, TranscriptLine, LIVE_MEETING_ID,
+    MeetingState, Retriever, ReviewEdit, RuntimeConfig, SpeakerSuggestion, StateItem,
+    TranscriptLine, LIVE_MEETING_ID,
 };
 use wisp_intel::{context_packet, meeting_record, memory_ref, state_json, ExportMeta};
 use wisp_intel::{propose_learning, LearningInput, Proposal};
@@ -75,6 +76,10 @@ enum IntelUpdateDto {
     Failed {
         message: String,
     },
+    /// The live speaker-name suggestions (the whole list).
+    SpeakerNames {
+        suggestions: Vec<SpeakerSuggestion>,
+    },
 }
 
 impl From<IntelUpdate> for IntelUpdateDto {
@@ -104,6 +109,7 @@ impl From<IntelUpdate> for IntelUpdateDto {
                 backend,
             },
             IntelUpdate::Failed(message) => IntelUpdateDto::Failed { message },
+            IntelUpdate::SpeakerNames(suggestions) => IntelUpdateDto::SpeakerNames { suggestions },
         }
     }
 }
@@ -226,7 +232,9 @@ pub(crate) fn start(app: &AppHandle, project_id: Option<String>, meeting_label: 
                     report.gaps.len(),
                     report.rejected.len()
                 ),
-                IntelUpdate::NothingNew | IntelUpdate::WrapSuggested(_) => {}
+                IntelUpdate::NothingNew
+                | IntelUpdate::WrapSuggested(_)
+                | IntelUpdate::SpeakerNames(_) => {}
             }
             let _ = emitter.emit(INTEL_EVENT, IntelUpdateDto::from(update));
         }),
@@ -241,7 +249,7 @@ pub(crate) fn start(app: &AppHandle, project_id: Option<String>, meeting_label: 
 
 /// The speaker label a line carries into the reasoning context: the name the user gave the speaker
 /// when set (see [`line_speaker`] for the mic rule), else You / Them / Speaker N. A rename applies to
-/// lines from then on; lines the runtime already holds keep the label they arrived with.
+/// lines from then on, and [`speaker_renamed`] relabels the other side's lines the runtime holds.
 fn speaker_label(segment: &TranscriptSegment, names: &SpeakerNames) -> String {
     line_speaker(
         segment.source == AudioSourceKind::Microphone,
@@ -257,6 +265,35 @@ pub(crate) fn live_speaker_names(state: &AppState) -> SpeakerNames {
         .lock()
         .map(|n| n.clone())
         .unwrap_or_default()
+}
+
+/// Tells the running runtime that live speaker `speaker` went from `before` to `after` (the names
+/// map around a rename), so lines it holds under the old label read as the new one.
+pub(crate) fn speaker_renamed(
+    state: &AppState,
+    speaker: u32,
+    before: &SpeakerNames,
+    after: &SpeakerNames,
+) {
+    let (from, to) = rename_labels(speaker, before, after);
+    let _ = with_runtime(state, |r| r.rename_speaker(from, to));
+}
+
+/// The label a diarized far-end speaker's lines carry before and after a rename.
+fn rename_labels(speaker: u32, before: &SpeakerNames, after: &SpeakerNames) -> (String, String) {
+    let id = SpeakerId(speaker);
+    (speaker_display(id, before), speaker_display(id, after))
+}
+
+/// Records that the user dismissed suggesting `name` for `speaker` (a label like "Speaker 2").
+/// `false` if intelligence isn't running.
+#[tauri::command]
+pub(crate) fn intel_dismiss_speaker_name(
+    state: State<'_, AppState>,
+    speaker: String,
+    name: String,
+) -> Result<bool, String> {
+    with_runtime(&state, |r| r.dismiss_speaker_name(speaker, name))
 }
 
 /// Hands one admitted final to the running runtime, if any. Never blocks on a model.
@@ -1478,6 +1515,36 @@ mod tests {
         assert_eq!((lines[1].idx, lines[1].start_ms), (1, 3000));
         assert_eq!(lines[1].speaker, "You");
         assert_eq!(lines[0].speaker, "Them");
+    }
+
+    #[test]
+    fn a_rename_relabels_from_the_old_label_to_the_new() {
+        let none = SpeakerNames::new();
+        let named: SpeakerNames = [(1, "Laurie".to_owned())].into_iter().collect();
+        assert_eq!(
+            rename_labels(1, &none, &named),
+            ("Speaker 2".to_owned(), "Laurie".to_owned())
+        );
+        assert_eq!(
+            rename_labels(1, &named, &none),
+            ("Laurie".to_owned(), "Speaker 2".to_owned())
+        );
+    }
+
+    #[test]
+    fn speaker_names_reach_the_webview_as_their_own_kind() {
+        let dto = IntelUpdateDto::from(IntelUpdate::SpeakerNames(vec![SpeakerSuggestion {
+            speaker: "Speaker 2".into(),
+            speaker_id: 1,
+            name: "Laurie".into(),
+            confidence: 0.8,
+            evidence: vec!["T0".into()],
+            quote: Some("Speaker 1: Good afternoon Laurie".into()),
+        }]));
+        let v = serde_json::to_value(dto).unwrap();
+        assert_eq!(v["kind"], "speakerNames");
+        assert_eq!(v["suggestions"][0]["speakerId"], 1);
+        assert_eq!(v["suggestions"][0]["name"], "Laurie");
     }
 
     #[test]
