@@ -380,6 +380,8 @@ impl Library {
             })
             .optional()?
             .flatten();
+        // Deleting the meeting cascades its speaker names; carry them over like the project.
+        let names = crate::speakers::read_names(&tx, id)?;
         tx.execute("DELETE FROM meeting WHERE id = ?1", [id])?;
         tx.execute(
             "INSERT INTO meeting
@@ -400,6 +402,7 @@ impl Library {
             ],
         )?;
         insert_segments(&tx, id, &finals)?;
+        crate::speakers::write_names(&tx, id, &names)?;
         if let Some(chunks) = &chunks {
             insert_chunks(&tx, id, chunks)?;
         }

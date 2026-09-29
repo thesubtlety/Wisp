@@ -67,6 +67,15 @@ export const zhHans: Messages = {
     deleteConfirm: "确定要删除这则笔记?此操作无法撤销。其他会议中引用过它的 AI 活动记录会保留到过期或你清除为止。",
     you: "你",
     them: "对方",
+    speakers: "说话人",
+    speakerTip: "点击以重命名或合并此说话人",
+    speakerName: "说话人名称",
+    speakerNameHint: "在整场会议中重命名此说话人。留空则恢复默认标签。",
+    mergeInto: "合并到…",
+    merge: "合并",
+    mergeTitle: "合并说话人",
+    mergeConfirm: (from: string, into: string): string =>
+      `将 ${from} 的所有发言移到 ${into}？之后 ${from} 将从本场会议中消失。`,
   },
 
   audit: {
@@ -131,6 +140,8 @@ export const zhHans: Messages = {
 
     you: "我",
     them: "对方",
+    speakerTip: "点击为此说话人命名",
+    speakerName: "说话人名称",
     youTip: (on, running) =>
       on
         ? running

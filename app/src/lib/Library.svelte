@@ -50,7 +50,8 @@
     source: string;
     text: string;
   };
-  type Detail = { meeting: Note; segments: Segment[] };
+  // `speakerNames` maps a diarized speaker id (0-based) to the name the user gave it.
+  type Detail = { meeting: Note; segments: Segment[]; speakerNames: Record<number, string> };
 
   let notes = $state<NoteSummary[]>([]);
   let query = $state("");
@@ -101,6 +102,67 @@
   let newProjectOpen = $state(false);
   let newProjectName = $state("");
   let moveNote = $state("");
+
+  // Speaker names: click a speaker to rename it everywhere in the meeting, or merge it into another
+  // (diarization sometimes splits one person in two). Colours match the Live feed.
+  const SPEAKER_COLORS = ["#c96442", "#3f7e6b", "#6a5acd", "#b58a2e", "#9c4d6b", "#4a7aa8"];
+  const speakerColor = (n: number) => SPEAKER_COLORS[n % SPEAKER_COLORS.length];
+  const speakerIds = $derived(
+    detail
+      ? [...new Set(detail.segments.map((s) => s.speaker).filter((n): n is number => n !== null))].sort(
+          (a, b) => a - b,
+        )
+      : [],
+  );
+  let editingSpeaker = $state<number | null>(null);
+  let speakerDraft = $state("");
+  let pendingMerge = $state<{ from: number; into: number } | null>(null);
+  let mergeOpen = $state(false);
+
+  function diarizedLabel(n: number): string {
+    return detail?.speakerNames[n] || i18n.t.common.speaker(n + 1);
+  }
+
+  function startSpeakerEdit(n: number) {
+    editingSpeaker = n;
+    speakerDraft = detail?.speakerNames[n] ?? "";
+  }
+
+  async function saveSpeakerName() {
+    if (!detail || editingSpeaker === null) return;
+    const speaker = editingSpeaker;
+    editingSpeaker = null;
+    const name = speakerDraft.trim();
+    if ((detail.speakerNames[speaker] ?? "") === name) return;
+    try {
+      await invoke("set_library_speaker_name", { id: detail.meeting.id, speaker, name });
+      const next = { ...detail.speakerNames };
+      if (name) next[speaker] = name;
+      else delete next[speaker];
+      detail.speakerNames = next;
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  function askMerge(into: string) {
+    if (editingSpeaker === null || into === "") return;
+    pendingMerge = { from: editingSpeaker, into: Number(into) };
+    mergeOpen = true;
+  }
+
+  async function doMerge() {
+    const merge = pendingMerge;
+    mergeOpen = false;
+    pendingMerge = null;
+    if (!merge || !detail) return;
+    try {
+      await invoke<number>("merge_library_speaker", { id: detail.meeting.id, from: merge.from, into: merge.into });
+      await openNote(detail.meeting.id);
+    } catch (e) {
+      error = String(e);
+    }
+  }
 
   function readFilter(): string {
     try {
@@ -302,6 +364,7 @@
 
   async function openNote(id: string) {
     editingTitle = false;
+    editingSpeaker = null;
     newProjectOpen = false;
     moveNote = "";
     error = "";
@@ -442,6 +505,54 @@
             </select>
           {/if}
         </span>
+        {#if speakerIds.length}
+          <span class="project-row">
+            <span class="project-label">{i18n.t.library.speakers}</span>
+            {#each speakerIds as n (n)}
+              <button
+                class="spk-chip"
+                class:active={editingSpeaker === n}
+                style="--spk: {speakerColor(n)}"
+                title={i18n.t.library.speakerTip}
+                onclick={() => startSpeakerEdit(n)}>{diarizedLabel(n)}</button
+              >
+            {/each}
+          </span>
+          {#if editingSpeaker !== null}
+            {@const editing = editingSpeaker}
+            <span class="project-row">
+              <!-- svelte-ignore a11y_autofocus -->
+              <input
+                aria-label={i18n.t.library.speakerName}
+                placeholder={i18n.t.common.speaker(editing + 1)}
+                bind:value={speakerDraft}
+                autofocus
+                onkeydown={(e) => {
+                  if (e.key === "Enter") saveSpeakerName();
+                  if (e.key === "Escape") editingSpeaker = null;
+                }}
+              />
+              <button class="btn" onclick={saveSpeakerName}>{i18n.t.library.save}</button>
+              {#if speakerIds.length > 1}
+                <select
+                  aria-label={i18n.t.library.mergeInto}
+                  value=""
+                  onchange={(e) => {
+                    askMerge(e.currentTarget.value);
+                    e.currentTarget.value = "";
+                  }}
+                >
+                  <option value="">{i18n.t.library.mergeInto}</option>
+                  {#each speakerIds.filter((n) => n !== editing) as n (n)}
+                    <option value={String(n)}>{diarizedLabel(n)}</option>
+                  {/each}
+                </select>
+              {/if}
+              <button class="btn" onclick={() => (editingSpeaker = null)}>{i18n.t.library.cancel}</button>
+            </span>
+            <span class="move-note">{i18n.t.library.speakerNameHint}</span>
+          {/if}
+        {/if}
         {#if moveNote}<span class="move-note">{moveNote}</span>{/if}
         {#if error}<div class="err">{error}</div>{/if}
       </div>
@@ -458,6 +569,11 @@
           <span class="seg-body">
             {#if speakerLabel(seg.source)}<span class="spk" class:them={seg.source === "system"}
                 >{speakerLabel(seg.source)}</span
+              >{/if}{#if seg.speaker !== null}{@const n = seg.speaker}<button
+                class="spk dia"
+                style="--spk: {speakerColor(n)}"
+                title={i18n.t.library.speakerTip}
+                onclick={() => startSpeakerEdit(n)}>{diarizedLabel(n)}</button
               >{/if}<span class="txt">{seg.text}</span>
           </span>
         </p>
@@ -670,6 +786,18 @@
     <div class="confirm-actions">
       <button class="btn" onclick={() => (confirmOpen = false)}>{i18n.t.library.cancel}</button>
       <button class="btn danger" onclick={doDelete}>{i18n.t.library.delete}</button>
+    </div>
+  </Modal>
+
+  <Modal bind:open={mergeOpen} title={i18n.t.library.mergeTitle}>
+    {#if pendingMerge}
+      <p class="confirm-text">
+        {i18n.t.library.mergeConfirm(diarizedLabel(pendingMerge.from), diarizedLabel(pendingMerge.into))}
+      </p>
+    {/if}
+    <div class="confirm-actions">
+      <button class="btn" onclick={() => (mergeOpen = false)}>{i18n.t.library.cancel}</button>
+      <button class="btn danger" onclick={doMerge}>{i18n.t.library.merge}</button>
     </div>
   </Modal>
 
@@ -1053,6 +1181,25 @@
   }
   .spk.them {
     color: var(--accent);
+  }
+  /* A diarized speaker: a button that opens the rename / merge row in the header. */
+  .spk.dia,
+  .spk-chip {
+    padding: 0;
+    font: inherit;
+    font-weight: 600;
+    color: var(--spk);
+    background: none;
+    border: 0;
+    cursor: pointer;
+  }
+  .spk.dia {
+    font-size: 11px;
+  }
+  .spk.dia:hover,
+  .spk-chip:hover,
+  .spk-chip.active {
+    text-decoration: underline;
   }
 
   .confirm-text {

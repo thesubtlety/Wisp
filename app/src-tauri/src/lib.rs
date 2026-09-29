@@ -28,9 +28,12 @@ use wisp_core::denoise::Denoiser;
 use wisp_core::diarize::{attribute_speakers_by_word, ClipDiarizer, SpeakerSpan};
 use wisp_core::engine::{AsrEngine, ClipOptions, StreamingAsrEngine};
 use wisp_core::error::{Result as WispResult, WispError};
-use wisp_core::export::{format_markdown, format_transcript, ExportFormat, MeetingMeta};
+use wisp_core::export::{
+    format_markdown_named, format_transcript_named, ExportFormat, MeetingMeta,
+};
 use wisp_core::model::{ModelDescriptor, ModelFamily, ModelFile, ModelId, ModelStore, Quant};
 use wisp_core::params::{ParamKind, ParamSpec, ParamValue, ParamValues};
+use wisp_core::speakers::SpeakerNames;
 use wisp_core::task::run_within;
 use wisp_core::transcript::{AudioSourceKind, SegmentStatus, TranscriptEvent, TranscriptSegment};
 use wisp_engine_cloud::{
@@ -149,6 +152,9 @@ struct AppState {
     /// Committed finals from the current/most-recent live session (both mic and system streams),
     /// retained so the meeting can be exported after it ends. Cleared when a new session starts.
     live_segments: Mutex<Vec<TranscriptSegment>>,
+    /// Names the user gave the live session's diarized speakers (id → name). Cleared when a new
+    /// session starts; `save_note` writes them into the library with the meeting.
+    live_speaker_names: Mutex<SpeakerNames>,
     /// App-owned copies of imported files; retention only ever deletes files inside it.
     managed_dir: PathBuf,
     /// Where the retention policy persists.
@@ -2947,6 +2953,9 @@ fn start_session_blocking(app: AppHandle, options: LiveOptions) -> Result<Option
     if let Ok(mut retained) = state.live_segments.lock() {
         retained.clear();
     }
+    if let Ok(mut names) = state.live_speaker_names.lock() {
+        names.clear();
+    }
     // Intelligence starts before capture so it sees every final the transcript retains, from the
     // first; that keeps its line numbers aligned with the saved transcript.
     intel::reset(&state);
@@ -3732,9 +3741,17 @@ fn export_transcript_blocking(
     let format = ExportFormat::from_name(&format_name)
         .ok_or_else(|| format!("unknown format: {format_name}"))?;
 
-    let buffer = match source.as_deref() {
-        Some("live") => &state.live_segments,
-        _ => &state.file_segments,
+    let live = source.as_deref() == Some("live");
+    let buffer = if live {
+        &state.live_segments
+    } else {
+        &state.file_segments
+    };
+    // Only the live session has speaker names; a file transcript keeps "Speaker N".
+    let names = if live {
+        intel::live_speaker_names(&state)
+    } else {
+        SpeakerNames::new()
     };
     let mut segments = buffer
         .lock()
@@ -3749,8 +3766,10 @@ fn export_transcript_blocking(
     segments.sort_by_key(|s| s.start);
 
     let content = match format {
-        ExportFormat::Markdown => format_markdown(&segments, &meta.unwrap_or_default().into()),
-        other => format_transcript(&segments, other),
+        ExportFormat::Markdown => {
+            format_markdown_named(&segments, &meta.unwrap_or_default().into(), &names)
+        }
+        other => format_transcript_named(&segments, other, &names),
     };
 
     // `format_name` is one of the known formats (checked above), so it's a safe extension.
@@ -3770,9 +3789,12 @@ fn export_transcript_blocking(
 
 /// One stored meeting with its segments, for the Library detail view.
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct LibraryNoteDetail {
     meeting: Note,
     segments: Vec<Segment>,
+    /// Names the user gave the meeting's diarized speakers, keyed by speaker id.
+    speaker_names: SpeakerNames,
 }
 
 /// Saves the just-finished transcript (`source` `"live"` by default, or `"file"`) into the meeting
@@ -3815,12 +3837,72 @@ fn save_note(
         }
     }
     if live {
+        // Names given during the session; ones set later in the Library are kept.
+        for (speaker, name) in intel::live_speaker_names(&state) {
+            if let Err(e) = library.set_speaker_name(&id, speaker, &name) {
+                eprintln!("wisp: saving a speaker name failed: {e}");
+            }
+        }
         // The meeting itself is saved; a failure here only loses the derived state.
         if let Err(e) = intel::persist(&state, &mut library, &id, &retained) {
             eprintln!("wisp: saving meeting intelligence failed: {e}");
         }
     }
     Ok(())
+}
+
+/// Names (or with a blank `name`, un-names) a diarized speaker of the live session. Applies to the
+/// reasoning context and exports from now on, and is saved with the meeting.
+#[tauri::command]
+fn set_live_speaker_name(
+    state: State<'_, AppState>,
+    speaker: u32,
+    name: String,
+) -> Result<(), String> {
+    let mut names = state
+        .live_speaker_names
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())?;
+    let name = name.trim();
+    if name.is_empty() {
+        names.remove(&speaker);
+    } else {
+        names.insert(speaker, name.to_owned());
+    }
+    Ok(())
+}
+
+/// Names (or with a blank `name`, un-names) a speaker of a stored meeting.
+#[tauri::command]
+fn set_library_speaker_name(
+    state: State<'_, AppState>,
+    id: String,
+    speaker: u32,
+    name: String,
+) -> Result<(), String> {
+    state
+        .library
+        .lock()
+        .map_err(|_| "library lock poisoned".to_owned())?
+        .set_speaker_name(&id, speaker, &name)
+        .map_err(|e| e.to_string())
+}
+
+/// Folds speaker `from` into `into` in a stored meeting (diarization split one person in two).
+/// Returns how many segments moved.
+#[tauri::command]
+fn merge_library_speaker(
+    state: State<'_, AppState>,
+    id: String,
+    from: u32,
+    into: u32,
+) -> Result<usize, String> {
+    state
+        .library
+        .lock()
+        .map_err(|_| "library lock poisoned".to_owned())?
+        .merge_speaker(&id, from, into)
+        .map_err(|e| e.to_string())
 }
 
 /// Every stored meeting, newest first, for the Library list.
@@ -3840,14 +3922,19 @@ fn get_library_note(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<Option<LibraryNoteDetail>, String> {
-    let detail = state
+    let library = state
         .library
         .lock()
-        .map_err(|_| "library lock poisoned".to_owned())?
-        .get_note(&id)
-        .map_err(|e| e.to_string())?
-        .map(|(meeting, segments)| LibraryNoteDetail { meeting, segments });
-    Ok(detail)
+        .map_err(|_| "library lock poisoned".to_owned())?;
+    let Some((meeting, segments)) = library.get_note(&id).map_err(|e| e.to_string())? else {
+        return Ok(None);
+    };
+    let speaker_names = library.speaker_names(&id).map_err(|e| e.to_string())?;
+    Ok(Some(LibraryNoteDetail {
+        meeting,
+        segments,
+        speaker_names,
+    }))
 }
 
 /// Searches stored notes by the active mode — full-text, semantic, or hybrid (default cap 50 hits).
@@ -4368,6 +4455,7 @@ pub fn run() {
                 file_cancel: Arc::new(AtomicBool::new(false)),
                 file_busy: Arc::new(AtomicBool::new(false)),
                 live_segments: Mutex::new(Vec::new()),
+                live_speaker_names: Mutex::new(SpeakerNames::new()),
                 managed_dir: managed_dir.clone(),
                 retention_path,
                 reasoning: reasoning::ReasoningState::load(data_dir.join("reasoning.json")),
@@ -4513,6 +4601,9 @@ pub fn run() {
             set_stream_muted,
             save_note,
             list_library_notes,
+            set_live_speaker_name,
+            set_library_speaker_name,
+            merge_library_speaker,
             get_library_note,
             search_library,
             delete_library_note,

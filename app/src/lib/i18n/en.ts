@@ -71,6 +71,15 @@ export const en = {
     deleteConfirm: "Delete this note? This can't be undone. AI activity entries from other meetings that quoted it are kept until they expire or you clear them.",
     you: "You",
     them: "Them",
+    speakers: "Speakers",
+    speakerTip: "Click to rename or merge this speaker",
+    speakerName: "Speaker name",
+    speakerNameHint: "Renames this speaker everywhere in the meeting. Leave blank for the default label.",
+    mergeInto: "Merge into…",
+    merge: "Merge",
+    mergeTitle: "Merge speakers",
+    mergeConfirm: (from: string, into: string): string =>
+      `Move every line from ${from} to ${into}? ${from} then disappears from this meeting.`,
   },
 
   // AI activity log (Settings › AI activity, and from the intelligence panel).
@@ -137,6 +146,8 @@ export const en = {
 
     you: "You",
     them: "Them",
+    speakerTip: "Click to name this speaker",
+    speakerName: "Speaker name",
     // Tooltip for the You/Them capture toggles — depends on whether the source is on and whether a
     // session is running (running → mute/unmute; idle → include/exclude from transcription).
     youTip: (on: boolean, running: boolean): string =>

@@ -466,8 +466,14 @@
       devices = await invoke<string[]>("list_input_devices");
       systemAudioId = await invoke<string>("system_audio_id");
       micOffId = await invoke<string>("mic_off_id");
-      // Default: capture system audio too, so one click grabs everything (you + all audio).
-      if (!systemDevice) systemDevice = systemAudioId;
+      // Default: capture system audio too, so one click grabs everything (you + all audio). A saved
+      // choice (including "off") wins.
+      if (!systemDevice && !systemDeviceSaved) systemDevice = systemAudioId;
+      // A remembered device that is gone (unplugged, renamed) falls back to the default.
+      if (micDevice && micDevice !== micOffId && !devices.includes(micDevice)) micDevice = "";
+      if (systemDevice && systemDevice !== systemAudioId && !devices.includes(systemDevice)) {
+        systemDevice = systemAudioId;
+      }
     } catch (e) {
       error = String(e);
     }
@@ -850,6 +856,8 @@
     // per session, so a lingering previous transcript would collide by (source, id) and interleave two
     // different time bases. Clear it here (export the old one first if you need it).
     segments = [];
+    liveSpeakerNames = {};
+    editingSpeaker = null;
     starting = true;
     slowStart = false;
     const slowTimer = setTimeout(() => (slowStart = true), 4000);
@@ -1059,6 +1067,82 @@
     if (!diarizeId && diarizeModels.length) diarizeId = diarizeModels[0].id;
   });
 
+  // Live and File options persist across launches, one JSON each. Restored on mount; saved on change.
+  const LIVE_OPTIONS_KEY = "wisp.liveOptions";
+  const FILE_OPTIONS_KEY = "wisp.fileOptions";
+  let optionsRestored = $state(false);
+  // A saved system-audio choice (even "off") overrides the capture-everything default.
+  let systemDeviceSaved = false;
+  // Whether "Identify speakers" holds a real choice: saved, set by the user, or defaulted on once a
+  // speaker model is installed. Until then it isn't saved, so the default can still apply.
+  let liveDiarizeDecided = $state(false);
+
+  function readOptions(key: string): Record<string, unknown> {
+    try {
+      const value: unknown = JSON.parse(localStorage.getItem(key) || "null");
+      return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+    } catch {
+      return {};
+    }
+  }
+
+  function restoreOptions() {
+    const live = readOptions(LIVE_OPTIONS_KEY);
+    if (typeof live.micDevice === "string") micDevice = live.micDevice;
+    if (typeof live.systemDevice === "string") {
+      systemDevice = live.systemDevice;
+      systemDeviceSaved = true;
+    }
+    if (typeof live.language === "string") language = live.language;
+    if (live.denoiser === null || typeof live.denoiser === "string") liveDenoiser = live.denoiser;
+    if (typeof live.accurate === "boolean") liveAccurate = live.accurate;
+    if (typeof live.hints === "string") livePrompt = live.hints;
+    if (typeof live.diarize === "boolean") {
+      liveDiarize = live.diarize;
+      liveDiarizeDecided = true;
+    }
+    if (typeof live.speakerModel === "string") diarizeId = live.speakerModel;
+    const file = readOptions(FILE_OPTIONS_KEY);
+    if (file.denoiser === null || typeof file.denoiser === "string") fileDenoiser = file.denoiser;
+    if (typeof file.accurate === "boolean") fileAccurate = file.accurate;
+    if (typeof file.diarize === "boolean") diarizeOn = file.diarize;
+    optionsRestored = true;
+  }
+
+  $effect(() => {
+    const live = {
+      micDevice,
+      systemDevice,
+      language,
+      denoiser: liveDenoiser,
+      accurate: liveAccurate,
+      hints: livePrompt,
+      diarize: liveDiarizeDecided ? liveDiarize : undefined,
+      speakerModel: diarizeId || undefined,
+    };
+    const file = { denoiser: fileDenoiser, accurate: fileAccurate, diarize: diarizeOn };
+    if (!optionsRestored) return;
+    try {
+      localStorage.setItem(LIVE_OPTIONS_KEY, JSON.stringify(live));
+      localStorage.setItem(FILE_OPTIONS_KEY, JSON.stringify(file));
+    } catch {
+      /* storage unavailable — the options last for this session only */
+    }
+  });
+
+  // A remembered speaker model that left the catalog falls back to an installed one. With no saved
+  // choice, "Identify speakers" turns on as soon as a speaker model is installed.
+  function settleSpeakerModel() {
+    if (!diarizeModels.length) return;
+    const installed = diarizeModels.find((m) => m.installed);
+    if (!diarizeModels.some((m) => m.id === diarizeId)) diarizeId = (installed ?? diarizeModels[0]).id;
+    if (!liveDiarizeDecided && installed) {
+      if (!diarizeModels.find((m) => m.id === diarizeId)?.installed) diarizeId = installed.id;
+      liveDiarize = true;
+      liveDiarizeDecided = true;
+    }
+  }
+
   // Engine choice per mode: the active on-device model, or a cloud provider/model. The provider
 
   const liveProv = $derived(cloudProvider(liveCloudProvider));
@@ -1092,9 +1176,13 @@
   // The transcript handed to the AI assist (not the on-screen one) — formatted conversationally so the
   // model reasons about turns: mic = "Me", system = "Them", plus the live diarizer's speaker number on
   // the meeting side (where multiple remote participants matter; mic is always you).
+  // A named speaker reads as its name — on the mic too, where diarization only splits a shared mic.
   const assistWho = (s: Segment): string => {
-    if (s.source === "Microphone") return "Me";
-    if (s.source === "System") return s.speaker !== null ? `Them (Speaker ${s.speaker + 1})` : "Them";
+    const named = s.speaker !== null ? liveSpeakerNames[s.speaker] : undefined;
+    if (s.source === "Microphone") return named ?? "Me";
+    if (s.source === "System") {
+      return s.speaker !== null ? `Them (${named ?? `Speaker ${s.speaker + 1}`})` : "Them";
+    }
     return sourceLabel(s.source);
   };
   const liveTranscriptText = $derived(
@@ -1174,6 +1262,40 @@
   const speakerColor = (n: number) => SPEAKER_COLORS[n % SPEAKER_COLORS.length];
   const speakerLabel = (n: number) => i18n.t.common.speaker(n + 1);
 
+  // Live speaker names: click a speaker chip in the feed to name it. The backend keeps the map for
+  // the reasoning context and exports and saves it with the meeting; a new session starts empty.
+  let liveSpeakerNames = $state<Record<number, string>>({});
+  let editingSpeaker = $state<{ row: string; speaker: number } | null>(null);
+  let speakerDraft = $state("");
+  const liveSpeakerLabel = (n: number) => liveSpeakerNames[n] || speakerLabel(n);
+
+  function editLiveSpeaker(row: string, speaker: number) {
+    editingSpeaker = { row, speaker };
+    speakerDraft = liveSpeakerNames[speaker] ?? "";
+  }
+
+  async function saveLiveSpeaker() {
+    const edit = editingSpeaker;
+    if (!edit) return;
+    editingSpeaker = null;
+    const name = speakerDraft.trim();
+    if ((liveSpeakerNames[edit.speaker] ?? "") === name) return;
+    try {
+      await invoke("set_live_speaker_name", { speaker: edit.speaker, name });
+      const next = { ...liveSpeakerNames };
+      if (name) next[edit.speaker] = name;
+      else delete next[edit.speaker];
+      liveSpeakerNames = next;
+      // After Stop the meeting may already be in the Library; name it there too (a no-op error if it
+      // was never saved).
+      if (!running && meetingId) {
+        await invoke("set_library_speaker_name", { id: meetingId, speaker: edit.speaker, name }).catch(() => {});
+      }
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
   // The File transcript assembled as plain text for the AI Notes panel.
   const fileTranscriptText = $derived(
     fileParagraphs
@@ -1191,6 +1313,7 @@
   async function refreshDiarizeModels() {
     try {
       diarizeModels = await invoke<ModelInfo[]>("list_diarization_models");
+      settleSpeakerModel();
     } catch (e) {
       error = String(e);
     }
@@ -1442,6 +1565,7 @@
     } catch {
       /* ignore unreadable storage */
     }
+    restoreOptions();
     refreshModels();
     refreshCloud();
     refreshDiarizeModels();
@@ -2217,10 +2341,24 @@
             </span>
             <span class="body">
               <span class="text"
-                >{#if seg.speaker !== null}<span
-                    class="speaker"
-                    style="--spk: {speakerColor(seg.speaker)}">{speakerLabel(seg.speaker)}</span
-                  >{/if}{seg.text}</span>
+                >{#if seg.speaker !== null}{@const row = seg.source + "-" + seg.id}{@const spk = seg.speaker}{#if editingSpeaker?.row === row}<!-- svelte-ignore a11y_autofocus --><input
+                      class="speaker-input"
+                      style="--spk: {speakerColor(spk)}"
+                      aria-label={i18n.t.live.speakerName}
+                      placeholder={speakerLabel(spk)}
+                      bind:value={speakerDraft}
+                      autofocus
+                      onkeydown={(e) => {
+                        if (e.key === "Enter") saveLiveSpeaker();
+                        if (e.key === "Escape") editingSpeaker = null;
+                      }}
+                      onblur={saveLiveSpeaker}
+                    />{:else}<button
+                      class="speaker"
+                      style="--spk: {speakerColor(spk)}"
+                      title={i18n.t.live.speakerTip}
+                      onclick={() => editLiveSpeaker(row, spk)}>{liveSpeakerLabel(spk)}</button
+                    >{/if}{/if}{seg.text}</span>
               {#if seg.auxText}<span class="aux-text">{seg.auxText}</span>{/if}
             </span>
           </li>
@@ -2447,7 +2585,14 @@
           <section class="modal-section">
             <span class="section-title">{i18n.t.advanced.speakers}</span>
             <label class="opt-toggle">
-              <input type="checkbox" bind:checked={liveDiarize} onchange={applyLiveDiarize} />
+              <input
+                type="checkbox"
+                bind:checked={liveDiarize}
+                onchange={() => {
+                  liveDiarizeDecided = true;
+                  applyLiveDiarize();
+                }}
+              />
               <span>{i18n.t.advanced.identifySpeakers}</span>
             </label>
             {#if liveDiarize}
@@ -4944,6 +5089,32 @@
     margin-right: 7px;
     font-weight: 600;
     color: var(--spk);
+  }
+
+  /* Live feed: the speaker chip is a button that opens an inline name field. */
+  button.speaker {
+    padding: 0;
+    border: 0;
+    background: none;
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  button.speaker:hover {
+    text-decoration: underline;
+  }
+
+  .speaker-input {
+    width: 9em;
+    margin-right: 7px;
+    padding: 1px 4px;
+    border: 1px solid var(--spk);
+    border-radius: 4px;
+    font: inherit;
+    font-weight: 600;
+    color: var(--spk);
+    background: transparent;
   }
 
   .dropzone-title {
