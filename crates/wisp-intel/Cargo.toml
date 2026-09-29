@@ -13,6 +13,8 @@ wisp-reasoning = { path = "../wisp-reasoning" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror.workspace = true
+# Project knowledge keeps a hash of its evidence, not the evidence text.
+sha2 = "0.10"
 
 [dev-dependencies]
 wisp-ingest = { path = "../wisp-ingest" }

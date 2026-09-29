@@ -106,3 +106,6 @@ wisp-engine-whisper-cpp = { path = "../../crates/wisp-engine-whisper-cpp" }
 # Total physical memory (GlobalMemoryStatusEx) to recommend a machine-appropriate model. Same
 # `windows` major as wisp-loopback, so no extra version in the tree.
 windows = { version = "0.61", features = ["Win32_System_SystemInformation"] }
+
+[dev-dependencies]
+tempfile = "3"

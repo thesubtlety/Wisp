@@ -12,9 +12,10 @@ use wisp_library::Snippet;
 use wisp_reasoning::{CancelToken, ReasoningBackend, ReasoningError, ReasoningRequest, TaskKind};
 
 use crate::evidence::{render_snippets, render_transcript, EvidencePacket, TranscriptLine};
+use crate::intervene::{validate_candidate, Candidate, MAX_CANDIDATES_PER_PASS};
 use crate::model::MeetingState;
 use crate::ops::{output_schema, OpBatch};
-use crate::reducer::{reduce, ApplyReport};
+use crate::reducer::{reduce, ApplyReport, RejectReason};
 
 /// Lines already analyzed that are shown again before the new ones, for continuity.
 pub const CONTEXT_LINES: usize = 30;
@@ -44,7 +45,19 @@ question is answered or a risk is dealt with, \"uncertain\" when it is now in do
 - Record a commitment's owner and due date only if they were said.
 - For a conflict, list the conflicting item ids in related_items.
 - One fact per item, short, in plain words. Skip small talk and pleasantries.
-- If nothing new is worth recording, return {\"ops\": []}.
+- If nothing new is worth recording, return no ops.
+
+Candidates: things worth interrupting You for now, while the people are still present, because \
+raising them later costs a follow-up, rework or another meeting. For example: something the plan \
+relies on that nobody confirmed; two statements (or a statement and a document) that conflict; a \
+commitment with no owner or date; a decision discussed but never made; scope that changed without \
+agreement; information needed to proceed that nobody asked for. Never propose generic observations \
+(\"they seem interested\", \"ask for more detail\"). Most passes should propose none; at most a few. \
+Give each a one-line title, a short detail, a suggested question if there is one, its evidence IDs, \
+existing item ids in related_items, and honest scores from 0 to 1: importance (later work saved), \
+urgency (why now), confidence (that the issue is real), future_work_risk (chance of rework if left).
+
+If nothing is worth recording or raising, return {\"ops\": [], \"candidates\": []}.
 
 Fields: an add sets kind, text, epistemic_status, confidence, source_refs, and temp_id if a later \
 op refers to it. An update sets id and only the fields that change, plus source_refs for the new \
@@ -60,6 +73,10 @@ pub struct AnalyzeInput<'a> {
     pub retrieved: &'a [Snippet],
     /// What the user wants from this meeting, if they said.
     pub focus: Option<&'a str>,
+    /// Whether the meeting is wrapping up: candidates then focus on unresolved gaps.
+    pub endgame: bool,
+    /// The project's accepted knowledge.
+    pub memory: &'a [wisp_library::MemoryEntry],
     pub timeout: Duration,
 }
 
@@ -77,6 +94,10 @@ pub struct PreparedPass {
 #[derive(Debug, Clone)]
 pub struct AnalyzeOutcome {
     pub report: ApplyReport,
+    /// Proposed interventions whose evidence checked out, for the local filter.
+    pub candidates: Vec<Candidate>,
+    /// Proposed interventions that failed the check: title and reason.
+    pub rejected_candidates: Vec<(String, RejectReason)>,
     pub new_lines: usize,
     /// New lines left for the next pass because this one was full.
     pub remaining_lines: usize,
@@ -155,11 +176,22 @@ pub fn prepare_observe(
 
     let mut packet = EvidencePacket::default();
     let transcript = render_transcript(&mut packet, &state.meeting_id, earlier, new);
-    let project = render_snippets(&mut packet, input.retrieved);
+    let project = format!(
+        "{}{}",
+        crate::evidence::render_memory(&mut packet, input.memory),
+        render_snippets(&mut packet, input.retrieved)
+    );
 
     let mut context = String::new();
     if let Some(focus) = input.focus.map(str::trim).filter(|f| !f.is_empty()) {
         let _ = writeln!(context, "## What You want from this meeting\n\n{focus}\n");
+    }
+    if input.endgame {
+        context.push_str(
+            "## The meeting is wrapping up\n\nFocus candidates on what must be resolved before \
+             everyone leaves: missing topics, unconfirmed assumptions, conflicts, commitments \
+             without owner or date, follow-up ownership. Skip everything else.\n\n",
+        );
     }
     context.push_str(&render_state(state, &packet));
     context.push_str(&project);
@@ -172,6 +204,7 @@ pub fn prepare_observe(
             context,
             output_schema: output_schema(),
             timeout: input.timeout,
+            images: Vec::new(),
         },
         packet,
         through: new.last().map(|l| l.idx),
@@ -192,10 +225,20 @@ pub fn analyze_now(
     let batch: OpBatch = serde_json::from_value(response.output)
         .map_err(|e| IntelError::BadOutput(e.to_string()))?;
     let report = reduce(state, &batch, &pass.packet, now_ms);
+    let mut candidates = Vec::new();
+    let mut rejected_candidates = Vec::new();
+    for raw in batch.candidates.iter().take(MAX_CANDIDATES_PER_PASS) {
+        match validate_candidate(raw, &pass.packet, state) {
+            Ok(c) => candidates.push(c),
+            Err(reason) => rejected_candidates.push((raw.title.clone(), reason)),
+        }
+    }
     state.analyzed_through = pass.through.or(state.analyzed_through);
     let remaining_lines = new_lines(state, input.transcript).len();
     Ok(AnalyzeOutcome {
         report,
+        candidates,
+        rejected_candidates,
         new_lines: pass.new_lines,
         remaining_lines,
         backend: response.backend,
@@ -280,6 +323,8 @@ mod tests {
             transcript,
             retrieved,
             focus: Some("Scope the hosting model"),
+            endgame: false,
+            memory: &[],
             timeout: Duration::from_secs(60),
         }
     }
@@ -306,6 +351,14 @@ mod tests {
             model_add("requirement", "Production runs in the customer's Azure tenant (US East)", "stated", &["T1"]),
             model_add("conflict", "US East hosting conflicts with EU-only data", "inferred", &["T1", "D5:C0"]),
             model_add("fact", "They run Kubernetes", "stated", &["T7"]),
+        ], "candidates": [
+            {"kind": "conflict", "title": "US East hosting breaks the EU-only data rule",
+             "detail": "security.md requires EU regions.", "suggested_question": "Can production run in an EU region?",
+             "source_refs": ["T1", "D5:C0"], "related_items": [], "importance": 0.9, "urgency": 0.9,
+             "confidence": 0.85, "future_work_risk": 0.9},
+            {"kind": "follow_up", "title": "Made-up evidence", "detail": "", "suggested_question": null,
+             "source_refs": ["T8"], "related_items": [], "importance": 0.9, "urgency": 0.9,
+             "confidence": 0.9, "future_work_risk": 0.9}
         ]}));
         let mut state = MeetingState::new("live");
 
@@ -331,6 +384,15 @@ mod tests {
             ["Mlive:T1", "S5:C0"]
         );
         assert_eq!(state.item("CONF-1").unwrap().kind, ItemKind::Conflict);
+        assert_eq!(out.candidates.len(), 1);
+        assert_eq!(out.candidates[0].source_refs, ["Mlive:T1", "S5:C0"]);
+        assert_eq!(
+            out.rejected_candidates,
+            [(
+                "Made-up evidence".to_owned(),
+                RejectReason::UnknownEvidence("T8".into())
+            )]
+        );
 
         let req = backend.requests.lock().unwrap()[0].clone();
         assert_eq!(req.task, TaskKind::Observe);
@@ -373,7 +435,7 @@ mod tests {
             &["T0"],
         );
         commit["due"] = json!("Friday");
-        backend.push_ok(json!({"ops": [commit]}));
+        backend.push_ok(json!({"ops": [commit], "candidates": []}));
         let mut state = MeetingState::new("live");
         analyze_now(
             &backend,
@@ -398,7 +460,7 @@ mod tests {
              "epistemic_status": null, "confidence": null, "lifecycle": "superseded",
              "superseded_by": "n", "owner": null, "due": null,
              "source_refs": ["T2"], "related_items": []}
-        ]}));
+        ], "candidates": []}));
         let out = analyze_now(
             &backend,
             &CancelToken::new(),
@@ -470,7 +532,9 @@ mod tests {
     fn a_long_backlog_is_analyzed_over_several_passes_without_skipping() {
         let long = "word ".repeat(1000); // ~5000 chars a line
         let transcript: Vec<TranscriptLine> = (0..12).map(|i| line(i, "Them", &long)).collect();
-        let backend = ScriptedBackend::with_responder("scripted", |_| Ok(json!({"ops": []})));
+        let backend = ScriptedBackend::with_responder("scripted", |_| {
+            Ok(json!({"ops": [], "candidates": []}))
+        });
         let mut state = MeetingState::new("live");
         let mut seen = 0;
         let mut passes = 0;

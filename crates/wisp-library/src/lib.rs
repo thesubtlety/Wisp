@@ -10,6 +10,7 @@
 //! sources and meetings for reasoning.
 
 mod embed;
+mod memory;
 mod record;
 mod retention;
 mod retrieve;
@@ -17,6 +18,7 @@ mod state_log;
 mod store;
 
 pub use embed::Embedder;
+pub use memory::{MemoryEntry, MemoryInput, ProvenanceRef};
 pub use record::{Note, NoteSummary, Project, SearchHit, Segment, Source};
 pub use retention::{
     PruneReport, RetentionPolicy, SourceInput, SourceKind, Upsert, DEFAULT_TEMP_SOURCE_DAYS,
@@ -25,7 +27,7 @@ pub use retention::{
 pub use retrieve::{
     meeting_ref, source_ref, RetrievalQuery, Snippet, SnippetOrigin, SNIPPET_CHARS,
 };
-pub use state_log::StoredOp;
+pub use state_log::{StoredLogEntry, StoredOp};
 pub use store::Library;
 
 /// An error from the meeting library.

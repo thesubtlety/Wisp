@@ -90,6 +90,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             transcript: &transcript,
             retrieved: &retrieved,
             focus: focus.as_deref(),
+            endgame: false,
+            memory: &[],
             timeout: Duration::from_secs(240),
         };
         if dry_run {

@@ -45,6 +45,9 @@ pub struct ModelOp {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OpBatch {
     pub ops: Vec<ModelOp>,
+    /// Possible interventions; the local filter decides which are shown.
+    #[serde(default)]
+    pub candidates: Vec<crate::intervene::RawCandidate>,
 }
 
 /// A validated change with canonical refs and real ids. This is what the log stores.
@@ -258,8 +261,9 @@ pub fn output_schema() -> Value {
     json!({
         "type": "object",
         "additionalProperties": false,
-        "required": ["ops"],
+        "required": ["ops", "candidates"],
         "properties": {
+            "candidates": crate::intervene::candidates_schema(),
             "ops": {
                 "type": "array",
                 "items": {
@@ -416,14 +420,14 @@ mod tests {
             "epistemic_status": "stated", "confidence": 0.9, "lifecycle": null,
             "superseded_by": null, "owner": null, "due": null,
             "source_refs": ["T1"], "related_items": []
-        }]});
+        }], "candidates": []});
         wisp_reasoning::validate(&schema, &op).unwrap();
         let batch: OpBatch = serde_json::from_value(op).unwrap();
         assert_eq!(batch.ops[0].kind, Some(ItemKind::Requirement));
 
         let missing = json!({"ops": [{"op": "add"}]});
         assert!(wisp_reasoning::validate(&schema, &missing).is_err());
-        let extra = json!({"ops": [], "note": "hi"});
+        let extra = json!({"ops": [], "candidates": [], "note": "hi"});
         assert!(wisp_reasoning::validate(&schema, &extra).is_err());
         // Every object property is listed as required (strict mode needs that).
         let item = &schema["properties"]["ops"]["items"];

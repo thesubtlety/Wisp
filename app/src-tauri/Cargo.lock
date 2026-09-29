@@ -103,6 +103,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-global-shortcut",
  "tauri-plugin-opener",
+ "tempfile",
  "windows 0.61.3",
  "wisp-aec",
  "wisp-applespeech",
@@ -6819,6 +6820,7 @@ version = "0.0.0"
 dependencies = [
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.18",
  "wisp-library",
  "wisp-reasoning",
@@ -6830,6 +6832,7 @@ version = "0.0.0"
 dependencies = [
  "rusqlite",
  "serde",
+ "serde_json",
  "sha2",
  "thiserror 2.0.18",
  "wisp-core",
@@ -6865,11 +6868,13 @@ dependencies = [
 name = "wisp-reasoning"
 version = "0.0.0"
 dependencies = [
+ "base64 0.22.1",
  "libc",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
+ "ureq",
 ]
 
 [[package]]

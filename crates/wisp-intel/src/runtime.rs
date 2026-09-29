@@ -20,7 +20,12 @@ use wisp_library::Snippet;
 use wisp_reasoning::{CancelToken, ReasoningBackend};
 
 use crate::analyze::{analyze_now, retrieval_text, AnalyzeInput, IntelError};
+use crate::endgame::{
+    audit, wrap_probability, AuditInput, AuditReport, EndgameTrigger, SCHEDULED_LEAD_MS,
+    WRAP_SUGGEST_AT,
+};
 use crate::evidence::TranscriptLine;
+use crate::intervene::{Card, InterventionFilter, InterventionPolicy, LogEntry};
 use crate::model::{MeetingState, StateItem};
 use crate::ops::{AppliedOp, ResolvedOp};
 
@@ -100,9 +105,18 @@ pub enum IntelUpdate {
         /// New lines still waiting because the pass was full.
         remaining_lines: usize,
         backend: String,
+        /// Cards the local filter chose to show from this pass (usually none).
+        cards: Vec<Card>,
     },
     /// Analyze Now was asked for with nothing new.
     NothingNew,
+    /// The meeting looks like it is ending; advisory, sent at most once per meeting.
+    WrapSuggested(EndgameTrigger),
+    /// The gap audit Wrapping Up asked for.
+    Audit {
+        report: AuditReport,
+        backend: String,
+    },
     /// A pass failed; the state is unchanged and the lines will be tried again.
     Failed(String),
 }
@@ -115,6 +129,12 @@ pub struct RuntimeConfig {
     pub focus: Option<String>,
     /// Longest a single pass may take.
     pub timeout: Duration,
+    /// Which proposed interventions reach the user.
+    pub interventions: InterventionPolicy,
+    /// When the meeting is scheduled to end (epoch ms), if known.
+    pub scheduled_end_ms: Option<i64>,
+    /// The project's accepted knowledge, given to every pass.
+    pub memory: Vec<wisp_library::MemoryEntry>,
 }
 
 impl Default for RuntimeConfig {
@@ -123,6 +143,9 @@ impl Default for RuntimeConfig {
             policy: TriggerPolicy::default(),
             focus: None,
             timeout: Duration::from_secs(180),
+            interventions: InterventionPolicy::default(),
+            scheduled_end_ms: None,
+            memory: Vec::new(),
         }
     }
 }
@@ -135,6 +158,8 @@ pub struct Finished {
     pub log: Vec<AppliedOp>,
     /// Final lines received, in arrival order.
     pub lines: usize,
+    /// Every intervention candidate considered, what was decided, and what was dismissed.
+    pub candidate_log: Vec<LogEntry>,
 }
 
 enum Msg {
@@ -144,6 +169,11 @@ enum Msg {
         text: String,
     },
     AnalyzeNow,
+    Dismiss(String),
+    WrapUp,
+    SetScheduledEnd(Option<i64>),
+    Pin(Snippet),
+    Unpin(String),
     Stop,
 }
 
@@ -151,8 +181,23 @@ enum Msg {
 pub struct IntelRuntime {
     tx: Sender<Msg>,
     cancel: CancelToken,
-    snapshot: Arc<Mutex<MeetingState>>,
+    snapshot: Arc<Mutex<Snapshot>>,
     worker: Option<JoinHandle<Finished>>,
+}
+
+/// What readers outside the worker see: the state and its log after the last completed pass.
+struct Snapshot {
+    state: MeetingState,
+    log: Vec<AppliedOp>,
+}
+
+impl Default for Snapshot {
+    fn default() -> Self {
+        Self {
+            state: MeetingState::new(LIVE_MEETING_ID),
+            log: Vec::new(),
+        }
+    }
 }
 
 type OnUpdate = Box<dyn Fn(IntelUpdate) + Send>;
@@ -171,8 +216,9 @@ impl IntelRuntime {
         let (tx, rx) = mpsc::channel();
         let cancel = CancelToken::new();
         let worker_cancel = cancel.clone();
-        let snapshot = Arc::new(Mutex::new(MeetingState::new(LIVE_MEETING_ID)));
+        let snapshot = Arc::new(Mutex::new(Snapshot::default()));
         let worker_snapshot = snapshot.clone();
+        let config_interventions = config.interventions.clone();
         let worker = std::thread::Builder::new()
             .name("wisp-intel".into())
             .spawn(move || {
@@ -190,6 +236,10 @@ impl IntelRuntime {
                     pending_since: None,
                     failures: 0,
                     snapshot: worker_snapshot,
+                    filter: InterventionFilter::new(config_interventions),
+                    pinned: Vec::new(),
+                    endgame: None,
+                    wrap_suggested: false,
                 }
                 .run(rx)
             })
@@ -221,12 +271,47 @@ impl IntelRuntime {
         let _ = self.tx.send(Msg::AnalyzeNow);
     }
 
+    /// Enters endgame and runs the gap audit as soon as the worker is free. Recording goes on; press
+    /// again for a fresh audit.
+    pub fn wrap_up(&self) {
+        let _ = self.tx.send(Msg::WrapUp);
+    }
+
+    /// Sets (or clears) when the meeting is scheduled to end, in epoch ms.
+    pub fn set_scheduled_end(&self, end_ms: Option<i64>) {
+        let _ = self.tx.send(Msg::SetScheduledEnd(end_ms));
+    }
+
+    /// Adds context the user attached (a described screenshot) to every later pass and audit,
+    /// ahead of retrieval. Pinning the same ref again replaces it.
+    pub fn pin(&self, snippet: Snippet) {
+        let _ = self.tx.send(Msg::Pin(snippet));
+    }
+
+    /// Drops pinned context by its ref (the user removed the screenshot).
+    pub fn unpin(&self, ref_id: impl Into<String>) {
+        let _ = self.tx.send(Msg::Unpin(ref_id.into()));
+    }
+
+    /// Records that the user dismissed a card, so the filter holds back repeats.
+    pub fn dismiss(&self, card_id: impl Into<String>) {
+        let _ = self.tx.send(Msg::Dismiss(card_id.into()));
+    }
+
     /// A copy of the state as of the last completed pass.
     pub fn snapshot(&self) -> MeetingState {
         self.snapshot
             .lock()
-            .map(|s| s.clone())
+            .map(|s| s.state.clone())
             .unwrap_or_else(|_| MeetingState::new(LIVE_MEETING_ID))
+    }
+
+    /// The state and the log that rebuilds it, as of the last completed pass.
+    pub fn snapshot_with_log(&self) -> (MeetingState, Vec<AppliedOp>) {
+        self.snapshot
+            .lock()
+            .map(|s| (s.state.clone(), s.log.clone()))
+            .unwrap_or_else(|_| (MeetingState::new(LIVE_MEETING_ID), Vec::new()))
     }
 
     /// Cancels any pass in flight, stops the worker, and returns the state and its log.
@@ -235,6 +320,7 @@ impl IntelRuntime {
             state: MeetingState::new(LIVE_MEETING_ID),
             log: Vec::new(),
             lines: 0,
+            candidate_log: Vec::new(),
         })
     }
 
@@ -267,13 +353,22 @@ struct Worker {
     /// Failed passes in a row.
     failures: u32,
     /// Shared copy of `state`, refreshed after each pass.
-    snapshot: Arc<Mutex<MeetingState>>,
+    snapshot: Arc<Mutex<Snapshot>>,
+    filter: InterventionFilter,
+    /// Context the user attached during the meeting, in every pass.
+    pinned: Vec<Snippet>,
+    /// Set once the user presses Wrapping Up.
+    endgame: Option<EndgameTrigger>,
+    /// Whether the advisory wrap-up suggestion has been sent.
+    wrap_suggested: bool,
 }
 
 impl Worker {
     fn run(mut self, rx: Receiver<Msg>) -> Finished {
         loop {
             let mut manual = false;
+            let mut wrap_up = false;
+            let lines_before = self.lines.len();
             let first = match rx.recv_timeout(TICK) {
                 Ok(msg) => Some(msg),
                 Err(RecvTimeoutError::Timeout) => None,
@@ -296,12 +391,30 @@ impl Worker {
                         self.pending_since.get_or_insert_with(Instant::now);
                     }
                     Msg::AnalyzeNow => manual = true,
+                    Msg::Dismiss(id) => {
+                        self.filter.dismiss(&id, (self.now_ms)());
+                    }
+                    Msg::WrapUp => wrap_up = true,
+                    Msg::SetScheduledEnd(end) => self.config.scheduled_end_ms = end,
+                    Msg::Pin(snippet) => {
+                        self.pinned.retain(|p| p.ref_id != snippet.ref_id);
+                        self.pinned.push(snippet);
+                    }
+                    Msg::Unpin(ref_id) => self.pinned.retain(|p| p.ref_id != ref_id),
                     Msg::Stop => stop = true,
                 }
             }
             if stop || self.cancel.is_cancelled() {
                 break;
             }
+            if wrap_up {
+                self.endgame = Some(EndgameTrigger::Manual);
+                self.wrap_suggested = true;
+                self.filter.set_endgame(true);
+                self.run_audit();
+                continue;
+            }
+            self.maybe_suggest_wrap(self.lines.len() > lines_before);
             let pending = self.pending_chars();
             let backing_off = self.last_pass.is_some_and(|t| t.elapsed() < self.backoff());
             let due = !backing_off
@@ -318,6 +431,7 @@ impl Worker {
             state: self.state,
             log: self.log,
             lines: self.lines.len(),
+            candidate_log: self.filter.log().to_vec(),
         }
     }
 
@@ -329,6 +443,82 @@ impl Worker {
         }
         let factor = 1u32 << self.failures.min(8);
         (self.config.policy.min_interval * factor).min(MAX_BACKOFF)
+    }
+
+    /// Sends the advisory wrap-up suggestion once: when the scheduled end is near, or when the
+    /// latest lines sound like a wrap-up.
+    fn maybe_suggest_wrap(&mut self, new_lines: bool) {
+        if self.endgame.is_some() || self.wrap_suggested {
+            return;
+        }
+        let trigger = if self
+            .config
+            .scheduled_end_ms
+            .is_some_and(|end| (self.now_ms)() >= end - SCHEDULED_LEAD_MS)
+        {
+            Some(EndgameTrigger::Scheduled)
+        } else if new_lines && wrap_probability(&self.lines) >= WRAP_SUGGEST_AT {
+            Some(EndgameTrigger::Semantic)
+        } else {
+            None
+        };
+        if let Some(trigger) = trigger {
+            self.wrap_suggested = true;
+            (self.on_update)(IntelUpdate::WrapSuggested(trigger));
+        }
+    }
+
+    /// The gap audit, run on the worker right away.
+    fn run_audit(&mut self) {
+        let query = {
+            let text: String = self
+                .lines
+                .iter()
+                .rev()
+                .take(20)
+                .map(|l| l.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            text.chars().take(1500).collect::<String>()
+        };
+        let retrieved = self.with_pins(if query.is_empty() {
+            Vec::new()
+        } else {
+            self.retriever.retrieve(&query)
+        });
+        let result = audit(
+            self.backend.as_ref(),
+            &self.cancel,
+            &AuditInput {
+                transcript: &self.lines,
+                state: &self.state,
+                retrieved: &retrieved,
+                memory: &self.config.memory,
+                focus: self.config.focus.as_deref(),
+                timeout: self.config.timeout,
+            },
+        );
+        let update = match result {
+            Ok(report) => IntelUpdate::Audit {
+                report,
+                backend: self.backend.name().to_owned(),
+            },
+            Err(e) => IntelUpdate::Failed(e.to_string()),
+        };
+        if !self.cancel.is_cancelled() {
+            (self.on_update)(update);
+        }
+    }
+
+    /// The pinned context first, then what retrieval found that isn't pinned.
+    fn with_pins(&self, retrieved: Vec<Snippet>) -> Vec<Snippet> {
+        let mut out = self.pinned.clone();
+        out.extend(
+            retrieved
+                .into_iter()
+                .filter(|r| !self.pinned.iter().any(|p| p.ref_id == r.ref_id)),
+        );
+        out
     }
 
     fn pending_chars(&self) -> usize {
@@ -344,15 +534,17 @@ impl Worker {
     fn pass(&mut self) {
         self.last_pass = Some(Instant::now());
         let query = retrieval_text(&self.state, &self.lines);
-        let retrieved = if query.is_empty() {
+        let retrieved = self.with_pins(if query.is_empty() {
             Vec::new()
         } else {
             self.retriever.retrieve(&query)
-        };
+        });
         let input = AnalyzeInput {
             transcript: &self.lines,
             retrieved: &retrieved,
             focus: self.config.focus.as_deref(),
+            endgame: self.endgame.is_some(),
+            memory: &self.config.memory,
             timeout: self.config.timeout,
         };
         let now = (self.now_ms)();
@@ -367,7 +559,15 @@ impl Worker {
                 self.failures = 0;
                 self.log.extend(out.report.applied.iter().cloned());
                 if let Ok(mut shared) = self.snapshot.lock() {
-                    *shared = self.state.clone();
+                    shared.state = self.state.clone();
+                    shared.log = self.log.clone();
+                }
+                let mut cards = Vec::new();
+                for candidate in out.candidates {
+                    cards.extend(self.filter.consider(candidate, now));
+                }
+                for (title, reason) in &out.rejected_candidates {
+                    self.filter.reject(title, reason, now);
                 }
                 self.pending_since = (out.remaining_lines > 0).then(Instant::now);
                 IntelUpdate::Pass {
@@ -376,6 +576,7 @@ impl Worker {
                     live_items: self.state.live_items().into_iter().cloned().collect(),
                     remaining_lines: out.remaining_lines,
                     backend: out.backend,
+                    cards,
                 }
             }
             Err(IntelError::NothingNew) => IntelUpdate::NothingNew,
@@ -503,7 +704,7 @@ mod tests {
                 "text": format!("noted {last}"), "epistemic_status": "stated", "confidence": 0.8,
                 "lifecycle": null, "superseded_by": null, "owner": null, "due": null,
                 "source_refs": [last], "related_items": []
-            }]}))
+            }], "candidates": []}))
         })
     }
 
@@ -557,7 +758,11 @@ mod tests {
             last_pass: None,
             pending_since: None,
             failures: 0,
-            snapshot: Arc::new(Mutex::new(MeetingState::new(LIVE_MEETING_ID))),
+            snapshot: Arc::new(Mutex::new(Snapshot::default())),
+            filter: InterventionFilter::default(),
+            pinned: Vec::new(),
+            endgame: None,
+            wrap_suggested: false,
         };
         assert_eq!(w.backoff(), Duration::ZERO);
         w.failures = 1;
@@ -587,6 +792,12 @@ mod tests {
         rt.push_final("Them", 1000, "   ");
         rt.push_final("You", 2000, "And what about single sign-on?");
         wait_for(&seen, 2);
+        let (snap, log) = rt.snapshot_with_log();
+        assert_eq!(
+            MeetingState::replay(LIVE_MEETING_ID, &log).unwrap().items,
+            snap.items,
+            "the snapshot's log rebuilds its state"
+        );
         assert_eq!(
             rt.snapshot().items.len(),
             2,
@@ -651,7 +862,7 @@ mod tests {
     fn a_failed_pass_is_reported_and_retried_later() {
         let backend = Arc::new(ScriptedBackend::named("scripted"));
         backend.push_err(ReasoningError::Unavailable("not logged in".into()));
-        backend.push_ok(json!({"ops": []}));
+        backend.push_ok(json!({"ops": [], "candidates": []}));
         let (seen, on_update) = collect();
         let rt = IntelRuntime::spawn(
             backend.clone(),
@@ -704,7 +915,7 @@ mod tests {
     fn pushing_never_waits_for_a_slow_pass() {
         let backend = Arc::new(ScriptedBackend::with_responder("slow", |_| {
             std::thread::sleep(Duration::from_millis(400));
-            Ok(json!({"ops": []}))
+            Ok(json!({"ops": [], "candidates": []}))
         }));
         let (_seen, on_update) = collect();
         let rt = IntelRuntime::spawn(
@@ -750,7 +961,7 @@ mod tests {
         }
         let queries = Arc::new(Mutex::new(Vec::new()));
         let backend = Arc::new(ScriptedBackend::with_responder("s", |_| {
-            Ok(json!({"ops": []}))
+            Ok(json!({"ops": [], "candidates": []}))
         }));
         let (seen, on_update) = collect();
         let rt = IntelRuntime::spawn(
@@ -772,6 +983,191 @@ mod tests {
         );
         let ctx = backend.requests.lock().unwrap()[0].context.clone();
         assert!(ctx.contains("[D3:C0] spec.md, line 1\nEU only"));
+    }
+
+    #[test]
+    fn pinned_context_reaches_every_later_pass_once() {
+        let snippet = |text: &str| Snippet {
+            ref_id: "S7:C0".into(),
+            origin: wisp_library::SnippetOrigin::Source {
+                source_id: 7,
+                chunk_idx: 0,
+                label: "Screenshot · 14:03".into(),
+                line_start: Some(1),
+            },
+            text: text.into(),
+            score: 0.0,
+        };
+        let backend = Arc::new(ScriptedBackend::with_responder("s", |_| {
+            Ok(json!({"ops": [], "candidates": []}))
+        }));
+        let (seen, on_update) = collect();
+        let rt = IntelRuntime::spawn(
+            backend.clone(),
+            Box::new(NoRetrieval),
+            RuntimeConfig {
+                policy: fast_policy(),
+                ..RuntimeConfig::default()
+            },
+            on_update,
+            Box::new(|| 0),
+        );
+        rt.pin(snippet("Screenshot (not described yet)"));
+        rt.pin(snippet("Diagram: two regions, EU and US"));
+        rt.push_final("Them", 0, "As you can see on the slide.");
+        wait_for(&seen, 1);
+        rt.push_final("Them", 1000, "Both regions are active.");
+        wait_for(&seen, 2);
+        rt.unpin("S7:C0");
+        rt.push_final("Them", 2000, "Moving on to the rollout plan now.");
+        wait_for(&seen, 3);
+        rt.stop();
+        let requests = backend.requests.lock().unwrap();
+        assert!(
+            !requests[2].context.contains("Screenshot · 14:03"),
+            "unpinned"
+        );
+        for req in &requests[..2] {
+            assert_eq!(req.context.matches("Screenshot · 14:03").count(), 1);
+            assert!(req.context.contains("Diagram: two regions"));
+            assert!(
+                !req.context.contains("not described yet"),
+                "a re-pin replaces"
+            );
+        }
+    }
+
+    #[test]
+    fn candidates_pass_the_filter_into_cards_and_dismissals_reach_the_log() {
+        let strong = |title: &str| {
+            json!({"kind": "missing_owner", "title": title, "detail": "", "suggested_question": null,
+                   "source_refs": ["T0"], "related_items": [], "importance": 0.9, "urgency": 0.9,
+                   "confidence": 0.9, "future_work_risk": 0.9})
+        };
+        let mut weak = strong("They seem interested");
+        weak["confidence"] = json!(0.3);
+        let backend = Arc::new(ScriptedBackend::named("scripted"));
+        backend
+            .push_ok(json!({"ops": [], "candidates": [strong("Test dataset has no owner"), weak]}));
+        let (seen, on_update) = collect();
+        let rt = IntelRuntime::spawn(
+            backend.clone(),
+            Box::new(NoRetrieval),
+            RuntimeConfig {
+                policy: fast_policy(),
+                ..RuntimeConfig::default()
+            },
+            on_update,
+            Box::new(|| 1_000),
+        );
+        rt.push_final("Them", 0, "We'll send a test dataset at some point.");
+        wait_for(&seen, 1);
+        let IntelUpdate::Pass { cards, .. } = seen.lock().unwrap()[0].clone() else {
+            panic!("expected a pass");
+        };
+        assert_eq!(cards.len(), 1, "the weak candidate is held back");
+        assert_eq!(cards[0].id, "CARD-1");
+        assert_eq!(cards[0].candidate.source_refs, ["Mlive:T0"]);
+        rt.dismiss("CARD-1");
+        let done = rt.stop();
+        assert_eq!(done.candidate_log.len(), 3, "two considered, one dismissed");
+        assert!(matches!(done.candidate_log[2], LogEntry::Dismissed { .. }));
+    }
+
+    #[test]
+    fn wrap_up_runs_the_audit_at_once_and_shapes_later_passes() {
+        let backend = Arc::new(ScriptedBackend::with_responder("scripted", |req| {
+            Ok(match req.task {
+                wisp_reasoning::TaskKind::EndgameAudit => json!({"gaps": [
+                    {"category": "missing", "text": "Nobody owns deployment.", "source_refs": [], "related_items": []}
+                ]}),
+                _ => json!({"ops": [], "candidates": []}),
+            })
+        }));
+        let (seen, on_update) = collect();
+        let rt = IntelRuntime::spawn(
+            backend.clone(),
+            Box::new(NoRetrieval),
+            RuntimeConfig {
+                policy: TriggerPolicy {
+                    min_new_chars: 10_000,
+                    ..fast_policy()
+                },
+                ..RuntimeConfig::default()
+            },
+            on_update,
+            Box::new(|| 0),
+        );
+        rt.push_final("Them", 0, "We talked about the migration.");
+        rt.wrap_up();
+        wait_for(&seen, 1);
+        let IntelUpdate::Audit { report, .. } = seen.lock().unwrap()[0].clone() else {
+            panic!("expected an audit");
+        };
+        assert_eq!(report.gaps[0].text, "Nobody owns deployment.");
+        rt.analyze_now();
+        wait_for(&seen, 2);
+        let requests = backend.requests.lock().unwrap().clone();
+        assert_eq!(requests[0].task, wisp_reasoning::TaskKind::EndgameAudit);
+        assert!(requests[1]
+            .context
+            .contains("## The meeting is wrapping up"));
+        drop(requests);
+        rt.stop();
+    }
+
+    #[test]
+    fn closing_words_suggest_wrapping_up_once() {
+        let backend = Arc::new(ScriptedBackend::with_responder("s", |_| {
+            Ok(json!({"ops": [], "candidates": []}))
+        }));
+        let (seen, on_update) = collect();
+        let rt = IntelRuntime::spawn(
+            backend,
+            Box::new(NoRetrieval),
+            RuntimeConfig {
+                policy: TriggerPolicy {
+                    min_new_chars: 10_000,
+                    ..fast_policy()
+                },
+                ..RuntimeConfig::default()
+            },
+            on_update,
+            Box::new(|| 0),
+        );
+        rt.push_final("Them", 0, "Anything else before we wrap?");
+        rt.push_final("You", 1, "No, thanks everyone.");
+        wait_for(&seen, 1);
+        rt.push_final("Them", 2, "Thanks all, talk soon.");
+        std::thread::sleep(TICK * 2);
+        let updates = seen.lock().unwrap().clone();
+        assert_eq!(
+            updates,
+            [IntelUpdate::WrapSuggested(EndgameTrigger::Semantic)]
+        );
+        rt.stop();
+    }
+
+    #[test]
+    fn a_near_scheduled_end_suggests_wrapping_up() {
+        let backend = Arc::new(ScriptedBackend::named("s"));
+        let (seen, on_update) = collect();
+        let rt = IntelRuntime::spawn(
+            backend,
+            Box::new(NoRetrieval),
+            RuntimeConfig {
+                scheduled_end_ms: Some(10 * 60 * 1000),
+                ..RuntimeConfig::default()
+            },
+            on_update,
+            Box::new(|| 6 * 60 * 1000),
+        );
+        wait_for(&seen, 1);
+        assert_eq!(
+            seen.lock().unwrap()[0],
+            IntelUpdate::WrapSuggested(EndgameTrigger::Scheduled)
+        );
+        rt.stop();
     }
 
     #[test]

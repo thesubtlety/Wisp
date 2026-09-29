@@ -73,6 +73,10 @@ impl ReasoningBackend for FallbackBackend {
     ) -> Result<ReasoningResponse, ReasoningError> {
         let mut errors = Vec::new();
         for b in &self.backends {
+            if !req.images.is_empty() && !b.capabilities().vision {
+                errors.push(format!("{}: can't see images", b.name()));
+                continue;
+            }
             match b.invoke(req, cancel) {
                 Ok(r) => return Ok(r),
                 Err(ReasoningError::Cancelled) => return Err(ReasoningError::Cancelled),
@@ -96,7 +100,20 @@ mod tests {
             context: String::new(),
             output_schema: serde_json::json!({"type": "object"}),
             timeout: Duration::from_secs(1),
+            images: Vec::new(),
         }
+    }
+
+    #[test]
+    fn images_skip_backends_without_vision() {
+        let blind = ScriptedBackend::named("blind");
+        blind.push_ok(serde_json::json!({"a": 1}));
+        let fb = FallbackBackend::new(vec![Box::new(blind)]);
+        let mut r = req();
+        r.images = vec!["/tmp/x.png".into()];
+        let err = fb.invoke(&r, &CancelToken::new()).unwrap_err().to_string();
+        assert!(err.contains("can't see images"), "{err}");
+        assert!(fb.invoke(&req(), &CancelToken::new()).is_ok());
     }
 
     #[test]

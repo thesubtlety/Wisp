@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
-use wisp_library::{meeting_ref, Snippet, SnippetOrigin};
+use wisp_library::{meeting_ref, MemoryEntry, Snippet, SnippetOrigin};
 
 use crate::model::SourceRef;
 
@@ -218,6 +218,39 @@ pub(crate) fn render_snippets(packet: &mut EvidencePacket, snippets: &[Snippet])
         let alias = packet.add_snippet(snippet, &heading);
         let _ = writeln!(out, "[{alias}] {heading}\n{}\n", snippet.text.trim());
     }
+    out
+}
+
+/// The canonical ref for a project memory entry.
+pub fn memory_ref(id: i64) -> String {
+    format!("P{id}")
+}
+
+/// Accepted project knowledge, rendered with IDs (`P12`). Registers every entry in `packet`.
+pub(crate) fn render_memory(packet: &mut EvidencePacket, memory: &[MemoryEntry]) -> String {
+    if memory.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("## Accepted project knowledge\n\n");
+    for m in memory {
+        let alias = memory_ref(m.id);
+        packet.by_alias.insert(alias.clone(), alias.clone());
+        packet.details.insert(
+            alias.clone(),
+            EvidenceDetail {
+                label: format!("Project knowledge ({})", m.kind),
+                text: m.text.clone(),
+            },
+        );
+        let _ = writeln!(
+            out,
+            "[{alias}] {} ({}): {}",
+            m.kind,
+            m.status,
+            one_line(&m.text)
+        );
+    }
+    out.push('\n');
     out
 }
 

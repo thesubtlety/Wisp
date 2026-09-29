@@ -1,6 +1,6 @@
 use crate::backend::{
-    finish, truncate, CancelToken, Capabilities, Health, ReasoningBackend, ReasoningError,
-    ReasoningRequest, ReasoningResponse,
+    check_images, finish, image_media_type, truncate, CancelToken, Capabilities, Health,
+    ReasoningBackend, ReasoningError, ReasoningRequest, ReasoningResponse,
 };
 use crate::codex::version_health;
 use crate::runner::{run_command, CommandSpec, SUBSCRIPTION_STRIPPED_ENV};
@@ -64,8 +64,23 @@ impl ClaudeCodeBackend {
 
     pub fn command(&self, ws: &Workspace, req: &ReasoningRequest) -> CommandSpec {
         let c = &self.config;
+        // Images need the streaming input format, which needs streaming output; the last line
+        // of that output is the same result envelope `json` prints.
+        let format = if req.images.is_empty() {
+            ["-p", "--output-format", "json"].as_slice()
+        } else {
+            [
+                "-p",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--input-format",
+                "stream-json",
+            ]
+            .as_slice()
+        };
         let mut spec = crate::locate::cli_spec(&c.program)
-            .args(["-p", "--output-format", "json"])
+            .args(format.iter().copied())
             .arg("--max-turns")
             .arg(c.max_turns.to_string())
             .args(["--tools", ""])
@@ -121,9 +136,14 @@ impl ReasoningBackend for ClaudeCodeBackend {
         req: &ReasoningRequest,
         cancel: &CancelToken,
     ) -> Result<ReasoningResponse, ReasoningError> {
+        check_images(req)?;
         let ws = Workspace::create(req)?;
-        let out = run_command(&self.command(&ws, req), req.timeout, cancel)?;
-        let (text, structured) = parse_envelope(&out.stdout)?;
+        let mut spec = self.command(&ws, req);
+        if !req.images.is_empty() {
+            spec.stdin = Some(stream_input(req)?);
+        }
+        let out = run_command(&spec, req.timeout, cancel)?;
+        let (text, structured) = parse_envelope(result_line(&out.stdout))?;
         if out.code != Some(0) && structured.is_none() && text.is_empty() {
             return Err(ReasoningError::Process {
                 code: out.code,
@@ -132,6 +152,46 @@ impl ReasoningBackend for ClaudeCodeBackend {
         }
         finish(self.name(), req, text, structured, out.elapsed)
     }
+}
+
+/// One stream-json user message: the images, then the prompt.
+fn stream_input(req: &ReasoningRequest) -> Result<String, ReasoningError> {
+    use base64::Engine as _;
+    let mut content = Vec::new();
+    for path in &req.images {
+        let media_type = image_media_type(path).ok_or_else(|| {
+            ReasoningError::BadInput(format!("unsupported image type: {}", path.display()))
+        })?;
+        let data = base64::engine::general_purpose::STANDARD.encode(std::fs::read(path)?);
+        content.push(serde_json::json!({
+            "type": "image",
+            "source": {"type": "base64", "media_type": media_type, "data": data},
+        }));
+    }
+    content.push(serde_json::json!({"type": "text", "text": crate::render_prompt(req)}));
+    let message = serde_json::json!({
+        "type": "user",
+        "message": {"role": "user", "content": content},
+    });
+    Ok(format!("{message}\n"))
+}
+
+/// The result envelope: the whole output for `json`, the last `result` event for `stream-json`.
+fn result_line(stdout: &str) -> &str {
+    stdout
+        .lines()
+        .rev()
+        .find(|l| {
+            serde_json::from_str::<serde_json::Value>(l)
+                .ok()
+                .and_then(|v| {
+                    v.get("type")
+                        .and_then(|t| t.as_str())
+                        .map(|t| t == "result")
+                })
+                .unwrap_or(false)
+        })
+        .unwrap_or(stdout)
 }
 
 /// Parse `claude -p --output-format json`. Returns the result text and the
@@ -178,7 +238,37 @@ mod tests {
             context: "y".into(),
             output_schema: serde_json::json!({"type": "object", "required": ["ok"]}),
             timeout: Duration::from_secs(5),
+            images: Vec::new(),
         }
+    }
+
+    #[test]
+    fn images_go_inline_as_stream_json_and_the_result_event_is_parsed() {
+        let dir = tempfile::tempdir().unwrap();
+        let png = dir.path().join("shot.png");
+        std::fs::write(&png, [0x89, b'P', b'N', b'G']).unwrap();
+        let mut r = req();
+        r.images = vec![png];
+        let b = ClaudeCodeBackend::new(ClaudeConfig::default());
+        let ws = Workspace::create(&r).unwrap();
+        let a = b.command(&ws, &r).args;
+        let pos = |f: &str| a.iter().position(|x| x == f).unwrap();
+        assert_eq!(a[pos("--output-format") + 1], "stream-json");
+        assert_eq!(a[pos("--input-format") + 1], "stream-json");
+        assert!(a.contains(&"--verbose".to_string()));
+        assert_eq!(a[pos("--tools") + 1], "", "images never unlock tools");
+
+        let line = stream_input(&r).unwrap();
+        let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+        let content = &v["message"]["content"];
+        assert_eq!(content[0]["source"]["media_type"], "image/png");
+        assert_eq!(content[0]["source"]["data"], "iVBORw==");
+        assert_eq!(content[1]["type"], "text");
+
+        let out = "{\"type\":\"system\"}\n{\"type\":\"assistant\"}\n{\"type\":\"result\",\"result\":\"\",\"structured_output\":{\"ok\":true}}\n";
+        let (_, structured) = parse_envelope(result_line(out)).unwrap();
+        assert_eq!(structured.unwrap()["ok"], true);
+        assert_eq!(result_line("{\"result\":\"x\"}"), "{\"result\":\"x\"}");
     }
 
     #[test]

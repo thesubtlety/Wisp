@@ -173,11 +173,21 @@ fn on_shortcut(app: &AppHandle, state: ShortcutState) {
     }
 }
 
-/// The global-shortcut plugin wired to push-to-talk dictation. Only the dictation hotkey is ever
-/// registered, so any fired shortcut is the dictation key. Built for the app's `Wry` runtime.
+/// The global-shortcut plugin: the Capture Context shortcut (registered only during a meeting
+/// with intelligence on) captures on press; any other registered shortcut is the push-to-talk
+/// dictation key. Built for the app's `Wry` runtime.
 pub(crate) fn shortcut_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
     tauri_plugin_global_shortcut::Builder::new()
-        .with_handler(|app, _shortcut, event| on_shortcut(app, event.state()))
+        .with_handler(|app, shortcut, event| {
+            let capture = crate::context::CAPTURE_SHORTCUT.parse::<Shortcut>().ok();
+            if capture.as_ref() == Some(shortcut) {
+                if event.state() == ShortcutState::Pressed {
+                    crate::context::on_shortcut(app);
+                }
+                return;
+            }
+            on_shortcut(app, event.state())
+        })
         .build()
 }
 
@@ -225,6 +235,11 @@ pub(crate) fn set_dictation_enabled(
     hotkey: Option<String>,
 ) -> Result<DictationStatus, String> {
     let state = app.state::<AppState>();
+    let previous = state
+        .dictation_hotkey
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())?
+        .clone();
 
     if let Some(hotkey) = hotkey.filter(|h| !h.trim().is_empty()) {
         *state
@@ -239,7 +254,12 @@ pub(crate) fn set_dictation_enabled(
         .clone();
 
     let shortcuts = app.global_shortcut();
-    let _ = shortcuts.unregister_all();
+    // Only the dictation key: the capture shortcut may be registered for a running meeting.
+    if let Ok(old) = previous.parse::<Shortcut>() {
+        if shortcuts.is_registered(old) {
+            let _ = shortcuts.unregister(old);
+        }
+    }
 
     if enabled {
         if !apple_speech_available() {

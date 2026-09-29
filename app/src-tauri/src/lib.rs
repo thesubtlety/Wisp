@@ -58,9 +58,12 @@ use wisp_pipeline::{
 use wisp_screencapture::ScreenCaptureSource;
 
 mod assist;
+mod context;
 mod dictation;
 mod intel;
 mod permissions;
+mod reasoning;
+mod retention;
 
 use assist::{normalize_assist, AssistParams};
 
@@ -145,6 +148,12 @@ struct AppState {
     /// Committed finals from the current/most-recent live session (both mic and system streams),
     /// retained so the meeting can be exported after it ends. Cleared when a new session starts.
     live_segments: Mutex<Vec<TranscriptSegment>>,
+    /// App-owned copies of imported files; retention only ever deletes files inside it.
+    managed_dir: PathBuf,
+    /// Where the retention policy persists.
+    retention_path: PathBuf,
+    /// Which reasoning backend meeting intelligence uses.
+    reasoning: reasoning::ReasoningState,
     /// The on-disk meeting knowledge base (SQLite). Finished meetings are saved, listed, and searched
     /// here; a single connection behind a mutex (a personal library has no concurrency needs).
     library: Mutex<Library>,
@@ -1507,6 +1516,20 @@ struct CustomCloudEndpoint {
     assist: AssistParams,
 }
 
+/// Every custom endpoint.
+fn custom_endpoints(state: &AppState) -> Vec<CustomCloudEndpoint> {
+    state
+        .cloud_custom_endpoints
+        .lock()
+        .map(|e| e.clone())
+        .unwrap_or_default()
+}
+
+/// One custom endpoint by id.
+fn custom_endpoint(state: &AppState, id: &str) -> Option<CustomCloudEndpoint> {
+    custom_endpoints(state).into_iter().find(|e| e.id == id)
+}
+
 /// The payload the add/update endpoint commands accept — the editable fields of a custom endpoint,
 /// as one object so the command stays within a sane parameter count.
 #[derive(Deserialize)]
@@ -2795,6 +2818,13 @@ struct LiveOptions {
     /// CLI). Off unless the user turned it on.
     #[serde(default)]
     intel: bool,
+    /// The project this meeting belongs to: it scopes retrieval and brings the project's accepted
+    /// knowledge into the intelligence passes.
+    #[serde(default)]
+    project_id: Option<String>,
+    /// How screenshot labels name this meeting ("Note · 9/28/2026, 2:03 PM").
+    #[serde(default)]
+    meeting_label: Option<String>,
 }
 
 /// Resolves the engine a live session will run from `options` + app state: an on-device model, or a
@@ -2915,7 +2945,11 @@ fn start_session_blocking(app: AppHandle, options: LiveOptions) -> Result<Option
     // first; that keeps its line numbers aligned with the saved transcript.
     intel::reset(&state);
     if options.intel {
-        intel::start(&app);
+        intel::start(
+            &app,
+            options.project_id.clone(),
+            options.meeting_label.clone(),
+        );
     }
     // A start that fails from here on drops the runtime it just made.
     let mut intel_guard = intel::StartGuard::new(&state);
@@ -3182,6 +3216,7 @@ fn stop_session_blocking(app: AppHandle) -> Result<(), String> {
     };
     // After capture, so the runtime has had every final; cancels a pass in flight.
     intel::stop(&state);
+    context::end(&app);
     result
 }
 
@@ -3742,6 +3777,7 @@ fn save_note(
     meta: MarkdownMetaInput,
     started_at_ms: i64,
     source: Option<String>,
+    project_id: Option<String>,
 ) -> Result<(), String> {
     let live = !matches!(source.as_deref(), Some("file"));
     let buffer = if live {
@@ -3764,6 +3800,12 @@ fn save_note(
     library
         .save_note(&id, &meta.into(), started_at_ms, &segments)
         .map_err(|e| e.to_string())?;
+    if let Some(project) = project_id.as_deref().filter(|p| !p.is_empty()) {
+        // A project deleted meanwhile must not cost the meeting itself.
+        if let Err(e) = library.set_meeting_project(&id, Some(project)) {
+            eprintln!("wisp: filing the meeting under its project failed: {e}");
+        }
+    }
     if live {
         // The meeting itself is saved; a failure here only loses the derived state.
         if let Err(e) = intel::persist(&state, &mut library, &id, &retained) {
@@ -4264,6 +4306,9 @@ pub fn run() {
             let managed_dir = data_dir.join("managed-sources");
             let _ = fs::create_dir_all(&managed_dir);
             restrict_to_owner(&managed_dir, 0o700);
+            // The user's policy applies before the first prune, however long the app was closed.
+            let retention_path = data_dir.join("retention.json");
+            library.set_retention(retention::load_policy(&retention_path));
             prune_library(&mut library, &managed_dir);
 
             // Notes semantic search: restore the chosen embedding model (loaded in the background so
@@ -4315,6 +4360,9 @@ pub fn run() {
                 file_cancel: Arc::new(AtomicBool::new(false)),
                 file_busy: Arc::new(AtomicBool::new(false)),
                 live_segments: Mutex::new(Vec::new()),
+                managed_dir: managed_dir.clone(),
+                retention_path,
+                reasoning: reasoning::ReasoningState::load(data_dir.join("reasoning.json")),
                 library: Mutex::new(library),
                 embed_model: Mutex::new(embed_model),
                 embed_model_path,
@@ -4401,8 +4449,37 @@ pub fn run() {
             assist::realtime::start_assist_realtime,
             intel::intel_analyze_now,
             intel::intel_saved_items,
+            intel::intel_export,
+            context::capture_context,
+            context::paste_context_image,
+            context::import_context_image,
+            context::list_context,
+            context::describe_context,
+            context::remove_context,
+            reasoning::get_reasoning_settings,
+            reasoning::set_reasoning_settings,
+            reasoning::check_reasoning,
+            intel::intel_export_save,
             intel::intel_ask,
             intel::intel_ask_cancel,
+            intel::intel_dismiss_card,
+            intel::intel_wrap_up,
+            intel::intel_set_scheduled_end,
+            intel::intel_review_start,
+            intel::intel_review_reply,
+            intel::intel_review_set,
+            intel::intel_review_apply,
+            intel::list_projects,
+            intel::create_project,
+            intel::list_project_memory,
+            intel::delete_project_memory,
+            intel::intel_learning_propose,
+            intel::intel_learning_save,
+            retention::get_retention,
+            retention::preview_retention,
+            retention::set_retention,
+            retention::prune_now,
+            retention::delete_project_completely,
             assist::realtime::stop_assist_realtime,
             assist::realtime::assist_hint_now,
             transcribe_file,

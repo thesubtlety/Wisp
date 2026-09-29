@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,6 +14,8 @@ pub enum TaskKind {
     EndgameAudit,
     PostCall,
     ProjectLearning,
+    /// Describe a screenshot the user attached as context.
+    ScreenshotContext,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,6 +29,47 @@ pub struct ReasoningRequest {
     pub output_schema: serde_json::Value,
     #[serde(with = "duration_secs")]
     pub timeout: Duration,
+    /// Images to show the model with the prompt (PNG, JPEG, GIF or WebP, each at most
+    /// [`MAX_IMAGE_BYTES`]). Only backends with [`Capabilities::vision`] accept them.
+    #[serde(default)]
+    pub images: Vec<PathBuf>,
+}
+
+/// Largest image a backend will attach.
+pub const MAX_IMAGE_BYTES: u64 = 5 * 1024 * 1024;
+
+/// The media type for an image path, from its extension; `None` for anything else.
+pub fn image_media_type(path: &Path) -> Option<&'static str> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        _ => None,
+    }
+}
+
+/// Checks every attached image exists, has a supported type and fits the size limit.
+pub fn check_images(req: &ReasoningRequest) -> Result<(), ReasoningError> {
+    for path in &req.images {
+        if image_media_type(path).is_none() {
+            return Err(ReasoningError::BadInput(format!(
+                "unsupported image type: {}",
+                path.display()
+            )));
+        }
+        let len = std::fs::metadata(path)
+            .map_err(|e| ReasoningError::BadInput(format!("{}: {e}", path.display())))?
+            .len();
+        if len > MAX_IMAGE_BYTES {
+            return Err(ReasoningError::BadInput(format!(
+                "image too large ({len} bytes): {}",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -67,6 +111,8 @@ pub enum ReasoningError {
     Process { code: Option<i32>, stderr: String },
     #[error("unparseable output: {0}")]
     BadOutput(String),
+    #[error("bad input: {0}")]
+    BadInput(String),
     #[error("output violates schema: {0}")]
     SchemaViolation(String),
     #[error("io: {0}")]
@@ -153,5 +199,34 @@ pub(crate) fn truncate(s: &str, n: usize) -> String {
         s.to_string()
     } else {
         format!("{}…", s.chars().take(n).collect::<String>())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn images_are_checked_for_type_and_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let ok = dir.path().join("a.JPG");
+        std::fs::write(&ok, b"x").unwrap();
+        let big = dir.path().join("b.png");
+        std::fs::File::create(&big)
+            .unwrap()
+            .set_len(MAX_IMAGE_BYTES + 1)
+            .unwrap();
+        let req = |p: &Path| ReasoningRequest {
+            task: TaskKind::ScreenshotContext,
+            instructions: String::new(),
+            context: String::new(),
+            output_schema: serde_json::json!({}),
+            timeout: Duration::from_secs(1),
+            images: vec![p.to_path_buf()],
+        };
+        assert!(check_images(&req(&ok)).is_ok());
+        assert!(check_images(&req(&big)).is_err());
+        assert!(check_images(&req(&dir.path().join("c.bmp"))).is_err());
+        assert!(check_images(&req(&dir.path().join("missing.png"))).is_err());
     }
 }
