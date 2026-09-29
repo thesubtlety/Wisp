@@ -407,8 +407,11 @@ export const en = {
     embedCloudNote: "Cloud models send note text to the provider; local models stay fully on-device.",
     dictation: "Dictation",
     dictationIntro:
-      "Hold the hotkey, speak, release — Wisp types it into whatever app has focus, fully on-device (Apple speech).",
-    dictationNote: "Dictation needs Apple on-device speech (macOS 26 or newer).",
+      "Hold the hotkey, speak, release — Wisp types it into whatever app has focus, fully on-device.",
+    dictationNote:
+      "Dictation needs Apple on-device speech (macOS 26 or newer) or a downloaded on-device model, such as Parakeet v3. Download one under AI models.",
+    dictationUsesApple: "Uses Apple on-device speech.",
+    dictationUsesModel: (name: string): string => `Uses ${name} (on-device).`,
     pushToTalk: "Push-to-talk",
     on: "On",
     off: "Off",
