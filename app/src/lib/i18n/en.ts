@@ -63,7 +63,7 @@ export const en = {
     delete: "Delete",
     cancel: "Cancel",
     deleteTitle: "Delete note",
-    deleteConfirm: "Delete this note? This can't be undone.",
+    deleteConfirm: "Delete this note? This can't be undone. AI activity entries from other meetings that quoted it are kept until they expire or you clear them.",
     you: "You",
     them: "Them",
   },

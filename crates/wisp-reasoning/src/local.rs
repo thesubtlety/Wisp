@@ -55,7 +55,11 @@ impl OpenAiCompatBackend {
         if structured {
             body["response_format"] = json!({
                 "type": "json_schema",
-                "json_schema": {"name": "output", "strict": true, "schema": req.output_schema},
+                "json_schema": {
+                    "name": "output",
+                    "strict": true,
+                    "schema": crate::schema::for_model(&req.output_schema),
+                },
             });
         }
         body

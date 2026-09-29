@@ -801,8 +801,10 @@
 
   async function suggestLiveTitle() {
     if (meetingTitle.trim() && !titleIsSuggestion) return;
-    const t = await fetchTitle(liveTranscriptText, meetingId);
-    if (t && running && (!meetingTitle.trim() || titleIsSuggestion)) {
+    const forMeeting = meetingId;
+    const t = await fetchTitle(liveTranscriptText, forMeeting);
+    // Stop-and-restart during the call must not put this title on the next meeting.
+    if (t && running && meetingId === forMeeting && (!meetingTitle.trim() || titleIsSuggestion)) {
       meetingTitle = t;
       titleIsSuggestion = true;
     }
@@ -924,11 +926,12 @@
       // Persist the finished meeting to the Library. A failed save must not surface as a session
       // error — the transcript is still in memory and can be exported by hand.
       try {
+        const savedMeta = meetingMeta(
+          meetingTitle.trim() || i18n.t.library.newNoteTitle(new Date(meetingStartedAt).toLocaleString()),
+        );
         await invoke("save_note", {
           id: meetingId,
-          meta: meetingMeta(
-            meetingTitle.trim() || i18n.t.library.newNoteTitle(new Date(meetingStartedAt).toLocaleString()),
-          ),
+          meta: savedMeta,
           startedAtMs: meetingStartedAt,
           source: "live",
           projectId: intelEnabled && intel.projectId ? intel.projectId : null,
@@ -937,8 +940,10 @@
         // never waits on the model.
         if (!meetingTitle.trim() || titleIsSuggestion) {
           const savedId = meetingId;
+          const savedTitle = savedMeta.title;
           void fetchTitle(liveTranscriptText, savedId).then((t) => {
-            if (t) invoke("rename_note", { id: savedId, title: t }).catch(() => {});
+            // Only while the saved title is unchanged: a rename in the Library meanwhile wins.
+            if (t) invoke("rename_note", { id: savedId, title: t, ifTitle: savedTitle }).catch(() => {});
           });
         }
         meetingTitle = "";

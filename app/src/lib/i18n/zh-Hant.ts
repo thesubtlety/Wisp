@@ -59,7 +59,7 @@ export const zhHant: Messages = {
     delete: "刪除",
     cancel: "取消",
     deleteTitle: "刪除筆記",
-    deleteConfirm: "確定要刪除這則筆記?此動作無法復原。",
+    deleteConfirm: "確定要刪除這則筆記?此動作無法復原。其他會議中引用過它的 AI 活動紀錄會保留到過期或你清除為止。",
     you: "你",
     them: "對方",
   },

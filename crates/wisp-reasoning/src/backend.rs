@@ -174,7 +174,7 @@ pub fn render_prompt(req: &ReasoningRequest) -> String {
          No prose, no code fences.\n\n{}\n",
         req.instructions.trim(),
         req.context.trim(),
-        serde_json::to_string_pretty(&req.output_schema).unwrap_or_default()
+        serde_json::to_string_pretty(&crate::schema::for_model(&req.output_schema)).unwrap_or_default()
     )
 }
 

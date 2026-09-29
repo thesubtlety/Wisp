@@ -231,6 +231,16 @@ impl Library {
         Ok(n > 0)
     }
 
+    /// Retitles a meeting only if its title is still `expected`, so a late automatic title never
+    /// replaces one the user just typed. Returns whether it changed.
+    pub fn rename_meeting_if(&self, meeting_id: &str, title: &str, expected: &str) -> Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE meeting SET title = ?2 WHERE id = ?1 AND title = ?3",
+            rusqlite::params![meeting_id, title.trim(), expected],
+        )?;
+        Ok(n > 0)
+    }
+
     /// Moves a meeting into `project_id`, or out of any project with `None`. Returns whether the
     /// meeting exists.
     pub fn set_meeting_project(&self, meeting_id: &str, project_id: Option<&str>) -> Result<bool> {
@@ -658,6 +668,11 @@ mod tests {
         lib.create_project("p1", "Acme", T0).unwrap();
         lib.create_project("p2", "Globex", T0).unwrap();
 
+        // An automatic rename only lands while the title is still the one it expects.
+        assert!(!lib
+            .rename_meeting_if("m1", "Auto", "Something else")
+            .unwrap());
+        assert!(lib.rename_meeting_if("m1", "Auto", "Acme scoping").unwrap());
         assert!(lib.rename_meeting("m1", "  Acme hosting call ").unwrap());
         assert!(!lib.rename_meeting("nope", "x").unwrap());
         let (note, _) = lib.get_note("m1").unwrap().unwrap();

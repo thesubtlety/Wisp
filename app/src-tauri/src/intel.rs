@@ -181,6 +181,8 @@ impl Drop for StartGuard<'_> {
     fn drop(&mut self) {
         if self.armed {
             reset(self.state);
+            // The meeting never started, so later calls must not be logged under it.
+            crate::audit::set_live_meeting(self.state, None);
         }
     }
 }
@@ -853,23 +855,28 @@ pub(crate) fn rename_project(
         })
 }
 
-/// Retitles a saved meeting.
+/// Retitles a saved meeting. With `if_title`, only while its title is still that (for automatic
+/// titles, which must not replace one the user typed meanwhile).
 #[tauri::command]
 pub(crate) fn rename_note(
     state: State<'_, AppState>,
     id: String,
     title: String,
+    if_title: Option<String>,
 ) -> Result<bool, String> {
     let title = title.trim();
     if title.is_empty() {
         return Err("a meeting needs a title".to_owned());
     }
-    state
+    let library = state
         .library
         .lock()
-        .map_err(|_| "library lock poisoned".to_owned())?
-        .rename_meeting(&id, title)
-        .map_err(|e| e.to_string())
+        .map_err(|_| "library lock poisoned".to_owned())?;
+    match if_title {
+        Some(expected) => library.rename_meeting_if(&id, title, &expected),
+        None => library.rename_meeting(&id, title),
+    }
+    .map_err(|e| e.to_string())
 }
 
 /// Files a saved meeting under `project_id`, or under no project when it's empty or absent. Project

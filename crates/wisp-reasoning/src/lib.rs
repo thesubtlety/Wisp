@@ -45,6 +45,6 @@ pub use local::{is_loopback, LocalConfig, OpenAiCompatBackend};
 pub use locate::{find_program, search_dirs};
 pub use routed::TaskRouter;
 pub use runner::{run_command, CommandSpec, RunOutput, SUBSCRIPTION_STRIPPED_ENV};
-pub use schema::validate;
+pub use schema::{for_model, validate, OPTIONAL_MARK};
 pub use scripted::ScriptedBackend;
 pub use workspace::Workspace;

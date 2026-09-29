@@ -248,7 +248,7 @@ pub fn audit_schema() -> Value {
                     "required": ["category", "headline", "text", "source_refs", "related_items"],
                     "properties": {
                         "category": {"type": "string", "enum": categories},
-                        "headline": {"type": "string"},
+                        "headline": {"type": "string", "x-optional": true},
                         "text": {"type": "string"},
                         "source_refs": {"type": "array", "items": {"type": "string"}},
                         "related_items": {"type": "array", "items": {"type": "string"}}
@@ -540,6 +540,26 @@ mod tests {
         assert!(
             md.find("**Missing**").unwrap() < md.find("**Commitment without date**").unwrap(),
             "categories in a fixed order"
+        );
+    }
+
+    #[test]
+    fn a_reply_without_headlines_still_passes() {
+        // Small local models sometimes leave the field out; the pass must not fail over it.
+        let t = vec![
+            line(0, "Hello"),
+            line(1, "I'll send the revised architecture."),
+        ];
+        let s = state();
+        let backend = ScriptedBackend::named("scripted");
+        backend.push_ok(json!({"gaps": [
+            {"category": "commitment_without_date", "text": "You will send the revised architecture.",
+             "source_refs": ["T1"], "related_items": ["COM-1"]}
+        ]}));
+        let report = audit(&backend, &CancelToken::new(), &input(&t, &s)).unwrap();
+        assert_eq!(
+            report.gaps[0].headline,
+            "You will send the revised architecture."
         );
     }
 

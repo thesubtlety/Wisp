@@ -59,7 +59,7 @@ export const zhHans: Messages = {
     delete: "删除",
     cancel: "取消",
     deleteTitle: "删除笔记",
-    deleteConfirm: "确定要删除这则笔记?此操作无法撤销。",
+    deleteConfirm: "确定要删除这则笔记?此操作无法撤销。其他会议中引用过它的 AI 活动记录会保留到过期或你清除为止。",
     you: "你",
     them: "对方",
   },

@@ -52,7 +52,7 @@ impl Workspace {
         fs::write(ws.path().join("context.md"), &req.context)?;
         fs::write(
             ws.schema_path(),
-            serde_json::to_vec_pretty(&req.output_schema)?,
+            serde_json::to_vec_pretty(&crate::schema::for_model(&req.output_schema))?,
         )?;
         fs::write(ws.path().join("prompt.md"), render_prompt(req))?;
         Ok(ws)

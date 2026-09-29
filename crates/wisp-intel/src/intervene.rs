@@ -204,7 +204,7 @@ pub fn candidates_schema() -> Value {
             ],
             "properties": {
                 "kind": {"type": "string", "enum": kinds},
-                "headline": {"type": "string"},
+                "headline": {"type": "string", "x-optional": true},
                 "title": {"type": "string"},
                 "detail": {"type": "string"},
                 "suggested_question": {"type": ["string", "null"]},

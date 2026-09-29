@@ -130,7 +130,7 @@ pub fn ask_schema() -> Value {
         "additionalProperties": false,
         "required": ["short", "answer", "evidence", "grounded"],
         "properties": {
-            "short": {"type": "string"},
+            "short": {"type": "string", "x-optional": true},
             "answer": {"type": "string"},
             "evidence": {"type": "array", "items": {"type": "string"}},
             "grounded": {"type": "boolean"}

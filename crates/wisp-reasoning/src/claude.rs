@@ -96,7 +96,9 @@ impl ClaudeCodeBackend {
             spec = spec.args(["--setting-sources", ""]);
         }
         if c.use_json_schema {
-            spec = spec.arg("--json-schema").arg(req.output_schema.to_string());
+            spec = spec
+                .arg("--json-schema")
+                .arg(crate::schema::for_model(&req.output_schema).to_string());
         }
         if let Some(m) = &c.model {
             spec = spec.arg("--model").arg(m);
