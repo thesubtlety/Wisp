@@ -25,6 +25,9 @@
     loadProjects,
     selectProject,
     createProject,
+    dismissSpeakerSuggestion,
+    clearSpeakerSuggestion,
+    type SpeakerSuggestion,
   } from "$lib/intel.svelte";
   import Settings from "$lib/Settings.svelte";
   import Library from "$lib/Library.svelte";
@@ -1339,23 +1342,34 @@
     const edit = editingSpeaker;
     if (!edit) return;
     editingSpeaker = null;
-    const name = speakerDraft.trim();
-    if ((liveSpeakerNames[edit.speaker] ?? "") === name) return;
+    await nameLiveSpeaker(edit.speaker, speakerDraft.trim());
+  }
+
+  async function nameLiveSpeaker(speaker: number, name: string) {
+    if ((liveSpeakerNames[speaker] ?? "") === name) return;
     try {
-      await invoke("set_live_speaker_name", { speaker: edit.speaker, name });
+      await invoke("set_live_speaker_name", { speaker, name });
       const next = { ...liveSpeakerNames };
-      if (name) next[edit.speaker] = name;
-      else delete next[edit.speaker];
+      if (name) next[speaker] = name;
+      else delete next[speaker];
       liveSpeakerNames = next;
+      clearSpeakerSuggestion(speaker);
       // After Stop the meeting may already be in the Library; name it there too (a no-op error if it
       // was never saved).
       if (!running && meetingId) {
-        await invoke("set_library_speaker_name", { id: meetingId, speaker: edit.speaker, name }).catch(() => {});
+        await invoke("set_library_speaker_name", { id: meetingId, speaker, name }).catch(() => {});
       }
     } catch (e) {
       error = String(e);
     }
   }
+
+  // Names the transcript suggests for speakers still unnamed ("Speaker 2 → Laurie?").
+  const liveSpeakerSuggestions = $derived(
+    intel.speakerSuggestions.filter((s) => !liveSpeakerNames[s.speakerId]),
+  );
+
+  const acceptSpeakerSuggestion = (s: SpeakerSuggestion) => nameLiveSpeaker(s.speakerId, s.name);
 
   // The File transcript assembled as plain text for the AI Notes panel.
   const fileTranscriptText = $derived(
@@ -2427,6 +2441,28 @@
               {/if}
             </span>
           </div>
+          {#if liveSpeakerSuggestions.length}
+            <div class="spk-suggest" aria-live="polite">
+              {#each liveSpeakerSuggestions as s (s.speaker)}
+                <span
+                  class="spk-suggest-chip"
+                  style="--spk: {speakerColor(s.speakerId)}"
+                  title={s.quote ? i18n.t.live.speakerSuggestTip(s.quote) : undefined}
+                >
+                  <span class="spk-suggest-text">{i18n.t.live.speakerSuggest(speakerLabel(s.speakerId), s.name)}</span>
+                  <button class="spk-suggest-accept" onclick={() => acceptSpeakerSuggestion(s)}
+                    >{i18n.t.live.speakerSuggestAccept}</button
+                  >
+                  <button
+                    class="spk-suggest-dismiss"
+                    aria-label={i18n.t.live.speakerSuggestDismiss}
+                    title={i18n.t.live.speakerSuggestDismiss}
+                    onclick={() => dismissSpeakerSuggestion(s)}>×</button
+                  >
+                </span>
+              {/each}
+            </div>
+          {/if}
           <ul class="feed" bind:this={transcriptEl} onscroll={onTranscriptScroll}>
         {#each liveSegments as seg (seg.source + "-" + seg.id)}
           <li class:partial={!seg.isFinal} class:system={seg.source === "System"}>
@@ -5218,6 +5254,51 @@
 
   button.speaker:hover {
     text-decoration: underline;
+  }
+
+  /* "Speaker 2 → Laurie?" suggestions above the live feed. */
+  .spk-suggest {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 6px 12px 2px;
+  }
+
+  .spk-suggest-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 4px 2px 10px;
+    border: 1px solid var(--spk);
+    border-radius: 999px;
+    font-size: 12.5px;
+  }
+
+  .spk-suggest-text {
+    color: var(--spk);
+    font-weight: 600;
+  }
+
+  .spk-suggest-chip button {
+    padding: 1px 8px;
+    border: 0;
+    border-radius: 999px;
+    font: inherit;
+    cursor: pointer;
+  }
+
+  .spk-suggest-accept {
+    background: var(--spk);
+    color: #fff;
+  }
+
+  .spk-suggest-dismiss {
+    background: none;
+    color: var(--muted);
+  }
+
+  .spk-suggest-dismiss:hover {
+    color: inherit;
   }
 
   .speaker-input {

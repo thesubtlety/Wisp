@@ -28,6 +28,7 @@ use crate::evidence::TranscriptLine;
 use crate::intervene::{Card, InterventionFilter, InterventionPolicy, LogEntry};
 use crate::model::{MeetingState, StateItem};
 use crate::ops::{AppliedOp, ResolvedOp};
+use crate::speakers::{SpeakerSuggestion, SpeakerSuggestions};
 
 /// The meeting id the runtime uses until the meeting is saved under its real id.
 pub const LIVE_MEETING_ID: &str = "live";
@@ -119,6 +120,9 @@ pub enum IntelUpdate {
     },
     /// A pass failed; the state is unchanged and the lines will be tried again.
     Failed(String),
+    /// The live speaker-name suggestions changed (sent after the pass that changed them): the
+    /// whole list, at most one per speaker, without dismissed or since-named ones.
+    SpeakerNames(Vec<SpeakerSuggestion>),
 }
 
 /// Settings for one meeting's runtime.
@@ -176,6 +180,14 @@ enum Msg {
     },
     AnalyzeNow,
     Dismiss(String),
+    DismissSpeakerName {
+        speaker: String,
+        name: String,
+    },
+    RenameSpeaker {
+        from: String,
+        to: String,
+    },
     WrapUp,
     SetScheduledEnd(Option<i64>),
     Pin(Snippet),
@@ -248,6 +260,7 @@ impl IntelRuntime {
                     pinned: Vec::new(),
                     endgame: None,
                     wrap_suggested: false,
+                    speaker_names: SpeakerSuggestions::default(),
                 }
                 .run(rx)
             })
@@ -304,6 +317,24 @@ impl IntelRuntime {
     /// Records that the user dismissed a card, so the filter holds back repeats.
     pub fn dismiss(&self, card_id: impl Into<String>) {
         let _ = self.tx.send(Msg::Dismiss(card_id.into()));
+    }
+
+    /// Records that the user dismissed suggesting `name` for `speaker`, so it is not offered again
+    /// this meeting.
+    pub fn dismiss_speaker_name(&self, speaker: impl Into<String>, name: impl Into<String>) {
+        let _ = self.tx.send(Msg::DismissSpeakerName {
+            speaker: speaker.into(),
+            name: name.into(),
+        });
+    }
+
+    /// The user renamed a speaker: lines already held under label `from` read as `to` in later
+    /// passes, and any suggestion for `from` is dropped. "You" and "Them" are never relabelled.
+    pub fn rename_speaker(&self, from: impl Into<String>, to: impl Into<String>) {
+        let _ = self.tx.send(Msg::RenameSpeaker {
+            from: from.into(),
+            to: to.into(),
+        });
     }
 
     /// A copy of the state as of the last completed pass.
@@ -390,6 +421,8 @@ struct Worker {
     endgame: Option<EndgameTrigger>,
     /// Whether the advisory wrap-up suggestion has been sent.
     wrap_suggested: bool,
+    /// Speaker-name suggestions for this meeting.
+    speaker_names: SpeakerSuggestions,
 }
 
 impl Worker {
@@ -424,6 +457,10 @@ impl Worker {
                     Msg::Dismiss(id) => {
                         self.filter.dismiss(&id, (self.now_ms)());
                     }
+                    Msg::DismissSpeakerName { speaker, name } => {
+                        self.speaker_names.dismiss(&speaker, &name);
+                    }
+                    Msg::RenameSpeaker { from, to } => self.rename_speaker(&from, &to),
                     Msg::WrapUp => wrap_up = true,
                     Msg::SetScheduledEnd(end) => self.config.scheduled_end_ms = end,
                     Msg::Pin(snippet) => {
@@ -506,6 +543,17 @@ impl Worker {
         }
     }
 
+    fn rename_speaker(&mut self, from: &str, to: &str) {
+        let (from, to) = (from.trim(), to.trim());
+        if from == to || to.is_empty() || ["You", "Them"].contains(&from) {
+            return;
+        }
+        for line in self.lines.iter_mut().filter(|l| l.speaker == from) {
+            line.speaker = to.to_owned();
+        }
+        self.speaker_names.named(from);
+    }
+
     /// The gap audit, run on the worker right away.
     fn run_audit(&mut self) {
         let query = {
@@ -586,6 +634,7 @@ impl Worker {
             timeout: self.config.timeout,
         };
         let now = (self.now_ms)();
+        let mut names_changed = false;
         let update = match analyze_now(
             self.backend.as_ref(),
             &self.cancel,
@@ -608,6 +657,7 @@ impl Worker {
                     self.filter.reject(title, reason, now);
                 }
                 self.pending_since = (out.remaining_lines > 0).then(Instant::now);
+                names_changed = self.speaker_names.offer(out.speaker_names);
                 IntelUpdate::Pass {
                     applied: out.report.applied.len(),
                     rejected: out.report.rejected.len(),
@@ -625,6 +675,9 @@ impl Worker {
         };
         if !self.cancel.is_cancelled() {
             (self.on_update)(update);
+            if names_changed {
+                (self.on_update)(IntelUpdate::SpeakerNames(self.speaker_names.current()));
+            }
         }
     }
 }
@@ -801,6 +854,7 @@ mod tests {
             pinned: Vec::new(),
             endgame: None,
             wrap_suggested: false,
+            speaker_names: SpeakerSuggestions::default(),
         };
         assert_eq!(w.backoff(), Duration::ZERO);
         w.failures = 1;
@@ -1249,6 +1303,70 @@ mod tests {
             seen.lock().unwrap()[0],
             IntelUpdate::WrapSuggested(EndgameTrigger::Scheduled)
         );
+        rt.stop();
+    }
+
+    #[test]
+    fn a_pass_with_speaker_names_sends_the_suggestions() {
+        let backend = Arc::new(ScriptedBackend::with_responder("scripted", |req| {
+            // Keep proposing the same name while the label is still unnamed.
+            let names = if req.context.contains("Speaker 2:") {
+                json!([{"speaker": "Speaker 2", "name": "Laurie",
+                        "evidence": ["T0", "T1"], "confidence": 0.8}])
+            } else {
+                json!([])
+            };
+            Ok(json!({"ops": [], "candidates": [], "speaker_names": names}))
+        }));
+        let (seen, on_update) = collect();
+        let rt = IntelRuntime::spawn(
+            backend.clone(),
+            Box::new(NoRetrieval),
+            RuntimeConfig {
+                policy: fast_policy(),
+                ..RuntimeConfig::default()
+            },
+            on_update,
+            Box::new(|| 0),
+        );
+        rt.push_final("Speaker 1", 0, "Good afternoon Laurie, thanks for joining.");
+        rt.push_final("Speaker 2", 1000, "Happy to be here, good afternoon.");
+        wait_for(&seen, 2);
+        {
+            let seen = seen.lock().unwrap();
+            assert!(matches!(seen[0], IntelUpdate::Pass { .. }));
+            let IntelUpdate::SpeakerNames(names) = &seen[1] else {
+                panic!("expected speaker names, got {:?}", seen[1]);
+            };
+            assert_eq!(names.len(), 1);
+            assert_eq!(
+                (names[0].speaker.as_str(), names[0].speaker_id),
+                ("Speaker 2", 1)
+            );
+            assert_eq!(names[0].name, "Laurie");
+        }
+
+        // Dismissed: the same proposal on the next pass sends nothing new.
+        rt.dismiss_speaker_name("Speaker 2", "Laurie");
+        rt.push_final("Speaker 1", 2000, "Let's go through the agenda now.");
+        wait_for(&seen, 3);
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(seen.lock().unwrap().len(), 3);
+
+        // Renamed: later passes see the name, not the label.
+        rt.rename_speaker("Speaker 2", "Laurie");
+        rt.push_final("Speaker 1", 3000, "First item is the budget review.");
+        wait_for(&seen, 4);
+        let last = backend
+            .requests
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .context
+            .clone();
+        assert!(last.contains("Laurie: Happy to be here"), "{last}");
+        assert!(!last.contains("Speaker 2:"), "{last}");
         rt.stop();
     }
 

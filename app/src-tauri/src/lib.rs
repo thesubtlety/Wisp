@@ -3877,23 +3877,28 @@ fn save_note(
 }
 
 /// Names (or with a blank `name`, un-names) a diarized speaker of the live session. Applies to the
-/// reasoning context and exports from now on, and is saved with the meeting.
+/// reasoning context (lines already analyzed included) and exports, and is saved with the meeting.
 #[tauri::command]
 fn set_live_speaker_name(
     state: State<'_, AppState>,
     speaker: u32,
     name: String,
 ) -> Result<(), String> {
-    let mut names = state
-        .live_speaker_names
-        .lock()
-        .map_err(|_| "state lock poisoned".to_owned())?;
-    let name = name.trim();
-    if name.is_empty() {
-        names.remove(&speaker);
-    } else {
-        names.insert(speaker, name.to_owned());
-    }
+    let (before, after) = {
+        let mut names = state
+            .live_speaker_names
+            .lock()
+            .map_err(|_| "state lock poisoned".to_owned())?;
+        let before = names.clone();
+        let name = name.trim();
+        if name.is_empty() {
+            names.remove(&speaker);
+        } else {
+            names.insert(speaker, name.to_owned());
+        }
+        (before, names.clone())
+    };
+    intel::speaker_renamed(&state, speaker, &before, &after);
     Ok(())
 }
 
@@ -4595,6 +4600,7 @@ pub fn run() {
             intel::intel_ask,
             intel::intel_ask_cancel,
             intel::intel_dismiss_card,
+            intel::intel_dismiss_speaker_name,
             intel::intel_wrap_up,
             intel::intel_set_scheduled_end,
             intel::intel_review_start,

@@ -485,6 +485,7 @@ mod tests {
             &OpBatch {
                 ops,
                 candidates: vec![],
+                speaker_names: vec![],
             },
             &packet(),
             NOW,

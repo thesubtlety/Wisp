@@ -23,6 +23,17 @@ pub fn speaker_display(id: SpeakerId, names: &SpeakerNames) -> String {
         .unwrap_or_else(|| format!("Speaker {}", id.0 + 1))
 }
 
+/// The id behind an unnamed speaker's label (`Speaker 3` is id 2): the inverse of
+/// [`speaker_display`] for a speaker with no name. `None` for anything else ("You", "Them", a name).
+pub fn unnamed_speaker_id(label: &str) -> Option<SpeakerId> {
+    let digits = label.strip_prefix("Speaker ")?;
+    let n: u32 = digits.parse().ok()?;
+    if n.to_string() != digits {
+        return None; // "Speaker 02", "Speaker +2"
+    }
+    n.checked_sub(1).map(SpeakerId)
+}
+
 /// Who spoke a line, as the reasoning context and the Library see it.
 ///
 /// The microphone is "You", unless diarization split the mic stream (a room with several people on
@@ -52,6 +63,25 @@ mod tests {
             speaker_display(SpeakerId(0), &SpeakerNames::new()),
             "Speaker 1"
         );
+    }
+
+    #[test]
+    fn unnamed_labels_parse_back_to_their_id() {
+        for id in [0, 1, 41] {
+            let label = speaker_display(SpeakerId(id), &SpeakerNames::new());
+            assert_eq!(unnamed_speaker_id(&label), Some(SpeakerId(id)));
+        }
+        for other in [
+            "You",
+            "Them",
+            "Laurie",
+            "Speaker 0",
+            "Speaker x",
+            "Speaker",
+            "Speaker 02",
+        ] {
+            assert_eq!(unnamed_speaker_id(other), None, "{other}");
+        }
     }
 
     #[test]
