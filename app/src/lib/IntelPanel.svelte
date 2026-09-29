@@ -133,7 +133,7 @@
 
   {#if intel.tab === "insights"}
     <div class="feed">
-      <label class="ends">
+      <label class="ends" title={i18n.t.intel.endsAtHint}>
         {i18n.t.intel.endsAt}
         <input
           type="time"

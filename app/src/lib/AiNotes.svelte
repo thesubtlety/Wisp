@@ -384,6 +384,7 @@ open questions, and drops small talk. Keep it tight and factual — only what wa
 in the meeting's language. Output only the summary.";
 
   const collapsed = $derived(live && liveOn);
+  const isSubscription = $derived(providerId === SUBSCRIPTION_PROVIDER);
   // A realtime model listens to live audio, so it only works inside a running Live session (never in
   // File mode, whose transcript is static). Otherwise Start is disabled and a hint explains — a chat
   // model still runs over the transcript anywhere.
@@ -536,8 +537,10 @@ in the meeting's language. Output only the summary.";
       await startRealtime();
       return;
     }
-    if (!sessionRunning) {
-      await call(transcript); // static transcript → a single pass (the feed shows Working…)
+    // A static transcript, or the subscription (each pass is a slow CLI call on the user's plan), runs
+    // a single pass; pressing the button again refreshes it.
+    if (!sessionRunning || isSubscription) {
+      await call(transcript); // the feed shows Working…
       return;
     }
     const myToken = ++startToken;
@@ -768,6 +771,7 @@ in the meeting's language. Output only the summary.";
 
     {#if collapsed}
       <div class="ctl-right">
+        {#if selectedKind !== "realtime"}<span class="rolling-note">{i18n.t.assist.rollingEvery(INTERVAL / 1000)}</span>{/if}
         <button class="hint" onclick={runNow} disabled={running} title={i18n.t.assist.hintNow}>✨ {i18n.t.assist.hint}</button>
         <button class="stop" onclick={stopAssist}>◼ {i18n.t.assist.stop}</button>
         <button class="clear" onclick={clearFeed} disabled={!feed.length}>{i18n.t.common.clear}</button>
@@ -834,7 +838,7 @@ in the meeting's language. Output only the summary.";
         disabled={connecting || running || (!provider || assistNeedsKey(provider)) || !model || !prompt.trim() || realtimeNeedsSession}
         onclick={start}
       >
-        {#if connecting || running}<span class="btn-spin"></span>{connecting ? i18n.t.assist.connecting : i18n.t.assist.working}{:else}{selectedKind === "realtime" ? `⚡ ${i18n.t.assist.start}` : `▸ ${i18n.t.assist.start}`}{/if}
+        {#if connecting || running}<span class="btn-spin"></span>{connecting ? i18n.t.assist.connecting : i18n.t.assist.working}{:else if isSubscription && feed.length}↻ {i18n.t.assist.refresh}{:else}{selectedKind === "realtime" ? `⚡ ${i18n.t.assist.start}` : `▸ ${i18n.t.assist.start}`}{/if}
       </button>
       {#if connecting || running}
         <button class="stop" onclick={cancelStart} title={i18n.t.assist.stop}>◼ {i18n.t.assist.stop}</button>
@@ -877,6 +881,11 @@ in the meeting's language. Output only the summary.";
 {/if}
 
 <style>
+  .rolling-note {
+    font-size: 11px;
+    opacity: 0.65;
+    white-space: nowrap;
+  }
   .empty {
     display: flex;
     gap: 12px;

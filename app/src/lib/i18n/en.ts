@@ -27,6 +27,7 @@ export const en = {
 
   library: {
     meetingTitle: "Meeting title (optional)",
+    titleSuggested: "Suggested by your local model. Type to replace it.",
     renameMeeting: "Rename",
     project: "Project",
     noProject: "No project",
@@ -399,6 +400,8 @@ export const en = {
   // AI assist / notes panel (AiNotes.svelte). "✦ Models" / "AI" / "API" / provider names stay
   // English; the template PROMPTS (LLM instructions) are not here — only their menu labels are.
   assist: {
+    refresh: "Refresh",
+    rollingEvery: (s: number): string => `Refreshes every ${s}s until Stop`,
     subscriptionName: "Subscription (Codex / Claude Code)",
     subscriptionModel: "As set in Settings › Storage › Reasoning",
     emptyText: "Add an AI model for notes and live hints — your gateway, a local Ollama, or OpenAI.",
@@ -490,6 +493,7 @@ export const en = {
     removeShot: "Remove screenshot",
     contextFailed: (msg: string) => `Couldn't attach: ${msg}`,
     endsAt: "Ends at",
+    endsAtHint: "When the meeting is scheduled to end. Wrap-up is suggested 5 minutes before. Optional.",
     wrapSuggested: {
       scheduled: "The meeting is scheduled to end soon. Review remaining gaps?",
       semantic: "Looks like the meeting may be wrapping up. Review remaining gaps?",

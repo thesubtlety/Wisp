@@ -24,6 +24,7 @@ export const zhHant: Messages = {
 
   library: {
     meetingTitle: "會議標題（選填）",
+    titleSuggested: "由本機模型建議。輸入即可取代。",
     renameMeeting: "重新命名",
     project: "專案",
     noProject: "無專案",
@@ -360,6 +361,8 @@ export const zhHant: Messages = {
   },
 
   assist: {
+    refresh: "重新整理",
+    rollingEvery: (s: number): string => `每 ${s} 秒重新整理，直到停止`,
     subscriptionName: "訂閱（Codex / Claude Code）",
     subscriptionModel: "依「設定 › 儲存空間 › 推理」中的選擇",
     emptyText: "新增一個 AI 模型用於筆記和即時提示 —— 你的閘道、本地 Ollama，或 OpenAI。",
@@ -444,6 +447,7 @@ export const zhHant: Messages = {
     removeShot: "刪除截圖",
     contextFailed: (msg: string) => `無法附加：${msg}`,
     endsAt: "結束於",
+    endsAtHint: "會議預定結束的時間。會在結束前 5 分鐘提示收尾。可不填。",
     wrapSuggested: {
       scheduled: "會議即將到預定結束時間。檢查剩餘的缺口？",
       semantic: "會議似乎正在收尾。檢查剩餘的缺口？",

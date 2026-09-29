@@ -783,6 +783,30 @@
   let liveIntelOpen = $state(false);
   // An optional title for the live meeting; empty saves it under the date.
   let meetingTitle = $state("");
+  // The local model suggests a title ~3 minutes in and again after save, but only while the user
+  // hasn't typed one. `titleIsSuggestion` marks the field as holding the model's words.
+  let titleIsSuggestion = $state(false);
+  let titleTimer: ReturnType<typeof setTimeout> | undefined;
+  const TITLE_FIRST_MS = 180_000;
+  const TITLE_MIN_CHARS = 200;
+
+  async function fetchTitle(text: string): Promise<string | null> {
+    if (text.trim().length < TITLE_MIN_CHARS) return null;
+    try {
+      return await invoke<string>("suggest_title", { transcript: text });
+    } catch {
+      return null; // no local model set, or it failed: the date title stands
+    }
+  }
+
+  async function suggestLiveTitle() {
+    if (meetingTitle.trim() && !titleIsSuggestion) return;
+    const t = await fetchTitle(liveTranscriptText);
+    if (t && running && (!meetingTitle.trim() || titleIsSuggestion)) {
+      meetingTitle = t;
+      titleIsSuggestion = true;
+    }
+  }
   // Project picker: "new" shows an inline name field.
   let newProjectOpen = $state(false);
   let newProjectName = $state("");
@@ -858,6 +882,8 @@
       // A new live session is a new library entry; stamp its id + start now (a re-save replaces it).
       meetingId = crypto.randomUUID();
       meetingStartedAt = Date.now();
+      clearTimeout(titleTimer);
+      titleTimer = setTimeout(suggestLiveTitle, TITLE_FIRST_MS);
       intel.startedAt = meetingStartedAt;
       // Both streams start unmuted; the live You/Them chips flip these mid-session.
       liveMicMuted = false;
@@ -889,6 +915,7 @@
     }
     running = false;
     liveNotice = "";
+    clearTimeout(titleTimer);
 
     if (autoSave && segments.length > 0 && meetingId) {
       // Persist the finished meeting to the Library. A failed save must not surface as a session
@@ -903,7 +930,16 @@
           source: "live",
           projectId: intelEnabled && intel.projectId ? intel.projectId : null,
         });
+        // Re-title from the whole meeting after saving, unless the user named it; the save itself
+        // never waits on the model.
+        if (!meetingTitle.trim() || titleIsSuggestion) {
+          const savedId = meetingId;
+          void fetchTitle(liveTranscriptText).then((t) => {
+            if (t) invoke("rename_note", { id: savedId, title: t }).catch(() => {});
+          });
+        }
         meetingTitle = "";
+        titleIsSuggestion = false;
         // With intelligence on, the meeting ends in a short review of its follow-ups.
         if (intelEnabled) {
           intel.savedMeetingId = meetingId;
@@ -2043,6 +2079,9 @@
               aria-label={i18n.t.library.meetingTitle}
               placeholder={i18n.t.library.meetingTitle}
               bind:value={meetingTitle}
+              class:suggested={titleIsSuggestion}
+              title={titleIsSuggestion ? i18n.t.library.titleSuggested : undefined}
+              oninput={() => (titleIsSuggestion = false)}
             />
             {#if intelEnabled}
               <span class="project-pick">
@@ -4233,6 +4272,10 @@
     background: transparent;
     color: inherit;
   }
+  .meeting-title.suggested {
+    font-style: italic;
+    color: var(--muted);
+  }
   .meeting-title:hover,
   .meeting-title:focus {
     border-color: var(--border, currentColor);
@@ -4567,14 +4610,15 @@
     scroll-behavior: smooth;
   }
 
+  /* Compact lines: more of the conversation fits on screen while listening. */
   .feed li {
     display: flex;
     align-items: baseline;
-    gap: 16px;
-    padding: 12px 12px;
+    gap: 12px;
+    padding: 5px 10px;
     border-bottom: 1px solid var(--border);
-    font-size: 16px;
-    line-height: 1.55;
+    font-size: 14px;
+    line-height: 1.45;
   }
 
   .feed li:last-child {
@@ -4590,15 +4634,15 @@
     flex: none;
     display: flex;
     flex-direction: column;
-    gap: 2px;
-    width: 52px;
+    gap: 1px;
+    width: 44px;
     padding-top: 1px;
   }
 
   .time {
     font-family: var(--font-mono);
     color: var(--muted);
-    font-size: 12px;
+    font-size: 11px;
     font-variant-numeric: tabular-nums;
   }
 

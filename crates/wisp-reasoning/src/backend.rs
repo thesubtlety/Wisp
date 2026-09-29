@@ -18,6 +18,8 @@ pub enum TaskKind {
     ScreenshotContext,
     /// A free-text assist task over a transcript (summary, action items, a custom prompt).
     Assist,
+    /// A short title for a meeting.
+    Title,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

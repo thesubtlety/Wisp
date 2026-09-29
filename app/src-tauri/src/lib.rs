@@ -4474,6 +4474,7 @@ pub fn run() {
             intel::list_project_memory,
             intel::delete_project_memory,
             intel::rename_project,
+            reasoning::suggest_title,
             intel::rename_note,
             intel::set_note_project,
             intel::intel_learning_propose,

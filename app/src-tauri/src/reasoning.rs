@@ -356,3 +356,113 @@ mod tests {
         assert!(err.to_string().contains("Settings › Storage"));
     }
 }
+
+/// Characters of transcript sent for a title: the opening (where the topic is usually set) and the
+/// latest stretch. Small enough for a local model with an 8k window.
+const TITLE_HEAD_CHARS: usize = 6_000;
+const TITLE_TAIL_CHARS: usize = 3_000;
+const TITLE_MAX_WORDS: usize = 8;
+const TITLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Suggests a short title for a meeting from its transcript, using the local model only (Settings ›
+/// Storage › Reasoning › local model). Errors when no local model is set.
+#[tauri::command]
+pub(crate) async fn suggest_title(app: AppHandle, transcript: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let settings = state.reasoning.get();
+        let local = local_config(&state, &settings).ok_or("no local model is set")?;
+        let backend = OpenAiCompatBackend::new(local);
+        let request = ReasoningRequest {
+            task: TaskKind::Title,
+            instructions:
+                "Write a short, specific title for this meeting: 3 to 7 words naming the \
+                           main topic, and the other party if it is clear. No quotes, no date, no \
+                           trailing punctuation."
+                    .into(),
+            context: title_context(&transcript),
+            output_schema: serde_json::json!({
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["title"],
+                "properties": {"title": {"type": "string"}}
+            }),
+            timeout: TITLE_TIMEOUT,
+            images: Vec::new(),
+        };
+        let resp = backend
+            .invoke(&request, &CancelToken::new())
+            .map_err(|e| e.to_string())?;
+        resp.output
+            .get("title")
+            .and_then(|t| t.as_str())
+            .and_then(clean_title)
+            .ok_or_else(|| "the model returned no title".to_owned())
+    })
+    .await
+    .map_err(|e| format!("title task failed: {e}"))?
+}
+
+/// The opening and the latest stretch of `transcript`, cut at line boundaries.
+fn title_context(transcript: &str) -> String {
+    let chars = transcript.chars().count();
+    if chars <= TITLE_HEAD_CHARS + TITLE_TAIL_CHARS {
+        return transcript.to_owned();
+    }
+    let head: String = transcript.chars().take(TITLE_HEAD_CHARS).collect();
+    let head = head.rsplit_once('\n').map_or(head.as_str(), |(h, _)| h);
+    let tail: String = transcript.chars().skip(chars - TITLE_TAIL_CHARS).collect();
+    let tail = tail.split_once('\n').map_or(tail.as_str(), |(_, t)| t);
+    format!("{head}\n[…]\n{tail}")
+}
+
+/// Trims quotes and trailing punctuation and caps the length. `None` when nothing is left.
+fn clean_title(raw: &str) -> Option<String> {
+    let t = raw
+        .trim()
+        .trim_matches(['"', '\'', '“', '”', '‘', '’', '`', '*'])
+        .trim_end_matches(['.', '!', ',', ';', ':'])
+        .trim();
+    let words: Vec<&str> = t.split_whitespace().take(TITLE_MAX_WORDS).collect();
+    (!words.is_empty()).then(|| words.join(" "))
+}
+
+#[cfg(test)]
+mod title_tests {
+    use super::*;
+
+    #[test]
+    fn a_title_is_trimmed_and_capped() {
+        assert_eq!(
+            clean_title("  \"Acme Azure hosting call.\" ").unwrap(),
+            "Acme Azure hosting call"
+        );
+        assert_eq!(
+            clean_title("**Q4 budget review**").unwrap(),
+            "Q4 budget review"
+        );
+        assert_eq!(
+            clean_title("one two three four five six seven eight nine ten").unwrap(),
+            "one two three four five six seven eight"
+        );
+        assert_eq!(clean_title("  \"\" "), None);
+    }
+
+    #[test]
+    fn a_long_transcript_keeps_its_opening_and_latest_lines() {
+        let short = "You: hi\nThem: hello";
+        assert_eq!(title_context(short), short);
+
+        let line = |i: usize| format!("Them: line {i} {}", "x".repeat(40));
+        let long: Vec<String> = (0..1_000).map(line).collect();
+        let ctx = title_context(&long.join("\n"));
+        assert!(ctx.starts_with("Them: line 0 "));
+        assert!(ctx.ends_with(&line(999)));
+        assert!(ctx.contains("\n[…]\n"));
+        assert!(ctx.chars().count() <= TITLE_HEAD_CHARS + TITLE_TAIL_CHARS + 5);
+        // Cut at line boundaries: every line is whole.
+        assert!(ctx
+            .lines()
+            .all(|l| l == "[…]" || l.len() == line(0).len() || l.starts_with("Them: line ")));
+    }
+}
