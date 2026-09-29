@@ -27,6 +27,7 @@ export const en = {
 
   library: {
     meetingTitle: "Meeting title (optional)",
+    titleNoSuggestion: (why: string): string => `Meeting title (no suggestion: ${why})`,
     titleSuggested: "Suggested by your local model. Type to replace it.",
     renameMeeting: "Rename",
     project: "Project",

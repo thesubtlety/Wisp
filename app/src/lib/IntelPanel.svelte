@@ -64,13 +64,8 @@
   }
   let activityOpen = $state(false);
   let copiedAt = $state(-1);
-  // Ask answers opened past their short form, by turn.
-  let expanded = $state(new Set<number>());
   /** A short answer worth showing first: present, and not already the whole answer. */
   const isBrief = (a: AskAnswer) => !!a.short && a.short !== a.answer;
-  $effect(() => {
-    if (!intel.turns.length) expanded = new Set();
-  });
   let notRunning = $state(false);
   let feedEl = $state<HTMLDivElement>();
 
@@ -176,7 +171,7 @@
           {#each gapGroups as g (g.category)}
             <p class="gcat">{i18n.t.intel.gaps[g.category]}</p>
             {#each g.gaps as gap, j (j)}
-              <details class="gap">
+              <details class="gap" open>
                 <summary class="headline" title={gap.text}>{gap.headline || gap.text}</summary>
                 <p class="gdetail">
                   {gap.text}{#each gap.cited as id (id)}<span class="cid gref">{id}</span>{/each}
@@ -196,7 +191,7 @@
       {/if}
       {#each [...intel.cards].reverse() as card (card.id)}
         <div class="card">
-          <details class="cmore">
+          <details class="cmore" open>
             <summary class="ctitle headline" title={card.candidate.title}
               >{card.candidate.headline || card.candidate.title}</summary
             >
@@ -356,12 +351,7 @@
             <div class="a">
               {#if brief}<p class="answer short">{turn.answer.short}</p>{/if}
               {#if !turn.answer.grounded}<p class="warn">{i18n.t.intel.notGrounded}</p>{/if}
-              {#if brief && !expanded.has(i)}
-                <button class="linkish more" onclick={() => (expanded = new Set(expanded).add(i))}
-                  >{i18n.t.intel.more}</button
-                >
-              {:else}
-                <p class="answer" class:detail={brief}>{turn.answer.answer}</p>
+              <p class="answer" class:detail={brief}>{turn.answer.answer}</p>
                 {#if turn.answer.unknownCitations.length}
                   <p class="warn">{i18n.t.intel.droppedCitations(turn.answer.unknownCitations.length)}</p>
                 {/if}
@@ -379,7 +369,6 @@
                     </ul>
                   </details>
                 {/if}
-              {/if}
               <button class="copy" onclick={() => copy(i, turn.answer!.markdown)}>
                 {copiedAt === i ? i18n.t.intel.copied : i18n.t.intel.copy}
               </button>

@@ -789,12 +789,18 @@
   const TITLE_FIRST_MS = 180_000;
   const TITLE_MIN_CHARS = 200;
 
+  // Why the last suggestion failed (e.g. no local model set), shown in the empty title field.
+  let titleNote = $state("");
+
   async function fetchTitle(text: string, id: string): Promise<string | null> {
     if (text.trim().length < TITLE_MIN_CHARS) return null;
     try {
-      return await invoke<string>("suggest_title", { transcript: text, meetingId: id || null });
-    } catch {
-      return null; // no local model set, or it failed: the date title stands
+      const t = await invoke<string>("suggest_title", { transcript: text, meetingId: id || null });
+      titleNote = "";
+      return t;
+    } catch (e) {
+      titleNote = String(e); // the date title stands
+      return null;
     }
   }
 
@@ -888,6 +894,11 @@
       meetingStartedAt = Date.now();
       clearTimeout(titleTimer);
       titleTimer = setTimeout(suggestLiveTitle, TITLE_FIRST_MS);
+      // Insights open with the meeting, so what it finds is on screen without a click.
+      if (intelEnabled) {
+        liveIntelOpen = true;
+        liveAssistOpen = false;
+      }
       intel.startedAt = meetingStartedAt;
       // Both streams start unmuted; the live You/Them chips flip these mid-session.
       liveMicMuted = false;
@@ -2114,7 +2125,9 @@
             <input
               class="meeting-title"
               aria-label={i18n.t.library.meetingTitle}
-              placeholder={i18n.t.library.meetingTitle}
+              placeholder={titleNote
+                ? i18n.t.library.titleNoSuggestion(titleNote)
+                : i18n.t.library.meetingTitle}
               bind:value={meetingTitle}
               class:suggested={titleIsSuggestion}
               title={titleIsSuggestion ? i18n.t.library.titleSuggested : undefined}

@@ -24,6 +24,7 @@ export const zhHant: Messages = {
 
   library: {
     meetingTitle: "會議標題（選填）",
+    titleNoSuggestion: (why: string): string => `會議標題（無法建議：${why}）`,
     titleSuggested: "由本機模型建議。輸入即可取代。",
     renameMeeting: "重新命名",
     project: "專案",
