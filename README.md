@@ -9,6 +9,8 @@
 
 Your microphone **and** the meeting's audio become a live, per-speaker transcript with an AI copilot beside it — entirely on your machine. No cloud. No upload. No account.
 
+<sub>This fork adds meeting intelligence and runs on your Codex or Claude Code subscription. See <a href="#-fork-notes">Fork notes</a>.</sub>
+
 <br>
 
 [![CI](https://github.com/ppXD/Wisp/actions/workflows/ci.yml/badge.svg)](https://github.com/ppXD/Wisp/actions/workflows/ci.yml)
@@ -160,6 +162,42 @@ Grab the latest build from **[Releases](https://github.com/ppXD/Wisp/releases)**
 2. Launch Wisp and grant microphone access when prompted.
 
 ---
+
+## 🧭 Fork notes
+
+**What this fork adds**
+- **Meeting intelligence.** A structured, cited picture of the meeting, with gaps flagged, Ask, Wrapping up and a post-call review. It uses per-project instructions and memory.
+- **Subscription AI.** Runs on the Codex or Claude Code CLI with your subscription, or on a local model. No API key is needed.
+- **AI activity audit.** Every model call, local or remote, with the full prompt and reply.
+- **Meetings and speakers.** Projects, renaming and moving meetings, speaker names, screenshots and automatic titles.
+- **macOS extras.** A menu bar icon, meeting detection that asks before recording, and dictation on a local model.
+
+**Run it on a Mac (Apple Silicon, macOS 14.2+)**
+
+1. Install the tools:
+   ```sh
+   xcode-select --install          # Command Line Tools
+   brew install cmake meson ninja
+   ```
+   You also need Rust (stable) and Node 20+.
+2. Clone and install:
+   ```sh
+   git clone --recurse-submodules <this repo> && cd Wisp/app && npm install
+   ```
+3. Create a code-signing certificate named **Wisp Local Dev**, once. In Keychain Access, choose Certificate Assistant › Create a Certificate, and set Certificate Type to Code Signing. macOS ties Mic and Screen Recording grants to the signature. An ad-hoc build loses them on every rebuild.
+4. Build. The first command stages the speech runtime libraries the bundle expects.
+   ```sh
+   cargo build --release --manifest-path src-tauri/Cargo.toml -p wisp-engine-sherpa
+   ../scripts/build-local-mac.sh   # → src-tauri/target/release/bundle/macos/Wisp.app
+   ```
+5. Open the app and grant permissions:
+   - **Microphone**
+   - **Screen Recording** (meeting audio and meeting detection). Quit and reopen after you grant it.
+   - **Accessibility**, for dictation paste
+   - **Notifications**
+6. Download a model when the app asks (Parakeet v3 is the default). For AI, log in to `codex` or `claude` in a terminal. For a local model, add it in Settings › AI models (for example Ollama at `http://127.0.0.1:11434/v1`) and select it in Settings › Storage › Reasoning.
+
+`npm run tauri dev` works for UI work, but the permissions reset whenever the binary changes.
 
 ## 🛠️ Build from source
 
