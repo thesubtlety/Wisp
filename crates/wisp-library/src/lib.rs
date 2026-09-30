@@ -12,6 +12,7 @@
 mod embed;
 mod llm_log;
 mod memory;
+mod project_items;
 mod prompts;
 mod record;
 mod retention;
@@ -23,6 +24,7 @@ mod store;
 pub use embed::Embedder;
 pub use llm_log::{LlmCall, LlmTotals};
 pub use memory::{MeetingKnowledge, MemoryEntry, MemoryInput, ProvenanceRef};
+pub use project_items::{ProjectItem, ProjectItemInput};
 pub use prompts::{Prompt, PromptRun};
 pub use record::{Note, NoteSummary, Project, SearchHit, Segment, Source};
 pub use retention::{

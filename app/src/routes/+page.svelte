@@ -32,6 +32,7 @@
   } from "$lib/intel.svelte";
   import Settings from "$lib/Settings.svelte";
   import Library from "$lib/Library.svelte";
+  import Projects from "$lib/Projects.svelte";
   import { i18n, LOCALES } from "$lib/i18n.svelte";
   import {
     refreshCloud,
@@ -135,7 +136,7 @@
   let livePrompt = $state("");
   let systemAudioId = $state("");
   let micOffId = $state("");
-  let mode = $state<"live" | "file" | "library">("live");
+  let mode = $state<"live" | "file" | "library" | "projects">("live");
 
   // Collapsible left rail: collapsed (icon-only) by default; expands to icon + label rows. Persisted.
   let sidebarExpanded = $state(false);
@@ -1805,6 +1806,26 @@
         </svg>
         <span class="rail-label">{i18n.t.nav.library}</span>
       </button>
+
+      <button
+        class="rail-item"
+        class:active={mode === "projects"}
+        onclick={() => (mode = "projects")}
+        title={i18n.t.nav.projects}
+      >
+        <svg
+          class="rail-ico"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.7"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <path d="M3 7a1 1 0 0 1 1-1h5l2 2h9a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z" />
+        </svg>
+        <span class="rail-label">{i18n.t.nav.projects}</span>
+      </button>
     </div>
 
     <div class="rail-spacer"></div>
@@ -1975,7 +1996,7 @@
     </div>
   {/if}
 
-  <div class="workspace" class:is-hidden={mode === "library"}>
+  <div class="workspace" class:is-hidden={mode === "library" || mode === "projects"}>
 
   {#snippet moreMenu(assistOn: boolean, toggleAssist: () => void)}
     <span class="more-menu">
@@ -3137,7 +3158,9 @@
   </div>
 
   {#if mode === "library"}
-    <Library
+    <Library />
+  {:else if mode === "projects"}
+    <Projects
       sessionRunning={running}
       onNewMeeting={(projectId) => {
         intelEnabled = true;

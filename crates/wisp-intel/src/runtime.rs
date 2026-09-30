@@ -762,6 +762,8 @@ pub fn remap_refs(log: &[AppliedOp], map: impl Fn(&str) -> Option<String>) -> Ve
                     superseded_by: superseded_by.clone(),
                     add_refs: remap(add_refs),
                 },
+                // A user edit cites no evidence.
+                ResolvedOp::UserEdit { .. } => applied.op.clone(),
             };
             AppliedOp {
                 seq: applied.seq,

@@ -1,15 +1,19 @@
 //! The project brief: one Markdown page on where a project stands, built on demand.
 //!
-//! [`project_brief`] takes the project's instructions, its accepted knowledge and the saved state
-//! of each of its meetings, and lists what is still live: open commitments, open questions, recent
-//! decisions and active risks. The same text said in two meetings is listed once, from the newest.
-//! It reads nothing and formats no dates itself; the caller passes display dates in.
+//! [`project_brief`] takes the project's instructions, its accepted knowledge, the items the user
+//! added by hand and the saved state of each of its meetings, and lists what is still live: open
+//! commitments, open questions, recent decisions and active risks. [`project_overview`] is the same
+//! selection as data, for the Projects view. The same text said in two meetings is listed once, as
+//! the newest meeting has it (so an item marked done there hides older copies). It reads nothing and
+//! formats no dates itself; the caller passes display dates in.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
-use wisp_library::MemoryEntry;
+use serde::Serialize;
+use wisp_library::{MemoryEntry, ProjectItem};
 
+use crate::edit::parse_name;
 use crate::model::{ItemKind, Lifecycle, MeetingState, StateItem};
 
 /// Decisions from meetings this recent are listed.
@@ -41,7 +45,53 @@ pub struct BriefInput<'a> {
     pub memory: &'a [MemoryEntry],
     /// The project's meetings, in any order.
     pub meetings: &'a [BriefMeeting],
+    /// Items the user added to the project by hand.
+    pub manual: &'a [ProjectItem],
 }
+
+/// The meeting an overview item comes from.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ItemMeeting {
+    pub id: String,
+    pub title: String,
+    pub when: String,
+    pub started_at_ms: i64,
+    /// The item's id in that meeting's state (`COM-3`).
+    pub item_id: String,
+}
+
+/// One item in the project overview: from a meeting's state, or added by hand.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OverviewItem {
+    pub kind: ItemKind,
+    pub text: String,
+    pub owner: Option<String>,
+    pub due: Option<String>,
+    pub lifecycle: Lifecycle,
+    /// Where it was said; `None` for an item the user added.
+    pub meeting: Option<ItemMeeting>,
+    /// The project item's id, for an item the user added.
+    pub manual_id: Option<String>,
+}
+
+/// What is live in a project, by section. Hand-added items come first in each section, then
+/// meeting items, newest meeting first.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectOverview {
+    pub commitments: Vec<OverviewItem>,
+    pub open_questions: Vec<OverviewItem>,
+    /// Decisions from recent meetings (see [`RECENT_DECISION_DAYS`]) and every hand-added one.
+    pub decisions: Vec<OverviewItem>,
+    pub risks: Vec<OverviewItem>,
+    /// Commitments, questions and risks marked resolved, so they can be reopened.
+    pub done: Vec<OverviewItem>,
+}
+
+/// Most items listed as done.
+pub const MAX_DONE: usize = 50;
 
 /// `YYYY-MM-DD` for epoch ms `ms`, shifted by `offset_minutes` east of UTC (so local dates match
 /// the user's calendar).
@@ -88,31 +138,17 @@ pub fn project_brief(input: &BriefInput) -> String {
     }
     knowledge(&mut out, input.memory, &meetings);
 
-    let open = |i: &StateItem| matches!(i.lifecycle, Lifecycle::Active | Lifecycle::Uncertain);
-    let recent_from = input.now_ms - RECENT_DECISION_DAYS * DAY_MS;
-    let recent: HashSet<&str> = meetings
-        .iter()
-        .enumerate()
-        .filter(|(n, m)| *n < RECENT_DECISION_MEETINGS || m.started_at_ms >= recent_from)
-        .map(|(_, m)| m.id.as_str())
-        .collect();
-    items(&mut out, "Open commitments", &meetings, |_, i| {
-        i.kind == ItemKind::Commitment && open(i)
-    });
-    items(&mut out, "Open questions", &meetings, |_, i| {
-        i.kind == ItemKind::OpenQuestion && open(i)
-    });
+    let overview = project_overview(input);
+    items(&mut out, "Open commitments", &overview.commitments);
+    items(&mut out, "Open questions", &overview.open_questions);
     items(
         &mut out,
         &format!(
             "Recent decisions (last {RECENT_DECISION_DAYS} days or {RECENT_DECISION_MEETINGS} meetings)"
         ),
-        &meetings,
-        |m, i| i.kind == ItemKind::Decision && recent.contains(m.id.as_str()),
+        &overview.decisions,
     );
-    items(&mut out, "Active risks", &meetings, |_, i| {
-        i.kind == ItemKind::Risk && open(i)
-    });
+    items(&mut out, "Active risks", &overview.risks);
     out
 }
 
@@ -179,31 +215,125 @@ fn dedup_key(text: &str) -> String {
         .to_lowercase()
 }
 
-/// One section of live items across meetings, newest meeting first, each text once.
-fn items(
-    out: &mut String,
-    heading: &str,
-    meetings: &[&BriefMeeting],
-    keep: impl Fn(&BriefMeeting, &StateItem) -> bool,
-) {
-    let _ = writeln!(out, "\n## {heading}\n");
-    let mut seen = HashSet::new();
-    let mut any = false;
-    for m in meetings {
-        for item in m.state.live_items() {
-            if !keep(m, item) || !seen.insert(dedup_key(&item.text)) {
-                continue;
-            }
-            any = true;
-            let _ = writeln!(out, "{}", line(item, m));
-        }
+fn is_open(l: Lifecycle) -> bool {
+    matches!(l, Lifecycle::Active | Lifecycle::Uncertain)
+}
+
+/// The overview: each section's hand-added items, then its meeting items.
+pub fn project_overview(input: &BriefInput) -> ProjectOverview {
+    let mut meetings: Vec<&BriefMeeting> = input.meetings.iter().collect();
+    meetings.sort_by_key(|m| std::cmp::Reverse(m.started_at_ms));
+    let recent_from = input.now_ms - RECENT_DECISION_DAYS * DAY_MS;
+    let recent: HashSet<&str> = meetings
+        .iter()
+        .enumerate()
+        .filter(|(n, m)| *n < RECENT_DECISION_MEETINGS || m.started_at_ms >= recent_from)
+        .map(|(_, m)| m.id.as_str())
+        .collect();
+    let manual: Vec<OverviewItem> = input.manual.iter().filter_map(manual_item).collect();
+    let section = |kind: ItemKind, keep: &dyn Fn(&BriefMeeting, &StateItem) -> bool| {
+        let mut out: Vec<OverviewItem> = manual
+            .iter()
+            .filter(|i| i.kind == kind && is_open(i.lifecycle))
+            .cloned()
+            .collect();
+        out.extend(meeting_items(&meetings, &[kind], keep));
+        out
+    };
+    let mut decisions: Vec<OverviewItem> = manual
+        .iter()
+        .filter(|i| i.kind == ItemKind::Decision)
+        .cloned()
+        .collect();
+    decisions.extend(meeting_items(&meetings, &[ItemKind::Decision], &|m, _| {
+        recent.contains(m.id.as_str())
+    }));
+    let done_kinds = [ItemKind::Commitment, ItemKind::OpenQuestion, ItemKind::Risk];
+    let mut done: Vec<OverviewItem> = manual
+        .iter()
+        .filter(|i| done_kinds.contains(&i.kind) && i.lifecycle == Lifecycle::Resolved)
+        .cloned()
+        .collect();
+    for kind in done_kinds {
+        done.extend(meeting_items(&meetings, &[kind], &|_, i| {
+            i.lifecycle == Lifecycle::Resolved
+        }));
     }
-    if !any {
-        out.push_str("- (none)\n");
+    done.truncate(MAX_DONE);
+    ProjectOverview {
+        commitments: section(ItemKind::Commitment, &|_, i| is_open(i.lifecycle)),
+        open_questions: section(ItemKind::OpenQuestion, &|_, i| is_open(i.lifecycle)),
+        decisions,
+        risks: section(ItemKind::Risk, &|_, i| is_open(i.lifecycle)),
+        done,
     }
 }
 
-fn line(item: &StateItem, meeting: &BriefMeeting) -> String {
+/// A hand-added item; `None` if its kind or lifecycle isn't one this version knows.
+fn manual_item(item: &ProjectItem) -> Option<OverviewItem> {
+    Some(OverviewItem {
+        kind: parse_name(&item.kind)?,
+        text: item.text.clone(),
+        owner: item.owner.clone(),
+        due: item.due.clone(),
+        lifecycle: parse_name(&item.lifecycle)?,
+        meeting: None,
+        manual_id: Some(item.id.clone()),
+    })
+}
+
+/// Items of `kinds` across meetings (newest first) that `keep` accepts, each text once. The newest
+/// meeting to mention a text decides: if it resolved or withdrew the item, older copies stay hidden.
+/// Within a meeting, live items claim a text before superseded and withdrawn ones.
+fn meeting_items(
+    meetings: &[&BriefMeeting],
+    kinds: &[ItemKind],
+    keep: &dyn Fn(&BriefMeeting, &StateItem) -> bool,
+) -> Vec<OverviewItem> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for m in meetings {
+        let mut ordered: Vec<&StateItem> = m.state.live_items();
+        ordered.extend(m.state.items.values().filter(|i| i.lifecycle.is_terminal()));
+        for item in ordered {
+            if !kinds.contains(&item.kind) || !seen.insert(dedup_key(&item.text)) {
+                continue;
+            }
+            if item.lifecycle.is_terminal() || !keep(m, item) {
+                continue;
+            }
+            out.push(OverviewItem {
+                kind: item.kind,
+                text: item.text.clone(),
+                owner: item.owner.clone(),
+                due: item.due.clone(),
+                lifecycle: item.lifecycle,
+                meeting: Some(ItemMeeting {
+                    id: m.id.clone(),
+                    title: m.title.clone(),
+                    when: m.when.clone(),
+                    started_at_ms: m.started_at_ms,
+                    item_id: item.id.clone(),
+                }),
+                manual_id: None,
+            });
+        }
+    }
+    out
+}
+
+/// One section of the brief.
+fn items(out: &mut String, heading: &str, items: &[OverviewItem]) {
+    let _ = writeln!(out, "\n## {heading}\n");
+    if items.is_empty() {
+        out.push_str("- (none)\n");
+    }
+    for item in items {
+        let _ = writeln!(out, "{}", line(item));
+    }
+}
+
+fn line(item: &OverviewItem) -> String {
     let mut out = format!("- {}", item.text.trim());
     let mut extra = Vec::new();
     if let Some(o) = item.owner.as_deref().filter(|o| !o.trim().is_empty()) {
@@ -218,7 +348,12 @@ fn line(item: &StateItem, meeting: &BriefMeeting) -> String {
     if !extra.is_empty() {
         let _ = write!(out, " ({})", extra.join("; "));
     }
-    let _ = write!(out, " _({}, {})_", meeting.title, meeting.when);
+    match &item.meeting {
+        Some(m) => {
+            let _ = write!(out, " _({}, {})_", m.title, m.when);
+        }
+        None => out.push_str(" _(added by you)_"),
+    }
     out
 }
 
@@ -289,6 +424,7 @@ mod tests {
             instructions,
             memory,
             meetings,
+            manual: &[],
         })
     }
 
@@ -447,5 +583,161 @@ mod tests {
             assert!(!d.contains(dropped), "{dropped}");
         }
         assert!(section(&doc, "Open commitments").contains("- (none)"));
+    }
+
+    fn manual(id: &str, kind: &str, text: &str, lifecycle: &str) -> ProjectItem {
+        ProjectItem {
+            id: id.into(),
+            project_id: "p".into(),
+            kind: kind.into(),
+            text: text.into(),
+            owner: Some("You".into()),
+            due: None,
+            lifecycle: lifecycle.into(),
+            created_at_ms: 0,
+            updated_at_ms: 0,
+        }
+    }
+
+    #[test]
+    fn hand_added_items_come_first_and_follow_their_lifecycle() {
+        let meetings = [meeting(
+            "m1",
+            "Kickoff",
+            90,
+            vec![item(
+                "RISK-1",
+                ItemKind::Risk,
+                "Vendor lock-in",
+                Lifecycle::Active,
+            )],
+        )];
+        let manual = [
+            manual("pi-1", "risk", "Budget may slip", "active"),
+            manual("pi-2", "commitment", "Book the room", "resolved"),
+            manual("pi-3", "decision", "Ship in March", "active"),
+            manual("pi-4", "someday_kind", "Unknown", "active"),
+        ];
+        let input = BriefInput {
+            project: "Acme",
+            date: "day 100",
+            now_ms: 100 * DAY_MS,
+            instructions: "",
+            memory: &[],
+            meetings: &meetings,
+            manual: &manual,
+        };
+        let doc = project_brief(&input);
+        let risks = section(&doc, "Active risks");
+        let mine = risks
+            .find("- Budget may slip (owner: You) _(added by you)_")
+            .unwrap();
+        assert!(
+            mine < risks.find("Vendor lock-in").unwrap(),
+            "hand-added first"
+        );
+        assert!(
+            section(&doc, "Open commitments").contains("- (none)"),
+            "resolved is not open"
+        );
+        assert!(section(&doc, "Recent decisions")
+            .contains("Ship in March (owner: You) _(added by you)_"));
+        assert!(!doc.contains("Unknown"), "an unknown kind is skipped");
+
+        let overview = project_overview(&input);
+        assert_eq!(overview.risks[0].manual_id.as_deref(), Some("pi-1"));
+        let from_meeting = overview.risks[1].meeting.as_ref().unwrap();
+        assert_eq!(
+            (from_meeting.id.as_str(), from_meeting.item_id.as_str()),
+            ("m1", "RISK-1")
+        );
+        assert_eq!(overview.done.len(), 1);
+        assert_eq!(overview.done[0].text, "Book the room");
+    }
+
+    #[test]
+    fn user_edits_in_a_meeting_log_reach_the_brief() {
+        use crate::edit::{append_user_edit, ItemChange};
+        use crate::ops::{AppliedOp, ResolvedOp};
+        let add = |seq: u64, id: &str, kind: ItemKind, text: &str| AppliedOp {
+            seq,
+            at_ms: 0,
+            op: ResolvedOp::Add {
+                id: id.into(),
+                kind,
+                text: text.into(),
+                status: EpistemicStatus::Stated,
+                confidence: 0.9,
+                source_refs: vec![],
+                related_items: vec![],
+                owner: None,
+                due: None,
+            },
+        };
+        let mut log = vec![
+            add(0, "COM-1", ItemKind::Commitment, "Send the SOC 2 report"),
+            add(1, "COM-2", ItemKind::Commitment, "Draft the SOW"),
+            add(2, "Q-1", ItemKind::OpenQuestion, "Who signs off?"),
+        ];
+        let edits = [
+            (
+                "COM-1",
+                ItemChange {
+                    lifecycle: Some(Lifecycle::Resolved),
+                    ..Default::default()
+                },
+            ),
+            (
+                "COM-2",
+                ItemChange {
+                    text: Some("Draft the SOW v2".into()),
+                    owner: Some("Sarah".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "Q-1",
+                ItemChange {
+                    lifecycle: Some(Lifecycle::Withdrawn),
+                    ..Default::default()
+                },
+            ),
+        ];
+        let mut state = MeetingState::new("m2");
+        for (id, change) in &edits {
+            let (applied, s) = append_user_edit("m2", &log, id, change, 5).unwrap();
+            log.push(applied);
+            state = s;
+        }
+        // An older meeting said the same thing, still open there.
+        let old = meeting(
+            "m1",
+            "Kickoff",
+            10,
+            vec![item(
+                "COM-9",
+                ItemKind::Commitment,
+                "Send the SOC 2 report.",
+                Lifecycle::Active,
+            )],
+        );
+        let newer = BriefMeeting {
+            id: "m2".into(),
+            title: "Review".into(),
+            when: "day 95".into(),
+            started_at_ms: 95 * DAY_MS,
+            state,
+        };
+        let doc = brief(&[old, newer], &[], "");
+        let com = section(&doc, "Open commitments");
+        assert!(
+            !com.contains("SOC 2"),
+            "done in the newest meeting hides the older copy"
+        );
+        assert!(com.contains("- Draft the SOW v2 (owner: Sarah) _(Review, day 95)_"));
+        assert!(
+            section(&doc, "Open questions").contains("- (none)"),
+            "deleted"
+        );
     }
 }

@@ -153,7 +153,7 @@ impl Retriever for LibraryRetriever {
     }
 }
 
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as i64)
@@ -658,7 +658,7 @@ pub(crate) fn intel_ask_cancel(state: State<'_, AppState>) {
 }
 
 /// A saved meeting's state log, parsed.
-fn stored_log(library: &Library, id: &str) -> Result<Vec<AppliedOp>, String> {
+pub(crate) fn stored_log(library: &Library, id: &str) -> Result<Vec<AppliedOp>, String> {
     library
         .state_ops(id)
         .map_err(|e| e.to_string())?
@@ -716,9 +716,14 @@ pub(crate) fn intel_saved_state(
     id: String,
 ) -> Result<Vec<StateItem>, String> {
     let (meeting, _) = saved_meeting(&state, &id)?;
+    Ok(all_items(meeting))
+}
+
+/// Every item of a state, superseded and withdrawn ones included, by kind then id.
+pub(crate) fn all_items(meeting: MeetingState) -> Vec<StateItem> {
     let mut items: Vec<StateItem> = meeting.items.into_values().collect();
     items.sort_by_key(|i| (i.kind, item_number(&i.id)));
-    Ok(items)
+    items
 }
 
 /// The number part of an item id, for ordering `REQ-2` before `REQ-10`.
@@ -946,6 +951,12 @@ fn apply_review(
         op,
     }));
     MeetingState::replay(id, &log).map_err(|e| e.to_string())?;
+    save_log(library, id, &log)?;
+    Ok(count)
+}
+
+/// Stores a saved meeting's whole state log.
+pub(crate) fn save_log(library: &mut Library, id: &str, log: &[AppliedOp]) -> Result<(), String> {
     let stored = log
         .iter()
         .map(|a| {
@@ -958,8 +969,7 @@ fn apply_review(
         .collect::<Result<Vec<_>, String>>()?;
     library
         .save_state_ops(id, &stored)
-        .map_err(|e| e.to_string())?;
-    Ok(count)
+        .map_err(|e| e.to_string())
 }
 
 /// A project's accepted memory; empty with no project or on error.
@@ -1658,14 +1668,36 @@ fn render_brief(state: &AppState, project_id: &str, offset_minutes: i32) -> Resu
         .ok_or("no such project")?;
     let project = project_name(&library, Some(project_id)).unwrap_or_default();
     let memory = library.list_memory(project_id).map_err(|e| e.to_string())?;
-    let meetings: Vec<BriefMeeting> = library
+    let manual = library
+        .list_project_items(project_id)
+        .map_err(|e| e.to_string())?;
+    let meetings = brief_meetings(&library, project_id, offset_minutes)?;
+    let now = now_ms();
+    Ok(project_brief(&BriefInput {
+        project: &project,
+        date: &iso_date(now, offset_minutes),
+        now_ms: now,
+        instructions: &instructions,
+        memory: &memory,
+        meetings: &meetings,
+        manual: &manual,
+    }))
+}
+
+/// A project's saved meetings with their states replayed, for the brief and the overview.
+pub(crate) fn brief_meetings(
+    library: &Library,
+    project_id: &str,
+    offset_minutes: i32,
+) -> Result<Vec<BriefMeeting>, String> {
+    Ok(library
         .list_notes()
         .map_err(|e| e.to_string())?
         .into_iter()
         .filter(|n| n.project_id.as_deref() == Some(project_id))
         .map(|n| {
             // A meeting whose log won't replay still counts; it just has no items.
-            let state = stored_log(&library, &n.id)
+            let state = stored_log(library, &n.id)
                 .ok()
                 .and_then(|log| MeetingState::replay(&n.id, &log).ok())
                 .unwrap_or_else(|| MeetingState::new(&n.id));
@@ -1677,16 +1709,7 @@ fn render_brief(state: &AppState, project_id: &str, offset_minutes: i32) -> Resu
                 state,
             }
         })
-        .collect();
-    let now = now_ms();
-    Ok(project_brief(&BriefInput {
-        project: &project,
-        date: &iso_date(now, offset_minutes),
-        now_ms: now,
-        instructions: &instructions,
-        memory: &memory,
-        meetings: &meetings,
-    }))
+        .collect())
 }
 
 /// A project's brief, for the preview.
