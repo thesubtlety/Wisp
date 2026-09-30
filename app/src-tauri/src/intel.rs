@@ -1697,12 +1697,12 @@ pub(crate) fn brief_meetings(
         .filter(|n| n.project_id.as_deref() == Some(project_id))
         .map(|n| {
             // A meeting whose log won't replay still counts; it just has no items.
-            let state = stored_log(library, &n.id)
-                .ok()
-                .and_then(|log| MeetingState::replay(&n.id, &log).ok())
-                .unwrap_or_else(|| MeetingState::new(&n.id));
+            let log = stored_log(library, &n.id).unwrap_or_default();
+            let state =
+                MeetingState::replay(&n.id, &log).unwrap_or_else(|_| MeetingState::new(&n.id));
             BriefMeeting {
                 when: iso_date(n.started_at_ms, offset_minutes),
+                original_text: wisp_intel::original_texts(&n.id, &log),
                 id: n.id,
                 title: n.title,
                 started_at_ms: n.started_at_ms,

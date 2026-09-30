@@ -61,8 +61,8 @@ pub use brief::{
     ProjectOverview,
 };
 pub use edit::{
-    append_user_edit, edit_manual_item, new_manual_item, user_edit, EditError, ItemChange,
-    MANUAL_KINDS,
+    append_user_edit, edit_manual_item, new_manual_item, original_texts, user_edit, EditError,
+    ItemChange, MANUAL_KINDS,
 };
 pub use endgame::{
     audit, prepare_audit, wrap_probability, AuditInput, AuditReport, EndgameTrigger, Gap,

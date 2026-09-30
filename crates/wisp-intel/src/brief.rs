@@ -32,6 +32,10 @@ pub struct BriefMeeting {
     pub when: String,
     pub started_at_ms: i64,
     pub state: MeetingState,
+    /// Each item's text before the user's hand edits, by item id. Duplicates across meetings are
+    /// matched on this, so rewording one copy doesn't bring back the older one. Empty when there
+    /// were no edits.
+    pub original_text: std::collections::HashMap<String, String>,
 }
 
 /// Everything the brief is built from.
@@ -296,7 +300,8 @@ fn meeting_items(
         let mut ordered: Vec<&StateItem> = m.state.live_items();
         ordered.extend(m.state.items.values().filter(|i| i.lifecycle.is_terminal()));
         for item in ordered {
-            if !kinds.contains(&item.kind) || !seen.insert(dedup_key(&item.text)) {
+            let text = m.original_text.get(&item.id).unwrap_or(&item.text);
+            if !kinds.contains(&item.kind) || !seen.insert(dedup_key(text)) {
                 continue;
             }
             if item.lifecycle.is_terminal() || !keep(m, item) {
@@ -394,6 +399,7 @@ mod tests {
             when: format!("day {day}"),
             started_at_ms: day * DAY_MS,
             state,
+            original_text: Default::default(),
         }
     }
 
@@ -727,6 +733,7 @@ mod tests {
             when: "day 95".into(),
             started_at_ms: 95 * DAY_MS,
             state,
+            original_text: Default::default(),
         };
         let doc = brief(&[old, newer], &[], "");
         let com = section(&doc, "Open commitments");

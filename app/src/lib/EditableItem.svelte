@@ -62,11 +62,14 @@
     }
   }
 
+  // The backend collapses whitespace, so compare what it would store.
+  const norm = (v: string) => v.split(/\s+/).filter(Boolean).join(" ");
+
   function save() {
     const change: ItemChange = {};
-    if (text.trim() !== item.text) change.text = text;
-    if (owner.trim() !== (item.owner ?? "")) change.owner = owner;
-    if (due.trim() !== (item.due ?? "")) change.due = due;
+    if (norm(text) !== norm(item.text)) change.text = text;
+    if (norm(owner) !== norm(item.owner ?? "")) change.owner = owner;
+    if (norm(due) !== norm(item.due ?? "")) change.due = due;
     if (!Object.keys(change).length) {
       editing = false;
       return;

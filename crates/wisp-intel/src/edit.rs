@@ -196,6 +196,37 @@ pub fn edit_manual_item(
     Ok(out)
 }
 
+/// Each item's text as the meeting recorded it, before any hand edits: the log replayed without its
+/// [`ResolvedOp::UserEdit`]s. Only items whose text was edited are returned. Used to match the same
+/// item across meetings after the user reworded one copy.
+pub fn original_texts(
+    meeting_id: &str,
+    log: &[AppliedOp],
+) -> std::collections::HashMap<String, String> {
+    let edited: std::collections::HashSet<&str> = log
+        .iter()
+        .filter_map(|a| match &a.op {
+            ResolvedOp::UserEdit {
+                id, text: Some(_), ..
+            } => Some(id.as_str()),
+            _ => None,
+        })
+        .collect();
+    if edited.is_empty() {
+        return Default::default();
+    }
+    let recorded = log
+        .iter()
+        .filter(|a| !matches!(a.op, ResolvedOp::UserEdit { .. }));
+    let Ok(state) = MeetingState::replay(meeting_id, recorded) else {
+        return Default::default();
+    };
+    edited
+        .into_iter()
+        .filter_map(|id| state.item(id).map(|i| (id.to_owned(), i.text.clone())))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,6 +272,21 @@ mod tests {
         let back: Vec<AppliedOp> = serde_json::from_str(&json).unwrap();
         assert_eq!(MeetingState::replay("m", &back).unwrap(), state);
         (log, state)
+    }
+
+    #[test]
+    fn original_texts_are_the_recorded_wording_of_edited_items() {
+        let (edited, _) = edit_all(&[(
+            "COM-1",
+            ItemChange {
+                text: Some("Send the final numbers".into()),
+                ..change()
+            },
+        )]);
+        let original = original_texts("m", &edited);
+        assert_eq!(original.len(), 1, "only edited items: {original:?}");
+        assert_eq!(original["COM-1"], "Send the numbers");
+        assert!(original_texts("m", &log()).is_empty());
     }
 
     #[test]

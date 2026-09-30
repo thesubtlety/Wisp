@@ -424,6 +424,14 @@ pub fn review_ops(state: &MeetingState, followups: &[FollowUp]) -> Vec<ResolvedO
     let mut ops = Vec::new();
     for f in followups {
         let item = f.item_id.as_deref().and_then(|id| sim.item(id)).cloned();
+        // The user deleted the linked item after the review was drafted: respect that rather than
+        // re-adding it under a new id.
+        if item
+            .as_ref()
+            .is_some_and(|i| i.lifecycle == Lifecycle::Withdrawn)
+        {
+            continue;
+        }
         let op = match f.class {
             FollowUpClass::Mine | FollowUpClass::Theirs => {
                 let owner = match (f.class, &f.owner) {
@@ -718,6 +726,22 @@ mod tests {
         }
         assert_eq!(after.item("COM-2").unwrap().lifecycle, Lifecycle::Withdrawn);
         assert_eq!(after.item("TASK-1").unwrap().owner.as_deref(), Some("Them"));
+    }
+
+    #[test]
+    fn a_followup_for_an_item_deleted_since_is_skipped() {
+        let mut s = state();
+        s.items.get_mut("COM-2").unwrap().lifecycle = Lifecycle::Withdrawn;
+        let f = fu(
+            1,
+            "Send traffic numbers",
+            FollowUpClass::Mine,
+            Some("COM-2"),
+        );
+        assert!(
+            review_ops(&s, &[f]).is_empty(),
+            "not re-added under a new id"
+        );
     }
 
     #[test]
