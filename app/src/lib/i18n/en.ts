@@ -657,6 +657,8 @@ export const en = {
   // User-facing error toasts (set in <script>).
   // Meeting intelligence panel (IntelPanel.svelte).
   intel: {
+    expandAll: "Expand all",
+    collapseAll: "Collapse all",
     launcher: "Intelligence",
     launcherTitle: "Meeting intelligence — ask about the meeting, see its structured state",
     title: "Intelligence",

@@ -1,6 +1,6 @@
 <script lang="ts">
   // A meeting's structured state, grouped for reading: decisions, commitments, open questions,
-  // risks, requirements, conflicts, then facts (collapsed). Superseded and withdrawn items sit
+  // risks, requirements, conflicts, then facts; all collapsed at first. Superseded and withdrawn items sit
   // behind a toggle. Each item's evidence shows as small chips; a chip jumps to its transcript line
   // when the host can show it (`onRef`).
   import { i18n } from "$lib/i18n.svelte";
@@ -18,7 +18,7 @@
     onRef?: (ref: string) => void;
   } = $props();
 
-  type Section = { key: string; kinds: ItemKind[]; collapsed?: boolean };
+  type Section = { key: string; kinds: ItemKind[] };
   const SECTIONS: Section[] = [
     { key: "decision", kinds: ["decision"] },
     { key: "commitment", kinds: ["commitment", "task_candidate"] },
@@ -26,8 +26,8 @@
     { key: "risk", kinds: ["risk"] },
     { key: "requirement", kinds: ["requirement", "constraint"] },
     { key: "conflict", kinds: ["conflict"] },
-    { key: "fact", kinds: ["fact", "assumption"], collapsed: true },
-    { key: "other", kinds: ["objective", "participant", "topic", "artifact"], collapsed: true },
+    { key: "fact", kinds: ["fact", "assumption"] },
+    { key: "other", kinds: ["objective", "participant", "topic", "artifact"] },
   ];
 
   let showChanged = $state(false);
@@ -39,6 +39,22 @@
       (g) => g.items.length,
     ),
   );
+
+  // Sections start collapsed so the counts read as an overview; open one, or all.
+  let openKeys = $state<Set<string>>(new Set());
+  const allOpen = $derived(groups.length > 0 && groups.every((g) => openKeys.has(g.key)));
+
+  function toggleAll() {
+    openKeys = allOpen ? new Set() : new Set(groups.map((g) => g.key));
+  }
+
+  function setOpen(key: string, open: boolean) {
+    if (open === openKeys.has(key)) return;
+    const next = new Set(openKeys);
+    if (open) next.add(key);
+    else next.delete(key);
+    openKeys = next;
+  }
 
   function heading(s: Section): string {
     const k = i18n.t.intel.kinds;
@@ -84,8 +100,15 @@
 {/snippet}
 
 <div class="mstate">
+  {#if groups.length}
+    <button class="toggle all" onclick={toggleAll}>{allOpen ? i18n.t.intel.collapseAll : i18n.t.intel.expandAll}</button>
+  {/if}
   {#each groups as g (g.key)}
-    <details class="group" open={!g.collapsed}>
+    <details
+      class="group"
+      open={openKeys.has(g.key)}
+      ontoggle={(e) => setOpen(g.key, (e.currentTarget as HTMLDetailsElement).open)}
+    >
       <summary>{heading(g)} <span class="n">{g.items.length}</span></summary>
       {#each g.items as item (item.id)}
         {@render row(item, g.kinds[0])}
@@ -108,6 +131,10 @@
 </div>
 
 <style>
+  .toggle.all {
+    align-self: flex-start;
+  }
+
   .mstate {
     display: flex;
     flex-direction: column;

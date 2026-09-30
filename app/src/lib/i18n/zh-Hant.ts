@@ -601,6 +601,8 @@ export const zhHant: Messages = {
   },
 
   intel: {
+    expandAll: "全部展開",
+    collapseAll: "全部收合",
     launcher: "會議智慧",
     launcherTitle: "會議智慧——就會議提問，查看結構化狀態",
     title: "會議智慧",

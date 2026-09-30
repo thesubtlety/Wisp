@@ -601,6 +601,8 @@ export const zhHans: Messages = {
   },
 
   intel: {
+    expandAll: "全部展开",
+    collapseAll: "全部收起",
     launcher: "会议智能",
     launcherTitle: "会议智能——就会议提问，查看结构化状态",
     title: "会议智能",

@@ -23,6 +23,8 @@
   } = $props();
 
   let note = $state("");
+  // Which menu is open: Copy or Save, each listing the five exports.
+  let open = $state<"copy" | "save" | null>(null);
   let failed = $state(false);
 
   async function run(kind: ExportKind, how: "copy" | "save") {
@@ -44,16 +46,26 @@
 </script>
 
 <div class="exports">
-  {#each EXPORT_KINDS as kind (kind)}
-    {@const off = unavailable.includes(kind)}
-    <span class="xg" class:off>
-      <span class="xl">{i18n.t.intel.exportKinds[kind]}</span>
-      <button disabled={off} title={i18n.t.intel.exportCopy} onclick={() => run(kind, "copy")}
-        >{i18n.t.intel.exportCopy}</button
+  {#each ["copy", "save"] as const as how (how)}
+    <span class="xmenu">
+      <button class="xbtn" aria-haspopup="menu" aria-expanded={open === how} onclick={() => (open = open === how ? null : how)}
+        >{how === "copy" ? i18n.t.intel.exportCopy : i18n.t.intel.exportSave} <span class="caret">▾</span></button
       >
-      <button disabled={off} title={i18n.t.intel.exportSave} onclick={() => run(kind, "save")}
-        >{i18n.t.intel.exportSave}</button
-      >
+      {#if open === how}
+        <button class="scrim" aria-label={i18n.t.common.close} onclick={() => (open = null)}></button>
+        <div class="pop" role="menu">
+          {#each EXPORT_KINDS as kind (kind)}
+            <button
+              role="menuitem"
+              disabled={unavailable.includes(kind)}
+              onclick={() => {
+                open = null;
+                run(kind, how);
+              }}>{i18n.t.intel.exportKinds[kind]}</button
+            >
+          {/each}
+        </div>
+      {/if}
     </span>
   {/each}
   {#if note}<span class="xnote" class:failed>{note}</span>{/if}
@@ -67,20 +79,48 @@
     gap: 6px 10px;
   }
 
-  .xg {
-    display: inline-flex;
-    align-items: center;
-    gap: 3px;
-    font-size: 12px;
+  .xmenu {
+    position: relative;
   }
 
-  .xg.off {
-    opacity: 0.5;
+  .caret {
+    opacity: 0.6;
+    font-size: 10px;
   }
 
-  .xl {
-    color: var(--muted);
-    margin-right: 2px;
+  .scrim {
+    position: fixed;
+    inset: 0;
+    z-index: 20;
+    background: transparent;
+    border: none;
+    padding: 0;
+    cursor: default;
+  }
+
+  .pop {
+    position: absolute;
+    left: 0;
+    top: calc(100% + 4px);
+    z-index: 21;
+    min-width: 11rem;
+    padding: 4px;
+    background: var(--surface, var(--bg));
+    border: 1px solid var(--border-strong, var(--border));
+    border-radius: 8px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.12);
+  }
+
+  .pop button {
+    display: block;
+    width: 100%;
+    text-align: left;
+    border: none;
+    padding: 5px 9px;
+  }
+
+  .pop button:hover:not(:disabled) {
+    background: var(--bg);
   }
 
   button {

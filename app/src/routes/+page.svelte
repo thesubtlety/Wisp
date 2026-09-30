@@ -1785,25 +1785,6 @@
         <span class="rail-label">{i18n.t.nav.live}</span>
       </button>
 
-      <button
-        class="rail-item"
-        class:active={mode === "file"}
-        onclick={() => (mode = "file")}
-        title={i18n.t.nav.file}
-      >
-        <svg
-          class="rail-ico"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="1.7"
-          stroke-linejoin="round"
-          aria-hidden="true"
-        >
-          <path d="M7 3h7l4 4v14H7z" /><path d="M14 3v4h4" />
-        </svg>
-        <span class="rail-label">{i18n.t.nav.file}</span>
-      </button>
 
       <button
         class="rail-item"
@@ -1827,6 +1808,27 @@
     </div>
 
     <div class="rail-spacer"></div>
+
+    <!-- File transcription is occasional, so it sits with the other bottom items. -->
+    <button
+      class="rail-item"
+      class:active={mode === "file"}
+      onclick={() => (mode = "file")}
+      title={i18n.t.nav.file}
+    >
+      <svg
+        class="rail-ico"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.7"
+        stroke-linejoin="round"
+        aria-hidden="true"
+      >
+        <path d="M7 3h7l4 4v14H7z" /><path d="M14 3v4h4" />
+      </svg>
+      <span class="rail-label">{i18n.t.nav.file}</span>
+    </button>
 
     <button
       class="rail-item theme-toggle"
