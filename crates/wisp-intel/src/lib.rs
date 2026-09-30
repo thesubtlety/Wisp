@@ -21,6 +21,7 @@
 //! - [`headline`] — short forms (headlines, short answers) for reading at a glance.
 //! - [`screenshot`] — a screenshot attached as context, described once by a vision backend.
 //! - [`speakers`] — speaker-name suggestions from the transcript, checked and deduplicated.
+//! - [`summary`] — the meeting summary, from its state (or the transcript's end when it has none).
 //! - [`runtime`] — the live worker: final lines in over a channel that never blocks, batched
 //!   passes out, one at a time.
 //!
@@ -42,6 +43,7 @@ pub mod review;
 pub mod runtime;
 pub mod screenshot;
 pub mod speakers;
+pub mod summary;
 
 pub use about::{about_you, ABOUT_HEADING};
 pub use analyze::{
@@ -74,4 +76,8 @@ pub use runtime::{
 pub use screenshot::{describe_screenshot, ScreenshotDescription, ScreenshotInput};
 pub use speakers::{
     validate_speaker_name, RawSpeakerName, SpeakerReject, SpeakerSuggestion, SpeakerSuggestions,
+};
+pub use summary::{
+    parse_summary, participants, summary_context, summary_request, MeetingSummary, SummaryContext,
+    SummaryMeta,
 };

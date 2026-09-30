@@ -385,12 +385,16 @@ impl Library {
         let expires_at_ms = self.retention.transcript_expiry(started_at_ms);
 
         let tx = self.conn.transaction()?;
-        let project_id: Option<String> = tx
-            .query_row("SELECT project_id FROM meeting WHERE id = ?1", [id], |r| {
-                r.get(0)
-            })
+        let (project_id, old_summary): (Option<String>, Option<String>) = tx
+            .query_row(
+                "SELECT project_id, summary FROM meeting WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
             .optional()?
-            .flatten();
+            .unwrap_or_default();
+        // A re-save without a summary keeps the one already stored.
+        let summary = meta.summary.clone().or(old_summary);
         // Deleting the meeting cascades its speaker names; carry them over like the project.
         let names = crate::speakers::read_names(&tx, id)?;
         tx.execute("DELETE FROM meeting WHERE id = ?1", [id])?;
@@ -406,7 +410,7 @@ impl Library {
                 duration_ms,
                 meta.language,
                 meta.engine,
-                meta.summary,
+                summary,
                 finals.len() as i64,
                 project_id,
                 expires_at_ms,
@@ -822,6 +826,16 @@ impl Library {
         Ok(affected > 0)
     }
 
+    /// Replaces a meeting's summary (trimmed; empty clears it). Returns whether the meeting exists.
+    pub fn set_summary(&self, id: &str, summary: &str) -> Result<bool> {
+        let summary = Some(summary.trim()).filter(|s| !s.is_empty());
+        let n = self.conn.execute(
+            "UPDATE meeting SET summary = ?2 WHERE id = ?1",
+            rusqlite::params![id, summary],
+        )?;
+        Ok(n > 0)
+    }
+
     /// Number of meetings stored.
     pub fn count(&self) -> Result<i64> {
         Ok(self
@@ -1088,6 +1102,30 @@ mod tests {
         assert_eq!(m.segment_count, 0);
         assert_eq!(m.duration_ms, 0);
         assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn a_summary_is_set_cleared_and_kept_across_a_resave() {
+        let mut lib = Library::open_in_memory().unwrap();
+        let segs = [seg(0, 0, 1000, "hello", AudioSourceKind::Microphone)];
+        lib.save_note("m1", &meta("M"), 0, &segs).unwrap();
+        assert_eq!(lib.get_note("m1").unwrap().unwrap().0.summary, None);
+
+        assert!(lib.set_summary("m1", "  **TL;DR** Ship it.\n ").unwrap());
+        assert_eq!(
+            lib.get_note("m1").unwrap().unwrap().0.summary.as_deref(),
+            Some("**TL;DR** Ship it.")
+        );
+        lib.save_note("m1", &meta("M"), 0, &segs).unwrap();
+        assert_eq!(
+            lib.get_note("m1").unwrap().unwrap().0.summary.as_deref(),
+            Some("**TL;DR** Ship it."),
+            "a re-save without a summary keeps the stored one"
+        );
+
+        assert!(lib.set_summary("m1", " ").unwrap());
+        assert_eq!(lib.get_note("m1").unwrap().unwrap().0.summary, None);
+        assert!(!lib.set_summary("nope", "x").unwrap());
     }
 
     #[test]

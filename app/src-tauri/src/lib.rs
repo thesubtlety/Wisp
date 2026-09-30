@@ -4584,6 +4584,8 @@ pub fn run() {
             assist::realtime::start_assist_realtime,
             intel::intel_analyze_now,
             intel::intel_saved_items,
+            intel::intel_saved_state,
+            intel::meeting_summarize,
             intel::intel_export,
             context::capture_context,
             context::paste_context_image,
