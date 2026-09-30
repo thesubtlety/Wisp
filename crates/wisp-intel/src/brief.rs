@@ -11,10 +11,10 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
 use serde::Serialize;
-use wisp_library::{MemoryEntry, ProjectItem};
+use wisp_library::{MemoryEntry, ProjectItem, ProvenanceRef};
 
 use crate::edit::parse_name;
-use crate::model::{ItemKind, Lifecycle, MeetingState, StateItem};
+use crate::model::{EpistemicStatus, ItemKind, Lifecycle, MeetingState, StateItem};
 
 /// Decisions from meetings this recent are listed.
 pub const RECENT_DECISION_DAYS: i64 = 30;
@@ -36,6 +36,8 @@ pub struct BriefMeeting {
     /// matched on this, so rewording one copy doesn't bring back the older one. Empty when there
     /// were no edits.
     pub original_text: std::collections::HashMap<String, String>,
+    /// The meeting's saved summary (Markdown), if one was made.
+    pub summary: Option<String>,
 }
 
 /// Everything the brief is built from.
@@ -92,6 +94,37 @@ pub struct ProjectOverview {
     pub risks: Vec<OverviewItem>,
     /// Commitments, questions and risks marked resolved, so they can be reopened.
     pub done: Vec<OverviewItem>,
+    /// Each meeting's gist, newest first.
+    pub meetings: Vec<MeetingGist>,
+    /// Requirements, constraints, decisions and facts said in meetings that aren't project
+    /// knowledge yet (matched on text), newest meeting first.
+    pub from_meetings: Vec<KnowledgeCandidate>,
+}
+
+/// A meeting's summary in one line.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeetingGist {
+    pub id: String,
+    /// The summary's TL;DR (see [`summary_tldr`]); `None` when there is no summary.
+    pub tldr: Option<String>,
+    /// What it recorded, as [`item_counts`] says it.
+    pub counts: String,
+}
+
+/// A meeting item that could become project knowledge.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeCandidate {
+    #[serde(flatten)]
+    pub item: OverviewItem,
+    /// The knowledge kind it would be kept as (`requirement`, `decision`, `fact`).
+    pub knowledge_kind: String,
+    /// `stated` or `inferred`.
+    pub status: String,
+    pub confidence: f64,
+    /// Its evidence refs in the meeting, labelled with the meeting.
+    pub provenance: Vec<ProvenanceRef>,
 }
 
 /// Most items listed as done.
@@ -123,46 +156,197 @@ const KNOWLEDGE_HEADINGS: [(&str, &str); 5] = [
     ("open_issue", "Open issues"),
 ];
 
-/// The brief as Markdown.
+/// `1 meeting`, `2 meetings`.
+fn count(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+/// The brief as Markdown: GitHub-flavoured, meant to be pasted anywhere.
 pub fn project_brief(input: &BriefInput) -> String {
     let mut meetings: Vec<&BriefMeeting> = input.meetings.iter().collect();
     meetings.sort_by_key(|m| std::cmp::Reverse(m.started_at_ms));
+    let overview = project_overview(input);
 
-    let mut out = format!("# Project brief: {}\n", input.project.trim());
+    let mut out = format!("# {} — project brief\n", input.project.trim());
     let _ = writeln!(
         out,
-        "\n_{} · {} meeting{}_",
+        "\n_Updated {} · {} · {} · {}_",
         input.date,
-        meetings.len(),
-        if meetings.len() == 1 { "" } else { "s" }
+        count(meetings.len(), "meeting", "meetings"),
+        count(
+            overview.commitments.len(),
+            "open commitment",
+            "open commitments"
+        ),
+        count(
+            overview.open_questions.len(),
+            "open question",
+            "open questions"
+        ),
     );
     let instructions = input.instructions.trim();
     if !instructions.is_empty() {
-        let _ = writeln!(out, "\n## Instructions\n\n{instructions}");
+        let _ = writeln!(out, "\n## Instructions\n");
+        for l in instructions.lines() {
+            let l = l.trim_end();
+            let _ = writeln!(
+                out,
+                "{}",
+                if l.is_empty() {
+                    ">".to_owned()
+                } else {
+                    format!("> {l}")
+                }
+            );
+        }
     }
+    items(&mut out, "Open commitments", &overview.commitments, true);
+    items(&mut out, "Open questions", &overview.open_questions, true);
+    items(&mut out, "Recent decisions", &overview.decisions, false);
+    items(&mut out, "Active risks", &overview.risks, false);
+    meeting_list(&mut out, &meetings);
     knowledge(&mut out, input.memory, &meetings);
-
-    let overview = project_overview(input);
-    items(&mut out, "Open commitments", &overview.commitments);
-    items(&mut out, "Open questions", &overview.open_questions);
-    items(
-        &mut out,
-        &format!(
-            "Recent decisions (last {RECENT_DECISION_DAYS} days or {RECENT_DECISION_MEETINGS} meetings)"
-        ),
-        &overview.decisions,
-    );
-    items(&mut out, "Active risks", &overview.risks);
     out
+}
+
+/// One section of items. An empty one is left out, or says so when `always`.
+fn items(out: &mut String, heading: &str, items: &[OverviewItem], always: bool) {
+    if items.is_empty() && !always {
+        return;
+    }
+    let _ = writeln!(out, "\n## {heading} ({})\n", items.len());
+    if items.is_empty() {
+        out.push_str("Nothing open.\n");
+    }
+    for item in items {
+        let _ = writeln!(out, "{}", line(item));
+    }
+}
+
+/// `- **Owner** — text · due X · _Meeting, date_`, leaving out what is empty.
+fn line(item: &OverviewItem) -> String {
+    let text = one_line(&item.text);
+    let mut parts = vec![match item
+        .owner
+        .as_deref()
+        .map(str::trim)
+        .filter(|o| !o.is_empty())
+    {
+        Some(o) => format!("**{o}** — {text}"),
+        None => text,
+    }];
+    if let Some(d) = item.due.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
+        parts.push(format!("due {d}"));
+    }
+    if item.lifecycle != Lifecycle::Active {
+        parts.push(item.lifecycle.as_str().to_owned());
+    }
+    parts.push(match &item.meeting {
+        Some(m) => format!("_{}, {}_", one_line(&m.title), m.when),
+        None => "_Added by you_".to_owned(),
+    });
+    format!("- {}", parts.join(" · "))
+}
+
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The meetings, newest first, each with its TL;DR and what it recorded.
+fn meeting_list(out: &mut String, meetings: &[&BriefMeeting]) {
+    if meetings.is_empty() {
+        return;
+    }
+    let _ = writeln!(out, "\n## Meetings ({})", meetings.len());
+    for m in meetings {
+        let _ = writeln!(out, "\n### {} — {}\n", one_line(&m.title), m.when);
+        match m.summary.as_deref().and_then(summary_tldr) {
+            Some(tldr) => {
+                let _ = writeln!(out, "{tldr}");
+            }
+            None => out.push_str("_No summary yet._\n"),
+        }
+        let counts = item_counts(&m.state);
+        if !counts.is_empty() {
+            let _ = writeln!(out, "\n{counts}");
+        }
+    }
+}
+
+/// `3 decisions · 2 commitments · 1 open question`: a meeting's live items by kind, zeros left out.
+pub fn item_counts(state: &MeetingState) -> String {
+    let live = state.live_items();
+    let of = |k: ItemKind| live.iter().filter(|i| i.kind == k).count();
+    [
+        (ItemKind::Decision, "decision", "decisions"),
+        (ItemKind::Commitment, "commitment", "commitments"),
+        (ItemKind::OpenQuestion, "open question", "open questions"),
+        (ItemKind::Risk, "risk", "risks"),
+    ]
+    .into_iter()
+    .map(|(k, one, many)| (of(k), one, many))
+    .filter(|(n, _, _)| *n > 0)
+    .map(|(n, one, many)| count(n, one, many))
+    .collect::<Vec<_>>()
+    .join(" · ")
+}
+
+/// The one-line gist of a meeting summary: its TL;DR (`**TL;DR:** …` or a `TL;DR` heading's
+/// paragraph), else its first paragraph (or first bullet). `None` when there is no text.
+pub fn summary_tldr(summary: &str) -> Option<String> {
+    let lines: Vec<&str> = summary.lines().map(str::trim).collect();
+    let is_heading = |l: &str| l.starts_with('#');
+    let tldr_label = |l: &str| {
+        let bare = l.trim_start_matches('#').trim().replace("**", "");
+        let lower = bare.to_lowercase();
+        lower.starts_with("tl;dr").then(|| {
+            bare.get("tl;dr".len()..)
+                .unwrap_or_default()
+                .trim_start_matches([':', ' '])
+                .trim()
+                .to_owned()
+        })
+    };
+    // A paragraph from line `n` on: consecutive plain lines, or the first bullet.
+    let paragraph = |n: usize| -> Option<String> {
+        let first = lines.get(n)?;
+        if let Some(b) = bullet(first) {
+            return Some(one_line(b)).filter(|s| !s.is_empty());
+        }
+        let text: Vec<&str> = lines[n..]
+            .iter()
+            .take_while(|l| !l.is_empty() && !is_heading(l) && bullet(l).is_none())
+            .copied()
+            .collect();
+        Some(one_line(&text.join(" "))).filter(|s| !s.is_empty())
+    };
+    for (n, l) in lines.iter().enumerate() {
+        let Some(rest) = tldr_label(l) else { continue };
+        if !rest.is_empty() {
+            return Some(one_line(&rest));
+        }
+        let next = (n + 1..lines.len()).find(|&i| !lines[i].is_empty())?;
+        if !is_heading(lines[next]) {
+            return paragraph(next);
+        }
+    }
+    let first = lines.iter().position(|l| !l.is_empty() && !is_heading(l))?;
+    paragraph(first)
+}
+
+/// A bullet line's text.
+fn bullet(line: &str) -> Option<&str> {
+    line.strip_prefix("- ")
+        .or_else(|| line.strip_prefix("* "))
+        .map(str::trim)
 }
 
 /// The project's knowledge by kind, each entry with the meeting it came from.
 fn knowledge(out: &mut String, memory: &[MemoryEntry], meetings: &[&BriefMeeting]) {
-    let _ = writeln!(out, "\n## Project knowledge");
     if memory.is_empty() {
-        out.push_str("\n- (none)\n");
         return;
     }
+    let _ = writeln!(out, "\n## Knowledge ({})", memory.len());
     let by_id: HashMap<&str, &BriefMeeting> =
         meetings.iter().map(|m| (m.id.as_str(), *m)).collect();
     let known: Vec<&str> = KNOWLEDGE_HEADINGS.iter().map(|(k, _)| *k).collect();
@@ -186,14 +370,14 @@ fn knowledge(out: &mut String, memory: &[MemoryEntry], meetings: &[&BriefMeeting
                 .meeting_id
                 .as_deref()
                 .and_then(|id| by_id.get(id))
-                .map(|m| format!("{}, {}", m.title, m.when))
+                .map(|m| format!("{}, {}", one_line(&m.title), m.when))
                 .or_else(|| e.provenance.first().map(|p| p.label.clone()));
             match source {
                 Some(s) => {
-                    let _ = writeln!(out, "- {} _({s})_", e.text);
+                    let _ = writeln!(out, "- {} · _{s}_", one_line(&e.text));
                 }
                 None => {
-                    let _ = writeln!(out, "- {}", e.text);
+                    let _ = writeln!(out, "- {}", one_line(&e.text));
                 }
             }
         }
@@ -264,13 +448,68 @@ pub fn project_overview(input: &BriefInput) -> ProjectOverview {
         }));
     }
     done.truncate(MAX_DONE);
+    let gists = meetings
+        .iter()
+        .map(|m| MeetingGist {
+            id: m.id.clone(),
+            tldr: m.summary.as_deref().and_then(summary_tldr),
+            counts: item_counts(&m.state),
+        })
+        .collect();
     ProjectOverview {
         commitments: section(ItemKind::Commitment, &|_, i| is_open(i.lifecycle)),
         open_questions: section(ItemKind::OpenQuestion, &|_, i| is_open(i.lifecycle)),
         decisions,
         risks: section(ItemKind::Risk, &|_, i| is_open(i.lifecycle)),
         done,
+        meetings: gists,
+        from_meetings: knowledge_candidates(&meetings, input.memory),
     }
+}
+
+/// Meeting kinds that can be kept as knowledge, with the knowledge kind each becomes.
+const KNOWLEDGE_FROM: [(ItemKind, &str); 4] = [
+    (ItemKind::Requirement, "requirement"),
+    (ItemKind::Constraint, "requirement"),
+    (ItemKind::Decision, "decision"),
+    (ItemKind::Fact, "fact"),
+];
+
+/// Live requirements, constraints, decisions and facts across meetings, each text once, leaving
+/// out what `memory` already says.
+fn knowledge_candidates(
+    meetings: &[&BriefMeeting],
+    memory: &[MemoryEntry],
+) -> Vec<KnowledgeCandidate> {
+    let kept: HashSet<String> = memory.iter().map(|e| dedup_key(&e.text)).collect();
+    let kinds: Vec<ItemKind> = KNOWLEDGE_FROM.iter().map(|(k, _)| *k).collect();
+    select(meetings, &kinds, &|_, i| is_open(i.lifecycle))
+        .into_iter()
+        .filter(|(_, i)| !kept.contains(&dedup_key(&i.text)))
+        .map(|(m, i)| KnowledgeCandidate {
+            item: overview_item(m, i),
+            knowledge_kind: KNOWLEDGE_FROM
+                .iter()
+                .find(|(k, _)| *k == i.kind)
+                .map_or("fact", |(_, k)| k)
+                .to_owned(),
+            status: match i.status {
+                EpistemicStatus::Stated => "stated",
+                _ => "inferred",
+            }
+            .to_owned(),
+            confidence: i.confidence,
+            provenance: i
+                .source_refs
+                .iter()
+                .map(|r| ProvenanceRef {
+                    source_ref: r.clone(),
+                    label: format!("{}, {}", one_line(&m.title), m.when),
+                    sha256: String::new(),
+                })
+                .collect(),
+        })
+        .collect()
 }
 
 /// A hand-added item; `None` if its kind or lifecycle isn't one this version knows.
@@ -289,11 +528,11 @@ fn manual_item(item: &ProjectItem) -> Option<OverviewItem> {
 /// Items of `kinds` across meetings (newest first) that `keep` accepts, each text once. The newest
 /// meeting to mention a text decides: if it resolved or withdrew the item, older copies stay hidden.
 /// Within a meeting, live items claim a text before superseded and withdrawn ones.
-fn meeting_items(
-    meetings: &[&BriefMeeting],
+fn select<'m>(
+    meetings: &[&'m BriefMeeting],
     kinds: &[ItemKind],
     keep: &dyn Fn(&BriefMeeting, &StateItem) -> bool,
-) -> Vec<OverviewItem> {
+) -> Vec<(&'m BriefMeeting, &'m StateItem)> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
     for m in meetings {
@@ -307,59 +546,39 @@ fn meeting_items(
             if item.lifecycle.is_terminal() || !keep(m, item) {
                 continue;
             }
-            out.push(OverviewItem {
-                kind: item.kind,
-                text: item.text.clone(),
-                owner: item.owner.clone(),
-                due: item.due.clone(),
-                lifecycle: item.lifecycle,
-                meeting: Some(ItemMeeting {
-                    id: m.id.clone(),
-                    title: m.title.clone(),
-                    when: m.when.clone(),
-                    started_at_ms: m.started_at_ms,
-                    item_id: item.id.clone(),
-                }),
-                manual_id: None,
-            });
+            out.push((*m, item));
         }
     }
     out
 }
 
-/// One section of the brief.
-fn items(out: &mut String, heading: &str, items: &[OverviewItem]) {
-    let _ = writeln!(out, "\n## {heading}\n");
-    if items.is_empty() {
-        out.push_str("- (none)\n");
-    }
-    for item in items {
-        let _ = writeln!(out, "{}", line(item));
-    }
+fn meeting_items(
+    meetings: &[&BriefMeeting],
+    kinds: &[ItemKind],
+    keep: &dyn Fn(&BriefMeeting, &StateItem) -> bool,
+) -> Vec<OverviewItem> {
+    select(meetings, kinds, keep)
+        .into_iter()
+        .map(|(m, i)| overview_item(m, i))
+        .collect()
 }
 
-fn line(item: &OverviewItem) -> String {
-    let mut out = format!("- {}", item.text.trim());
-    let mut extra = Vec::new();
-    if let Some(o) = item.owner.as_deref().filter(|o| !o.trim().is_empty()) {
-        extra.push(format!("owner: {o}"));
+fn overview_item(m: &BriefMeeting, item: &StateItem) -> OverviewItem {
+    OverviewItem {
+        kind: item.kind,
+        text: item.text.clone(),
+        owner: item.owner.clone(),
+        due: item.due.clone(),
+        lifecycle: item.lifecycle,
+        meeting: Some(ItemMeeting {
+            id: m.id.clone(),
+            title: m.title.clone(),
+            when: m.when.clone(),
+            started_at_ms: m.started_at_ms,
+            item_id: item.id.clone(),
+        }),
+        manual_id: None,
     }
-    if let Some(d) = item.due.as_deref().filter(|d| !d.trim().is_empty()) {
-        extra.push(format!("due: {d}"));
-    }
-    if item.lifecycle != Lifecycle::Active {
-        extra.push(item.lifecycle.as_str().to_owned());
-    }
-    if !extra.is_empty() {
-        let _ = write!(out, " ({})", extra.join("; "));
-    }
-    match &item.meeting {
-        Some(m) => {
-            let _ = write!(out, " _({}, {})_", m.title, m.when);
-        }
-        None => out.push_str(" _(added by you)_"),
-    }
-    out
 }
 
 #[cfg(test)]
@@ -400,6 +619,7 @@ mod tests {
             started_at_ms: day * DAY_MS,
             state,
             original_text: Default::default(),
+            summary: None,
         }
     }
 
@@ -467,9 +687,12 @@ mod tests {
             memory("glossary", "SoW means statement of work", None, "notes.md"),
         ];
         let doc = brief(&meetings, &memory, "  Watch the budget.  ");
-        assert!(doc.starts_with("# Project brief: Acme\n\n_day 100 · 1 meeting_\n"));
-        assert!(doc.contains("## Instructions\n\nWatch the budget.\n"));
-        let k = section(&doc, "Project knowledge");
+        assert!(doc.starts_with(
+            "# Acme — project brief\n\n\
+             _Updated day 100 · 1 meeting · 0 open commitments · 0 open questions_\n"
+        ));
+        assert!(doc.contains("## Instructions\n\n> Watch the budget.\n"));
+        let k = section(&doc, "Knowledge (4)");
         let facts = k.find("### Facts").unwrap();
         let reqs = k.find("### Requirements").unwrap();
         let other = k.find("### Glossary").unwrap();
@@ -477,12 +700,12 @@ mod tests {
             facts < reqs && reqs < other,
             "known kinds in order, others last"
         );
-        assert!(k.contains("- Sarah owns security _(Kickoff, day 90)_"));
+        assert!(k.contains("- Sarah owns security · _Kickoff, day 90_"));
         assert!(
-            k.contains("- Runs in Azure _(Meeting Aug 3, 10:00)_"),
+            k.contains("- Runs in Azure · _Meeting Aug 3, 10:00_"),
             "a meeting no longer here falls back to the provenance label"
         );
-        assert!(k.contains("- SoW means statement of work _(notes.md)_"));
+        assert!(k.contains("- SoW means statement of work · _notes.md_"));
     }
 
     #[test]
@@ -547,17 +770,17 @@ mod tests {
         let newer = meeting("m2", "Design review", 95, vec![owned]);
         let doc = brief(&[old, newer], &[], "");
         assert!(!doc.contains("## Instructions"), "no empty instructions");
-        assert!(section(&doc, "Project knowledge").contains("- (none)"));
+        assert!(!doc.contains("## Knowledge"), "no knowledge, no section");
 
-        let com = section(&doc, "Open commitments");
+        let com = section(&doc, "Open commitments (1)");
         assert!(com.contains(
-            "- Send the SOC 2 report (owner: Sarah; due: Friday) _(Design review, day 95)_"
+            "- **Sarah** — Send the SOC 2 report · due Friday · _Design review, day 95_"
         ));
         assert_eq!(com.matches("SOC 2").count(), 1, "deduped by text");
         assert!(!com.contains("Book the venue") && !com.contains("Old plan"));
 
-        assert!(section(&doc, "Open questions")
-            .contains("- Who signs off? (uncertain) _(Kickoff, day 10)_"));
+        assert!(section(&doc, "Open questions (1)")
+            .contains("- Who signs off? · uncertain · _Kickoff, day 10_"));
         let risks = section(&doc, "Active risks");
         assert!(risks.contains("Vendor lock-in") && !risks.contains("Missed deadline"));
         assert!(
@@ -588,7 +811,7 @@ mod tests {
         for dropped in ["Ancient", "- Old ", "Older"] {
             assert!(!d.contains(dropped), "{dropped}");
         }
-        assert!(section(&doc, "Open commitments").contains("- (none)"));
+        assert!(section(&doc, "Open commitments (0)").contains("Nothing open."));
     }
 
     fn manual(id: &str, kind: &str, text: &str, lifecycle: &str) -> ProjectItem {
@@ -636,18 +859,18 @@ mod tests {
         let doc = project_brief(&input);
         let risks = section(&doc, "Active risks");
         let mine = risks
-            .find("- Budget may slip (owner: You) _(added by you)_")
+            .find("- **You** — Budget may slip · _Added by you_")
             .unwrap();
         assert!(
             mine < risks.find("Vendor lock-in").unwrap(),
             "hand-added first"
         );
         assert!(
-            section(&doc, "Open commitments").contains("- (none)"),
+            section(&doc, "Open commitments").contains("Nothing open."),
             "resolved is not open"
         );
         assert!(section(&doc, "Recent decisions")
-            .contains("Ship in March (owner: You) _(added by you)_"));
+            .contains("- **You** — Ship in March · _Added by you_"));
         assert!(!doc.contains("Unknown"), "an unknown kind is skipped");
 
         let overview = project_overview(&input);
@@ -734,6 +957,7 @@ mod tests {
             started_at_ms: 95 * DAY_MS,
             state,
             original_text: Default::default(),
+            summary: None,
         };
         let doc = brief(&[old, newer], &[], "");
         let com = section(&doc, "Open commitments");
@@ -741,10 +965,155 @@ mod tests {
             !com.contains("SOC 2"),
             "done in the newest meeting hides the older copy"
         );
-        assert!(com.contains("- Draft the SOW v2 (owner: Sarah) _(Review, day 95)_"));
+        assert!(com.contains("- **Sarah** — Draft the SOW v2 · _Review, day 95_"));
         assert!(
-            section(&doc, "Open questions").contains("- (none)"),
+            section(&doc, "Open questions").contains("Nothing open."),
             "deleted"
+        );
+    }
+
+    #[test]
+    fn the_tldr_comes_from_the_summary() {
+        let wisp = "**TL;DR:** We picked  OIDC.\nShip in March.\n\n### Decisions\n\n- Use OIDC\n";
+        assert_eq!(summary_tldr(wisp).as_deref(), Some("We picked OIDC."));
+        let heading = "## Summary\n\n### TL;DR\n\nTwo lines\nof gist.\n\n### Risks\n- x";
+        assert_eq!(summary_tldr(heading).as_deref(), Some("Two lines of gist."));
+        let plain = "# Notes\n\nFirst paragraph\nhere.\n\nSecond.";
+        assert_eq!(
+            summary_tldr(plain).as_deref(),
+            Some("First paragraph here.")
+        );
+        let bullets = "### Decisions\n\n- Use Postgres\n- Ship it";
+        assert_eq!(summary_tldr(bullets).as_deref(), Some("Use Postgres"));
+        assert_eq!(summary_tldr("  \n### Only a heading\n"), None);
+        assert_eq!(summary_tldr(""), None);
+    }
+
+    #[test]
+    fn meetings_are_listed_newest_first_with_their_gist() {
+        let mut review = meeting(
+            "m2",
+            "Design review",
+            95,
+            vec![
+                item("DEC-1", ItemKind::Decision, "Use OIDC", Lifecycle::Active),
+                item(
+                    "DEC-2",
+                    ItemKind::Decision,
+                    "Use SAML",
+                    Lifecycle::Superseded,
+                ),
+                item(
+                    "Q-1",
+                    ItemKind::OpenQuestion,
+                    "Who signs off?",
+                    Lifecycle::Active,
+                ),
+            ],
+        );
+        review.summary = Some("**TL;DR:** We picked OIDC.\n\n### Decisions\n\n- Use OIDC\n".into());
+        let kickoff = meeting("m1", "Kickoff", 10, vec![]);
+        let doc = brief(&[kickoff, review], &[], "");
+        let m = section(&doc, "Meetings (2)");
+        assert!(m.contains(
+            "### Design review — day 95\n\nWe picked OIDC.\n\n1 decision · 1 open question\n"
+        ));
+        assert!(m.contains("### Kickoff — day 10\n\n_No summary yet._\n"));
+        assert!(m.find("Design review").unwrap() < m.find("Kickoff").unwrap());
+
+        let overview = project_overview(&BriefInput {
+            project: "",
+            date: "",
+            now_ms: 100 * DAY_MS,
+            instructions: "",
+            memory: &[],
+            meetings: &[meeting("m1", "Kickoff", 10, vec![])],
+            manual: &[],
+        });
+        assert_eq!(overview.meetings[0].tldr, None);
+    }
+
+    #[test]
+    fn empty_sections_are_left_out_but_open_ones_say_so() {
+        let doc = brief(&[], &[], "   ");
+        assert!(doc.starts_with(
+            "# Acme — project brief\n\n\
+             _Updated day 100 · 0 meetings · 0 open commitments · 0 open questions_\n"
+        ));
+        assert!(doc.contains("## Open commitments (0)\n\nNothing open.\n"));
+        assert!(doc.contains("## Open questions (0)\n\nNothing open.\n"));
+        for gone in [
+            "Instructions",
+            "Recent decisions",
+            "Active risks",
+            "Meetings",
+            "Knowledge",
+        ] {
+            assert!(!doc.contains(&format!("## {gone}")), "{gone}");
+        }
+    }
+
+    #[test]
+    fn meeting_knowledge_not_yet_kept_is_offered() {
+        let mut req = item(
+            "REQ-1",
+            ItemKind::Requirement,
+            "EU data only",
+            Lifecycle::Active,
+        );
+        req.source_refs = vec!["Mm1:T4".into()];
+        let mut con = item(
+            "CON-1",
+            ItemKind::Constraint,
+            "Budget is fixed",
+            Lifecycle::Active,
+        );
+        con.status = EpistemicStatus::Inferred;
+        let meetings = [meeting(
+            "m1",
+            "Kickoff",
+            90,
+            vec![
+                req,
+                con,
+                item("FACT-1", ItemKind::Fact, "Runs in Azure", Lifecycle::Active),
+                item("FACT-2", ItemKind::Fact, "Old host", Lifecycle::Withdrawn),
+                item("COM-1", ItemKind::Commitment, "Send it", Lifecycle::Active),
+            ],
+        )];
+        let memory = [memory("fact", "runs in  azure.", None, "x")];
+        let overview = project_overview(&BriefInput {
+            project: "",
+            date: "",
+            now_ms: 100 * DAY_MS,
+            instructions: "",
+            memory: &memory,
+            meetings: &meetings,
+            manual: &[],
+        });
+        let got: Vec<(&str, &str, &str)> = overview
+            .from_meetings
+            .iter()
+            .map(|c| {
+                (
+                    c.item.text.as_str(),
+                    c.knowledge_kind.as_str(),
+                    c.status.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("EU data only", "requirement", "stated"),
+                ("Budget is fixed", "requirement", "inferred"),
+            ],
+            "kept and withdrawn items and commitments are left out"
+        );
+        let p = &overview.from_meetings[0].provenance[0];
+        assert_eq!(
+            (p.source_ref.as_str(), p.label.as_str()),
+            ("Mm1:T4", "Kickoff, day 90")
         );
     }
 }

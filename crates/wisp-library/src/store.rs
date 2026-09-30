@@ -883,6 +883,17 @@ impl Library {
         Ok(n > 0)
     }
 
+    /// The summaries of a project's meetings, by meeting id. Meetings without one are left out.
+    pub fn project_summaries(&self, project_id: &str) -> Result<HashMap<String, String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, summary FROM meeting WHERE project_id = ?1 AND summary IS NOT NULL",
+        )?;
+        let rows = stmt
+            .query_map([project_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<HashMap<String, String>>>()?;
+        Ok(rows)
+    }
+
     /// Number of meetings stored.
     pub fn count(&self) -> Result<i64> {
         Ok(self
@@ -1169,6 +1180,17 @@ mod tests {
             Some("**TL;DR** Ship it."),
             "a re-save without a summary keeps the stored one"
         );
+
+        lib.create_project("p", "P", 0).unwrap();
+        lib.save_note("m2", &meta("M2"), 0, &segs).unwrap();
+        lib.save_note("m3", &meta("M3"), 0, &segs).unwrap();
+        for m in ["m1", "m2"] {
+            lib.set_meeting_project(m, Some("p")).unwrap();
+        }
+        lib.set_summary("m3", "not in the project").unwrap();
+        let by_id = lib.project_summaries("p").unwrap();
+        assert_eq!(by_id.len(), 1, "m2 has no summary, m3 is elsewhere");
+        assert_eq!(by_id["m1"], "**TL;DR** Ship it.");
 
         assert!(lib.set_summary("m1", " ").unwrap());
         assert_eq!(lib.get_note("m1").unwrap().unwrap().0.summary, None);

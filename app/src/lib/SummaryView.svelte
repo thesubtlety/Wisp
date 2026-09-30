@@ -3,6 +3,7 @@
   // over the meeting's state. The result is stored on the meeting and handed back via `onSummary`.
   import { i18n } from "$lib/i18n.svelte";
   import { summarizeMeeting } from "$lib/intel.svelte";
+  import Markdown from "$lib/Markdown.svelte";
 
   let {
     meetingId,
@@ -35,39 +36,7 @@
       busy = false;
     }
   }
-
-  type Span = { text: string; bold: boolean };
-  type Block = { kind: "h" | "p"; spans: Span[] } | { kind: "ul"; items: Span[][] };
-
-  /** `**bold**` runs as spans; everything else is plain text (never HTML). */
-  function spans(line: string): Span[] {
-    return line
-      .split(/\*\*(.+?)\*\*/)
-      .map((text, i) => ({ text, bold: i % 2 === 1 }))
-      .filter((s) => s.text);
-  }
-
-  /** Headings, bullet lists and paragraphs: enough for the summaries Wisp writes. */
-  function parse(md: string): Block[] {
-    const blocks: Block[] = [];
-    for (const raw of md.split("\n")) {
-      const line = raw.trim();
-      const last = blocks[blocks.length - 1];
-      if (!line) continue;
-      const h = /^#{1,6}\s+(.*)$/.exec(line);
-      const li = /^[-*]\s+(.*)$/.exec(line);
-      if (h) blocks.push({ kind: "h", spans: spans(h[1]) });
-      else if (li && last?.kind === "ul") last.items.push(spans(li[1]));
-      else if (li) blocks.push({ kind: "ul", items: [spans(li[1])] });
-      else blocks.push({ kind: "p", spans: spans(line) });
-    }
-    return blocks;
-  }
-
-  const blocks = $derived(parse(summary));
 </script>
-
-{#snippet text(parts: Span[])}{#each parts as s, i (i)}{#if s.bold}<strong>{s.text}</strong>{:else}{s.text}{/if}{/each}{/snippet}
 
 <div class="summary-view">
   <div class="head">
@@ -78,19 +47,7 @@
   </div>
   {#if error}<p class="error">{i18n.t.intel.summaryFailed(error)}</p>{/if}
   {#if summary}
-    <div class="md">
-      {#each blocks as b, i (i)}
-        {#if b.kind === "h"}
-          <h4>{@render text(b.spans)}</h4>
-        {:else if b.kind === "ul"}
-          <ul>
-            {#each b.items as item, j (j)}<li>{@render text(item)}</li>{/each}
-          </ul>
-        {:else}
-          <p>{@render text(b.spans)}</p>
-        {/if}
-      {/each}
-    </div>
+    <Markdown md={summary} />
   {:else if !busy}
     <p class="note">{i18n.t.intel.summaryEmpty}</p>
   {/if}
@@ -145,30 +102,5 @@
     margin: 0;
     font-size: 12px;
     color: var(--danger, #c0392b);
-  }
-
-  .md {
-    font-size: 13.5px;
-    line-height: 1.6;
-    color: var(--text);
-    user-select: text;
-  }
-
-  .md h4 {
-    margin: 12px 0 4px;
-    font-size: 11.5px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--muted);
-  }
-
-  .md p {
-    margin: 0 0 6px;
-  }
-
-  .md ul {
-    margin: 0;
-    padding-left: 18px;
   }
 </style>
