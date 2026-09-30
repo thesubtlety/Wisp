@@ -283,6 +283,8 @@ pub(crate) mod tests {
                      ALTER TABLE llm_call DROP COLUMN cache_write_tokens;
                      ALTER TABLE llm_call DROP COLUMN cost_usd;
                      ALTER TABLE llm_call DROP COLUMN model_reported;
+                     DROP TABLE prompt_run;
+                     DROP TABLE prompt;
                      PRAGMA user_version = 9;",
                 )
                 .unwrap();
@@ -298,7 +300,7 @@ pub(crate) mod tests {
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 10);
+        assert_eq!(version, 11);
     }
 
     #[test]

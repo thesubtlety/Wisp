@@ -22,6 +22,7 @@ pub mod meeting;
 pub mod model;
 pub mod params;
 pub mod perf;
+pub mod prompts;
 pub mod speakers;
 pub mod task;
 pub mod transcript;

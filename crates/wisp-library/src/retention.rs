@@ -522,6 +522,8 @@ impl Library {
             tx.execute("DELETE FROM llm_call WHERE meeting_id = ?1", [id])?;
             // People's names go with the transcript that labelled them.
             tx.execute("DELETE FROM speaker_name WHERE meeting_id = ?1", [id])?;
+            // Prompt outputs quote the transcript.
+            tx.execute("DELETE FROM prompt_run WHERE meeting_id = ?1", [id])?;
             tx.execute(
                 "UPDATE meeting SET transcript_pruned_at_ms = ?2, segment_count = 0 WHERE id = ?1",
                 rusqlite::params![id, now_ms],
@@ -1101,6 +1103,7 @@ mod tests {
             ("state_op", q("SELECT count(*) FROM state_op WHERE meeting_id = ?1", meeting)),
             ("candidate_log", q("SELECT count(*) FROM candidate_log WHERE meeting_id = ?1", meeting)),
             ("llm_call", q("SELECT count(*) FROM llm_call WHERE meeting_id = ?1", meeting)),
+            ("prompt_run", q("SELECT count(*) FROM prompt_run WHERE meeting_id = ?1", meeting)),
             ("source", q("SELECT count(*) FROM source WHERE project_id = ?1", project)),
             ("source_chunk", q("SELECT count(*) FROM source_chunk c JOIN source s ON s.id = c.source_id WHERE s.project_id = ?1", project)),
             ("project_memory", q("SELECT count(*) FROM project_memory WHERE project_id = ?1", project)),
@@ -1130,6 +1133,8 @@ mod tests {
         )
         .unwrap();
         lib.insert_llm_call(&crate::llm_log::tests::call(T0, Some("m1")))
+            .unwrap();
+        lib.insert_prompt_run(&crate::prompts::tests::run("m1", T0))
             .unwrap();
         lib.add_memory(
             "p",
@@ -1214,6 +1219,7 @@ mod tests {
             "state_op",
             "candidate_log",
             "llm_call",
+            "prompt_run",
         ] {
             assert_eq!(
                 fp.iter().find(|(t, _)| *t == table).unwrap().1,
