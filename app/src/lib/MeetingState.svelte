@@ -2,20 +2,24 @@
   // A meeting's structured state, grouped for reading: decisions, commitments, open questions,
   // risks, requirements, conflicts, then facts; all collapsed at first. Superseded and withdrawn items sit
   // behind a toggle. Each item's evidence shows as small chips; a chip jumps to its transcript line
-  // when the host can show it (`onRef`).
+  // when the host can show it (`onRef`). With `onEdit`, live items get quiet hand-edit actions.
   import { i18n } from "$lib/i18n.svelte";
-  import type { ItemKind, StateItem } from "$lib/intel.svelte";
+  import type { ItemChange, ItemKind, StateItem } from "$lib/intel.svelte";
+  import EditableItem from "$lib/EditableItem.svelte";
 
   let {
     items,
     refLabel,
     onRef,
+    onEdit,
   }: {
     items: StateItem[];
     /** A short label for an evidence ref ("3:04"), or null when the host can't show that line. */
     refLabel?: (ref: string) => string | null;
     /** Shows the line an evidence ref points at. */
     onRef?: (ref: string) => void;
+    /** Applies a hand change to an item. Returns an error message, or "" on success. */
+    onEdit?: (item: StateItem, change: ItemChange) => Promise<string>;
   } = $props();
 
   type Section = { key: string; kinds: ItemKind[] };
@@ -78,7 +82,24 @@
 </script>
 
 {#snippet row(item: StateItem, primary: ItemKind | null)}
-  <div class="item" class:muted={item.lifecycle === "resolved"} class:gone={isChanged(item)}>
+  {#if onEdit && !isChanged(item)}
+    <div class="item editable" class:muted={item.lifecycle === "resolved"}>
+      <EditableItem
+        {item}
+        onChange={(change) => onEdit(item, change)}
+        onDelete={() => onEdit(item, { lifecycle: "withdrawn" })}
+      >
+        {@render body(item, primary)}
+      </EditableItem>
+    </div>
+  {:else}
+    <div class="item" class:muted={item.lifecycle === "resolved"} class:gone={isChanged(item)}>
+      {@render body(item, primary)}
+    </div>
+  {/if}
+{/snippet}
+
+{#snippet body(item: StateItem, primary: ItemKind | null)}
     <p class="itext">{item.text}</p>
     <p class="imeta">
       {#if primary && item.kind !== primary}<span class="tag">{i18n.t.intel.kinds[item.kind]}</span>{/if}
@@ -96,7 +117,6 @@
       {/each}
       <span class="iid">{item.id}</span>
     </p>
-  </div>
 {/snippet}
 
 <div class="mstate">
@@ -166,6 +186,10 @@
   .item.gone .itext {
     color: var(--muted);
     text-decoration: line-through;
+  }
+
+  .editable .itext {
+    padding-right: 28px;
   }
 
   .itext {

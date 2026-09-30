@@ -101,6 +101,43 @@ export type FollowUp = {
 };
 
 export type Project = { id: string; name: string; created_at_ms: number };
+
+/** A hand change to an item: fields left out stay; an empty owner or due clears it. */
+export type ItemChange = {
+  text?: string;
+  owner?: string;
+  due?: string;
+  lifecycle?: StateItem["lifecycle"];
+};
+/** An item the user added to a project by hand. */
+export type ProjectItem = {
+  id: string;
+  projectId: string;
+  kind: ItemKind;
+  text: string;
+  owner: string | null;
+  due: string | null;
+  lifecycle: StateItem["lifecycle"];
+};
+/** One item of a project's overview: from a meeting's state (`meeting`), or added by hand (`manualId`). */
+export type OverviewItem = {
+  kind: ItemKind;
+  text: string;
+  owner: string | null;
+  due: string | null;
+  lifecycle: StateItem["lifecycle"];
+  meeting: { id: string; title: string; when: string; startedAtMs: number; itemId: string } | null;
+  manualId: string | null;
+};
+export type ProjectOverview = {
+  commitments: OverviewItem[];
+  openQuestions: OverviewItem[];
+  decisions: OverviewItem[];
+  risks: OverviewItem[];
+  done: OverviewItem[];
+};
+/** Kinds whose items can be marked done. */
+export const RESOLVABLE: ItemKind[] = ["commitment", "task_candidate", "open_question", "risk"];
 export type ProvenanceRef = { sourceRef: string; label: string; sha256: string };
 export type MemoryItem = {
   id: number;
