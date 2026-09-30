@@ -128,6 +128,17 @@ pub(crate) fn begin(app: &AppHandle, project_id: Option<String>, label: Option<S
     set_shortcut(app, true);
 }
 
+/// The live meeting moved to another project: screenshots from now on are filed there. Ones
+/// already attached stay with the project they were filed under.
+pub(crate) fn set_project(app: &AppHandle, project_id: Option<String>) {
+    let state = app.state::<AppState>();
+    if let Ok(mut meeting) = state.intel.context.meeting.lock() {
+        if let Some(meeting) = meeting.as_mut() {
+            meeting.project_id = project_id;
+        }
+    };
+}
+
 /// The meeting stopped: the capture shortcut goes; pasting and importing still work.
 pub(crate) fn end(app: &AppHandle) {
     set_shortcut(app, false);
