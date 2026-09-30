@@ -160,12 +160,8 @@ fn resolve_assist_target(
     model: &str,
 ) -> Result<(AssistTarget, AssistParams), String> {
     if provider_id == SUBSCRIPTION_PROVIDER {
-        let context_tokens = match crate::reasoning::local_only_context(state) {
-            Some(window) => window.unwrap_or(LOCAL_CONTEXT_TOKENS),
-            None => SUBSCRIPTION_CONTEXT_TOKENS,
-        };
         let assist = AssistParams {
-            context_tokens: Some(context_tokens),
+            context_tokens: Some(reasoning_context_tokens(state)),
             ..AssistParams::default()
         };
         return Ok((
@@ -203,6 +199,35 @@ fn resolve_assist_target(
         audit: crate::audit::sink(state, crate::audit::live_meeting(state)),
     };
     Ok((target, assist))
+}
+
+/// The context window (tokens) a call on the reasoning backend may fill: the local model's when it
+/// is the only backend, else the subscription CLIs' (far larger).
+pub(crate) fn reasoning_context_tokens(state: &AppState) -> u32 {
+    match crate::reasoning::local_only_context(state) {
+        Some(window) => window.unwrap_or(LOCAL_CONTEXT_TOKENS),
+        None => SUBSCRIPTION_CONTEXT_TOKENS,
+    }
+}
+
+/// Runs the instruction `system` over `transcript` on a reasoning backend, as the subscription
+/// assist does: one `{ "text" }` call, or map-reduce when the transcript overflows `context_tokens`.
+pub(crate) fn run_on_reasoning(
+    backend: Arc<dyn ReasoningBackend>,
+    system: &str,
+    transcript: &str,
+    context_tokens: u32,
+) -> Result<String, String> {
+    let assist = AssistParams {
+        context_tokens: Some(context_tokens),
+        ..AssistParams::default()
+    };
+    run_assist(
+        &AssistTarget::Subscription(backend),
+        system,
+        transcript,
+        &assist,
+    )
 }
 
 /// The key to send: the saved one, or none for an endpoint on this machine (Ollama, LM Studio),

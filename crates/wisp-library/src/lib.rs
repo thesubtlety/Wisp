@@ -12,6 +12,7 @@
 mod embed;
 mod llm_log;
 mod memory;
+mod prompts;
 mod record;
 mod retention;
 mod retrieve;
@@ -22,6 +23,7 @@ mod store;
 pub use embed::Embedder;
 pub use llm_log::{LlmCall, LlmTotals};
 pub use memory::{MemoryEntry, MemoryInput, ProvenanceRef};
+pub use prompts::{Prompt, PromptRun};
 pub use record::{Note, NoteSummary, Project, SearchHit, Segment, Source};
 pub use retention::{
     PruneReport, RetentionPolicy, SourceInput, SourceKind, Upsert, DEFAULT_TEMP_SOURCE_DAYS,

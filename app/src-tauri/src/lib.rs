@@ -67,6 +67,7 @@ mod dictation;
 mod intel;
 mod meeting;
 mod permissions;
+mod prompts;
 mod reasoning;
 mod retention;
 mod tray;
@@ -4615,6 +4616,15 @@ pub fn run() {
             intel::get_project_instructions,
             intel::set_project_instructions,
             reasoning::suggest_title,
+            prompts::list_prompts,
+            prompts::create_prompt,
+            prompts::update_prompt,
+            prompts::delete_prompt,
+            prompts::reset_prompt,
+            prompts::run_prompt,
+            prompts::list_prompt_runs,
+            prompts::delete_prompt_run,
+            prompts::save_prompt_output,
             intel::rename_note,
             intel::set_note_project,
             intel::intel_learning_propose,
