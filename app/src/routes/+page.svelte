@@ -847,10 +847,14 @@
   // save use it. A short notice confirms the switch.
   let projectNoticeTimer: ReturnType<typeof setTimeout> | undefined;
   async function pickProject(id: string) {
-    selectProject(id);
-    if (!running) return;
+    if (!running) {
+      selectProject(id);
+      return;
+    }
     try {
+      // Switch the analysis first, so a failure leaves save and analysis on the same project.
       await invoke<boolean>("intel_set_project", { projectId: id || null });
+      selectProject(id);
       const name = intel.projects.find((p) => p.id === id)?.name ?? i18n.t.intel.noProject;
       const text = i18n.t.intel.nowUsingProject(name);
       liveNotice = text;

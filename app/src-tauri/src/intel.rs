@@ -1690,13 +1690,18 @@ fn render_brief(state: &AppState, project_id: &str, offset_minutes: i32) -> Resu
 }
 
 /// A project's brief, for the preview.
+/// Off the main thread: the brief replays every meeting in the project.
 #[tauri::command]
-pub(crate) fn project_brief_markdown(
-    state: State<'_, AppState>,
+pub(crate) async fn project_brief_markdown(
+    app: AppHandle,
     project_id: String,
     offset_minutes: i32,
 ) -> Result<String, String> {
-    render_brief(&state, &project_id, offset_minutes)
+    tauri::async_runtime::spawn_blocking(move || {
+        render_brief(&app.state::<AppState>(), &project_id, offset_minutes)
+    })
+    .await
+    .map_err(|e| format!("brief task failed: {e}"))?
 }
 
 /// Saves the project brief to a Markdown file the user picks, like [`intel_export_save`]. Returns

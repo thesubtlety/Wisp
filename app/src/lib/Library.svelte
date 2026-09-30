@@ -741,8 +741,9 @@
         when={fmtDate(detail.meeting.started_at_ms)}
         summary={detail.meeting.summary ?? ""}
         hasState={stateItems.length > 0}
-        onSummary={(md) => {
-          if (detail) detail.meeting.summary = md;
+        onSummary={(md, id) => {
+          // Only the meeting it was made for: the user may have opened another meanwhile.
+          if (detail && detail.meeting.id === id) detail.meeting.summary = md;
         }}
       />
     {:else}

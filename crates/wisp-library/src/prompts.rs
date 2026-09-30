@@ -175,10 +175,14 @@ impl Library {
 
     /// Stores a run's output for a saved meeting. Returns its row id. Fails if the meeting is not
     /// saved.
+    /// Stores a run. Nothing is stored (id 0) when the meeting is gone or its transcript was pruned
+    /// while the run was in flight: the output quotes the transcript and must not outlive it.
     pub fn insert_prompt_run(&self, run: &PromptRun) -> Result<i64> {
-        self.conn.execute(
+        let n = self.conn.execute(
             "INSERT INTO prompt_run (meeting_id, prompt_name, speaker, output, backend, at_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6
+             WHERE EXISTS (SELECT 1 FROM meeting
+                           WHERE id = ?1 AND transcript_pruned_at_ms IS NULL)",
             rusqlite::params![
                 run.meeting_id,
                 run.prompt_name,
@@ -188,7 +192,11 @@ impl Library {
                 run.at_ms
             ],
         )?;
-        Ok(self.conn.last_insert_rowid())
+        Ok(if n == 0 {
+            0
+        } else {
+            self.conn.last_insert_rowid()
+        })
     }
 
     /// A meeting's stored runs, newest first.
@@ -261,6 +269,20 @@ pub(crate) fn write_runs(conn: &Connection, runs: &[PromptRun]) -> Result<()> {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    #[test]
+    fn a_run_is_not_stored_for_a_pruned_or_missing_meeting() {
+        let lib = library_with_meeting();
+        lib.conn
+            .execute(
+                "UPDATE meeting SET transcript_pruned_at_ms = 1 WHERE id = 'm1'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(lib.insert_prompt_run(&run("m1", 10)).unwrap(), 0);
+        assert_eq!(lib.insert_prompt_run(&run("gone", 10)).unwrap(), 0);
+        assert!(lib.prompt_runs("m1").unwrap().is_empty());
+    }
+
     use std::path::Path;
     use std::time::Duration;
 
@@ -381,8 +403,9 @@ pub(crate) mod tests {
         assert_eq!(runs[1].speaker.as_deref(), Some("Alice"));
         assert!(lib.delete_prompt_run(a).unwrap());
         assert!(!lib.delete_prompt_run(a).unwrap());
-        assert!(
-            lib.insert_prompt_run(&run("unsaved", 1)).is_err(),
+        assert_eq!(
+            lib.insert_prompt_run(&run("unsaved", 1)).unwrap(),
+            0,
             "a run needs a saved meeting"
         );
     }

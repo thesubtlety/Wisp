@@ -17,7 +17,7 @@
     summary: string;
     /** Whether the meeting has state; without it the summary comes from the transcript's end. */
     hasState: boolean;
-    onSummary: (markdown: string) => void;
+    onSummary: (markdown: string, meetingId: string) => void;
   } = $props();
 
   let busy = $state(false);
@@ -27,7 +27,8 @@
     busy = true;
     error = "";
     try {
-      onSummary((await summarizeMeeting(meetingId, when)).markdown);
+      const id = meetingId;
+      onSummary((await summarizeMeeting(id, when)).markdown, id);
     } catch (e) {
       error = String(e);
     } finally {
