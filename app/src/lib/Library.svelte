@@ -12,6 +12,7 @@
   import MeetingState from "$lib/MeetingState.svelte";
   import MeetingExports from "$lib/MeetingExports.svelte";
   import SummaryView from "$lib/SummaryView.svelte";
+  import PromptRunner from "$lib/PromptRunner.svelte";
   import { copyText } from "$lib/clipboard";
 
   // "New meeting in this project": the page switches to Live with the project selected.
@@ -120,7 +121,17 @@
 
   // The meeting page's tabs: its transcript, its structured state, and its summary. A state
   // item's evidence chip jumps to (and highlights) its transcript line.
-  let detailTab = $state<"transcript" | "state" | "summary">("transcript");
+  let detailTab = $state<"transcript" | "state" | "summary" | "prompts">("transcript");
+  // Who spoke, as the prompt library names them ("You", a given name, "Speaker 2", "Them").
+  const meetingSpeakers = $derived.by(() => {
+    const seen = new Set<string>();
+    for (const seg of detail?.segments ?? []) {
+      const named = seg.speaker !== null ? detail?.speakerNames[seg.speaker] : undefined;
+      if (seg.source === "mic") seen.add(named || i18n.t.library.you);
+      else seen.add(seg.speaker !== null ? diarizedLabel(seg.speaker) : i18n.t.library.them);
+    }
+    return [...seen];
+  });
   let stateItems = $state<StateItem[]>([]);
   let highlightIdx = $state<number | null>(null);
   let shownMeetingId = "";
@@ -704,7 +715,7 @@
     </div>
 
     <div class="detail-tabs" role="tablist">
-      {#each [["transcript", i18n.t.library.tabTranscript], ["state", i18n.t.library.tabState], ["summary", i18n.t.library.tabSummary]] as const as [tab, label] (tab)}
+      {#each [["transcript", i18n.t.library.tabTranscript], ["state", i18n.t.library.tabState], ["summary", i18n.t.library.tabSummary], ["prompts", i18n.t.prompts.tab]] as const as [tab, label] (tab)}
         <button role="tab" aria-selected={detailTab === tab} class:on={detailTab === tab} onclick={() => (detailTab = tab)}
           >{label}{#if tab === "state" && stateItems.length}<span class="tab-count">{stateItems.length}</span>{/if}</button
         >
@@ -717,6 +728,13 @@
       {:else}
         <p class="move-note">{i18n.t.library.stateNone}</p>
       {/if}
+    {:else if detailTab === "prompts"}
+      <PromptRunner
+        meetingId={detail.meeting.id}
+        speakers={meetingSpeakers}
+        title={detail.meeting.title}
+        date={fmtDate(detail.meeting.started_at_ms)}
+      />
     {:else if detailTab === "summary"}
       <SummaryView
         meetingId={detail.meeting.id}

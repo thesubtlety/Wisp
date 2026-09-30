@@ -150,6 +150,8 @@ export const zhHans: Messages = {
   },
 
   prompts: {
+    runSaved: "运行已保存的提示词…",
+    tab: "提示词",
     prompt: "提示词",
     speaker: "发言人",
     chooseSpeaker: "选择发言人",

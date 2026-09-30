@@ -150,6 +150,8 @@ export const zhHant: Messages = {
   },
 
   prompts: {
+    runSaved: "執行已儲存的提示詞…",
+    tab: "提示詞",
     prompt: "提示詞",
     speaker: "發言人",
     chooseSpeaker: "選擇發言人",

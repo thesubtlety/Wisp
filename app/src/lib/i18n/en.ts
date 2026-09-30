@@ -163,6 +163,8 @@ export const en = {
 
   // Prompt library: saved prompts run over a meeting's transcript.
   prompts: {
+    runSaved: "Run a saved prompt…",
+    tab: "Prompts",
     prompt: "Prompt",
     speaker: "Speaker",
     chooseSpeaker: "Choose a speaker",
