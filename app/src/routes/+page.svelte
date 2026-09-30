@@ -833,10 +833,32 @@
     if (intelEnabled) loadProjects();
   });
   async function submitNewProject() {
-    newProjectError = await createProject(newProjectName);
+    const name = newProjectName.trim();
+    newProjectError = await createProject(name, false);
     if (!newProjectError) {
       newProjectOpen = false;
       newProjectName = "";
+      const created = intel.projects.find((p) => p.name === name);
+      if (created) await pickProject(created.id);
+    }
+  }
+  // Picking a project mid-meeting moves the live meeting there: later passes, screenshots and the
+  // save use it. A short notice confirms the switch.
+  let projectNoticeTimer: ReturnType<typeof setTimeout> | undefined;
+  async function pickProject(id: string) {
+    selectProject(id);
+    if (!running) return;
+    try {
+      await invoke<boolean>("intel_set_project", { projectId: id || null });
+      const name = intel.projects.find((p) => p.id === id)?.name ?? i18n.t.intel.noProject;
+      const text = i18n.t.intel.nowUsingProject(name);
+      liveNotice = text;
+      clearTimeout(projectNoticeTimer);
+      projectNoticeTimer = setTimeout(() => {
+        if (liveNotice === text) liveNotice = "";
+      }, 4000);
+    } catch (e) {
+      error = String(e);
     }
   }
   $effect(() => {
@@ -2383,13 +2405,12 @@
                   <select
                     aria-label={i18n.t.intel.project}
                     value={intel.projectId}
-                    disabled={running}
                     onchange={(e) => {
                       const v = e.currentTarget.value;
                       if (v === "__new") {
                         e.currentTarget.value = intel.projectId;
                         newProjectOpen = true;
-                      } else selectProject(v);
+                      } else pickProject(v);
                     }}
                   >
                     <option value="">{i18n.t.intel.noProject}</option>

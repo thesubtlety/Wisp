@@ -53,6 +53,26 @@ export const en = {
     emptyProject: "No meetings here yet.",
     movedKeepsKnowledge: (from: string): string =>
       `Moved. Knowledge already learned from this meeting stays in ${from}.`,
+    sharedKnowledgeStays: (n: number, from: string): string =>
+      n === 1
+        ? `1 knowledge item also cites other meetings or sources, so it stays in ${from}.`
+        : `${n} knowledge items also cite other meetings or sources, so they stay in ${from}.`,
+    moveKnowledgeTitle: "Move knowledge too?",
+    moveKnowledgeConfirm: (n: number, to: string): string =>
+      n === 1
+        ? `Also move its 1 knowledge item to ${to}?`
+        : `Also move its ${n} knowledge items to ${to}?`,
+    moveKnowledge: "Move",
+    keepKnowledge: "Keep",
+    knowledgeMoved: (n: number, to: string): string =>
+      n === 1 ? `Moved, with 1 knowledge item, to ${to}.` : `Moved, with ${n} knowledge items, to ${to}.`,
+    projectBrief: "Project brief",
+    projectBriefHelp: "A one-page summary: instructions, knowledge, and open items across this project's meetings.",
+    briefLoading: "Building the brief…",
+    copy: "Copy",
+    copied: "Copied",
+    saveMd: "Save .md",
+    close: "Close",
     title: "Library",
     newNoteTitle: (date: string): string => `Note · ${date}`,
     searchPlaceholder: "Search notes…",
@@ -662,6 +682,7 @@ export const en = {
     },
     project: "Project",
     noProject: "No project",
+    nowUsingProject: (name: string): string => `Now using ${name}`,
     newProject: "New project…",
     projectName: "Project name",
     create: "Create",

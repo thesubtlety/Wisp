@@ -53,7 +53,86 @@ pub struct MemoryEntry {
     pub updated_at_ms: i64,
 }
 
+/// How a project's knowledge relates to one meeting: entries learned only from it, and entries
+/// that also cite other meetings or sources.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeetingKnowledge {
+    /// Entries whose evidence is all from the meeting. These can move with it.
+    pub exclusive: usize,
+    /// Entries citing the meeting and something else. These stay in the project.
+    pub shared: usize,
+}
+
+/// The meeting a `M<meeting>:T<segment>` ref points into, if it is one.
+fn ref_meeting(source_ref: &str) -> Option<&str> {
+    source_ref
+        .strip_prefix('M')?
+        .rsplit_once(":T")
+        .map(|(m, _)| m)
+}
+
+/// Whether `entry` cites `meeting_id` at all, and whether that is all it cites.
+fn cites(entry: &MemoryEntry, meeting_id: &str) -> (bool, bool) {
+    let from_meeting = entry.meeting_id.as_deref() == Some(meeting_id);
+    let refs_here = entry
+        .provenance
+        .iter()
+        .filter(|p| ref_meeting(&p.source_ref) == Some(meeting_id))
+        .count();
+    let related = from_meeting || refs_here > 0;
+    let only = related
+        && refs_here == entry.provenance.len()
+        && entry.meeting_id.as_deref().is_none_or(|m| m == meeting_id);
+    (related, only)
+}
+
 impl Library {
+    /// How `project_id`'s knowledge relates to `meeting_id` (see [`MeetingKnowledge`]).
+    pub fn meeting_knowledge(
+        &self,
+        meeting_id: &str,
+        project_id: &str,
+    ) -> Result<MeetingKnowledge> {
+        let mut out = MeetingKnowledge::default();
+        for entry in self.list_memory(project_id)? {
+            match cites(&entry, meeting_id) {
+                (true, true) => out.exclusive += 1,
+                (true, false) => out.shared += 1,
+                _ => {}
+            }
+        }
+        Ok(out)
+    }
+
+    /// Moves the knowledge learned only from `meeting_id` from one project to another. Entries that
+    /// also cite other meetings or sources stay where they are. Returns how many moved.
+    pub fn move_meeting_knowledge(
+        &self,
+        meeting_id: &str,
+        from_project: &str,
+        to_project: &str,
+    ) -> Result<usize> {
+        if from_project == to_project {
+            return Ok(0);
+        }
+        let ids: Vec<i64> = self
+            .list_memory(from_project)?
+            .into_iter()
+            .filter(|e| cites(e, meeting_id) == (true, true))
+            .map(|e| e.id)
+            .collect();
+        let tx = self.conn.unchecked_transaction()?;
+        for id in &ids {
+            tx.execute(
+                "UPDATE project_memory SET project_id = ?2 WHERE id = ?1",
+                rusqlite::params![id, to_project],
+            )?;
+        }
+        tx.commit()?;
+        Ok(ids.len())
+    }
+
     /// Stores accepted knowledge for a project. Returns its id.
     pub fn add_memory(&self, project_id: &str, input: &MemoryInput, now_ms: i64) -> Result<i64> {
         let provenance = serde_json::to_string(&input.provenance)
@@ -164,6 +243,95 @@ mod tests {
         assert!(
             lib.add_memory("nope", &input("x"), 0).is_err(),
             "project must exist"
+        );
+    }
+
+    fn cited(text: &str, refs: &[&str], meeting: Option<&str>) -> MemoryInput {
+        MemoryInput {
+            provenance: refs
+                .iter()
+                .map(|r| ProvenanceRef {
+                    source_ref: (*r).into(),
+                    label: "x".into(),
+                    sha256: "ab".repeat(32),
+                })
+                .collect(),
+            meeting_id: meeting.map(Into::into),
+            ..input(text)
+        }
+    }
+
+    #[test]
+    fn only_knowledge_learned_solely_from_the_meeting_moves_with_it() {
+        let lib = Library::open_in_memory().unwrap();
+        lib.create_project("a", "Acme", 0).unwrap();
+        lib.create_project("b", "Beta", 0).unwrap();
+        let only = lib
+            .add_memory(
+                "a",
+                &cited("Runs in Azure", &["Mm1:T4", "Mm1:T9"], Some("m1")),
+                1,
+            )
+            .unwrap();
+        let no_meeting_field = lib
+            .add_memory("a", &cited("EU only", &["Mm1:T2"], None), 1)
+            .unwrap();
+        lib.add_memory(
+            "a",
+            &cited("SSO via Okta", &["Mm1:T5", "Mm2:T1"], Some("m1")),
+            1,
+        )
+        .unwrap();
+        lib.add_memory(
+            "a",
+            &cited("Budget is fixed", &["Mm1:T6", "S3:C0"], Some("m1")),
+            1,
+        )
+        .unwrap();
+        lib.add_memory(
+            "a",
+            &cited("Sarah owns security", &["Mm2:T3"], Some("m2")),
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(
+            lib.meeting_knowledge("m1", "a").unwrap(),
+            MeetingKnowledge {
+                exclusive: 2,
+                shared: 2
+            }
+        );
+        assert_eq!(lib.move_meeting_knowledge("m1", "a", "b").unwrap(), 2);
+        let moved: Vec<i64> = lib.list_memory("b").unwrap().iter().map(|m| m.id).collect();
+        assert_eq!(moved, [only, no_meeting_field]);
+        let stayed: Vec<String> = lib
+            .list_memory("a")
+            .unwrap()
+            .into_iter()
+            .map(|m| m.text)
+            .collect();
+        assert_eq!(
+            stayed,
+            ["SSO via Okta", "Budget is fixed", "Sarah owns security"]
+        );
+        assert_eq!(
+            lib.meeting_knowledge("m1", "a").unwrap(),
+            MeetingKnowledge {
+                exclusive: 0,
+                shared: 2
+            }
+        );
+        assert_eq!(lib.move_meeting_knowledge("m1", "a", "b").unwrap(), 0);
+        assert_eq!(lib.move_meeting_knowledge("m1", "b", "b").unwrap(), 0);
+        assert!(
+            lib.move_meeting_knowledge("m1", "b", "nope").is_err(),
+            "the target project must exist"
+        );
+        assert_eq!(
+            lib.list_memory("b").unwrap().len(),
+            2,
+            "a failed move changes nothing"
         );
     }
 

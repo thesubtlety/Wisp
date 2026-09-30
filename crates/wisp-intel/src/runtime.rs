@@ -172,6 +172,14 @@ pub struct Finished {
     pub candidate_log: Vec<LogEntry>,
 }
 
+/// What a meeting's project gives every pass: retrieval scoped to it, its accepted knowledge, and
+/// the "About You" block with its instructions. See [`IntelRuntime::set_project`].
+pub struct ProjectContext {
+    pub retriever: Box<dyn Retriever>,
+    pub memory: Vec<wisp_library::MemoryEntry>,
+    pub focus: Option<String>,
+}
+
 enum Msg {
     Final {
         speaker: String,
@@ -192,6 +200,8 @@ enum Msg {
     SetScheduledEnd(Option<i64>),
     Pin(Snippet),
     Unpin(String),
+    /// The meeting moved to another project (or out of any).
+    SetProject(ProjectContext),
     Stop,
     /// Analyze whatever is still pending, then stop.
     Finish,
@@ -312,6 +322,12 @@ impl IntelRuntime {
     /// Drops pinned context by its ref (the user removed the screenshot).
     pub fn unpin(&self, ref_id: impl Into<String>) {
         let _ = self.tx.send(Msg::Unpin(ref_id.into()));
+    }
+
+    /// Switches the meeting to another project's context from the next pass on. The state so far
+    /// and pinned context stay.
+    pub fn set_project(&self, context: ProjectContext) {
+        let _ = self.tx.send(Msg::SetProject(context));
     }
 
     /// Records that the user dismissed a card, so the filter holds back repeats.
@@ -468,6 +484,11 @@ impl Worker {
                         self.pinned.push(snippet);
                     }
                     Msg::Unpin(ref_id) => self.pinned.retain(|p| p.ref_id != ref_id),
+                    Msg::SetProject(context) => {
+                        self.retriever = context.retriever;
+                        self.config.memory = context.memory;
+                        self.config.focus = context.focus;
+                    }
                     Msg::Stop => stop = true,
                     Msg::Finish => finish = true,
                 }
@@ -1119,6 +1140,73 @@ mod tests {
         );
         let ctx = backend.requests.lock().unwrap()[0].context.clone();
         assert!(ctx.contains("[D3:C0] spec.md, line 1\nEU only"));
+    }
+
+    #[test]
+    fn a_project_switch_reaches_the_next_pass() {
+        struct Fixed(&'static str);
+        impl Retriever for Fixed {
+            fn retrieve(&self, _text: &str) -> Vec<Snippet> {
+                vec![Snippet {
+                    ref_id: "S1:C0".into(),
+                    origin: wisp_library::SnippetOrigin::Source {
+                        source_id: 1,
+                        chunk_idx: 0,
+                        label: "doc.md".into(),
+                        line_start: Some(1),
+                    },
+                    text: self.0.into(),
+                    score: 0.0,
+                }]
+            }
+        }
+        let memory = |text: &str| wisp_library::MemoryEntry {
+            id: 1,
+            project_id: "p".into(),
+            kind: "fact".into(),
+            text: text.into(),
+            status: "stated".into(),
+            confidence: 0.9,
+            provenance: Vec::new(),
+            meeting_id: None,
+            created_at_ms: 0,
+            updated_at_ms: 0,
+        };
+        let backend = Arc::new(ScriptedBackend::with_responder("s", |_| {
+            Ok(json!({"ops": [], "candidates": []}))
+        }));
+        let (seen, on_update) = collect();
+        let rt = IntelRuntime::spawn(
+            backend.clone(),
+            Box::new(Fixed("Acme retrieval")),
+            RuntimeConfig {
+                policy: fast_policy(),
+                memory: vec![memory("Acme runs in Azure")],
+                focus: Some("Project: Acme".into()),
+                ..RuntimeConfig::default()
+            },
+            on_update,
+            Box::new(|| 0),
+        );
+        rt.push_final("Them", 0, "Enough words to cross the threshold.");
+        wait_for(&seen, 1);
+        rt.set_project(ProjectContext {
+            retriever: Box::new(Fixed("Beta retrieval")),
+            memory: vec![memory("Beta runs on premises")],
+            focus: Some("Project: Beta".into()),
+        });
+        rt.push_final("Them", 1000, "More words to cross the threshold again.");
+        wait_for(&seen, 2);
+        rt.stop();
+        let requests = backend.requests.lock().unwrap();
+        let first = &requests[0].context;
+        assert!(first.contains("Acme runs in Azure") && first.contains("Project: Acme"));
+        assert!(first.contains("Acme retrieval"));
+        let next = &requests[1].context;
+        assert!(next.contains("Beta runs on premises"), "new memory");
+        assert!(next.contains("Project: Beta"), "new about block");
+        assert!(next.contains("Beta retrieval"), "new retriever");
+        assert!(!next.contains("Acme"), "nothing from the old project");
     }
 
     #[test]

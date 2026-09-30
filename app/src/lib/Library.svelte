@@ -12,6 +12,7 @@
   import MeetingState from "$lib/MeetingState.svelte";
   import MeetingExports from "$lib/MeetingExports.svelte";
   import SummaryView from "$lib/SummaryView.svelte";
+  import { copyText } from "$lib/clipboard";
 
   // "New meeting in this project": the page switches to Live with the project selected.
   // Hidden while a session runs: switching projects then would refile the running meeting.
@@ -106,6 +107,16 @@
   let newProjectOpen = $state(false);
   let newProjectName = $state("");
   let moveNote = $state("");
+  // After a move: knowledge learned only from this meeting can follow it to the new project.
+  type KnowledgeMove = { id: string; from: string; to: string; count: number; shared: number };
+  let knowledgeMove = $state<KnowledgeMove | null>(null);
+  let knowledgeOpen = $state(false);
+
+  // The project brief: rendered by the backend, previewed read-only, copied or saved as .md.
+  let briefOpen = $state(false);
+  let briefText = $state("");
+  let briefError = $state("");
+  let briefCopied = $state(false);
 
   // The meeting page's tabs: its transcript, its structured state, and its summary. A state
   // item's evidence chip jumps to (and highlights) its transcript line.
@@ -227,16 +238,59 @@
   }
 
   // The selected project's knowledge, shown above its meetings.
-  $effect(() => {
-    const id = filterProject?.id;
-    memory = [];
-    if (!id) return;
+  function loadProjectMemory(id: string) {
     invoke<MemoryItem[]>("list_project_memory", { projectId: id })
       .then((m) => {
         if (projectFilter === id) memory = m;
       })
       .catch(() => {});
+  }
+
+  $effect(() => {
+    const id = filterProject?.id;
+    memory = [];
+    if (id) loadProjectMemory(id);
   });
+
+  // Local UTC offset in minutes east, so the brief's dates match the user's calendar.
+  const offsetMinutes = () => -new Date().getTimezoneOffset();
+
+  async function openBrief() {
+    const id = filterProject?.id;
+    if (!id) return;
+    briefText = "";
+    briefError = "";
+    briefCopied = false;
+    briefOpen = true;
+    try {
+      const text = await invoke<string>("project_brief_markdown", { projectId: id, offsetMinutes: offsetMinutes() });
+      if (projectFilter === id) briefText = text;
+    } catch (e) {
+      briefError = String(e);
+    }
+  }
+
+  async function copyBrief() {
+    await copyText(briefText);
+    briefCopied = true;
+    setTimeout(() => (briefCopied = false), 1500);
+  }
+
+  async function saveBrief() {
+    const project = filterProject;
+    if (!project) return;
+    const stamp = new Date().toISOString().slice(0, 10);
+    const safe = project.name.replace(/[\\/:*?"<>|]+/g, "-").trim() || "project";
+    try {
+      await invoke<boolean>("project_brief_save", {
+        projectId: project.id,
+        offsetMinutes: offsetMinutes(),
+        defaultName: `${safe}-brief-${stamp}`,
+      });
+    } catch (e) {
+      briefError = String(e);
+    }
+  }
 
   $effect(() => {
     const id = filterProject?.id;
@@ -339,14 +393,52 @@
       return;
     }
     const from = detail.meeting.project_id;
+    const id = detail.meeting.id;
     try {
-      await invoke<boolean>("set_note_project", { id: detail.meeting.id, projectId: projectId || null });
+      await invoke<boolean>("set_note_project", { id, projectId: projectId || null });
       detail.meeting.project_id = projectId || null;
-      moveNote = from ? i18n.t.library.movedKeepsKnowledge(projectName(from)) : "";
+      moveNote = "";
       await loadList();
     } catch (e) {
       error = String(e);
       if (select) select.value = from ?? "";
+      return;
+    }
+    if (!from || from === projectId) return;
+    // Knowledge needs a project, so moving out of all projects leaves it where it was learned.
+    if (!projectId) {
+      moveNote = i18n.t.library.movedKeepsKnowledge(projectName(from));
+      return;
+    }
+    try {
+      const k = await invoke<{ exclusive: number; shared: number }>("note_knowledge", { id, projectId: from });
+      if (k.exclusive > 0) {
+        knowledgeMove = { id, from, to: projectId, count: k.exclusive, shared: k.shared };
+        knowledgeOpen = true;
+      } else if (k.shared > 0) {
+        moveNote = i18n.t.library.sharedKnowledgeStays(k.shared, projectName(from));
+      }
+    } catch {
+      moveNote = i18n.t.library.movedKeepsKnowledge(projectName(from));
+    }
+  }
+
+  async function answerKnowledgeMove(move: boolean) {
+    const m = knowledgeMove;
+    knowledgeOpen = false;
+    knowledgeMove = null;
+    if (!m) return;
+    const stays = m.shared > 0 ? " " + i18n.t.library.sharedKnowledgeStays(m.shared, projectName(m.from)) : "";
+    if (!move) {
+      moveNote = i18n.t.library.movedKeepsKnowledge(projectName(m.from));
+      return;
+    }
+    try {
+      const n = await invoke<number>("move_note_knowledge", { id: m.id, fromProject: m.from, toProject: m.to });
+      moveNote = i18n.t.library.knowledgeMoved(n, projectName(m.to)) + stays;
+      if (filterProject && (filterProject.id === m.from || filterProject.id === m.to)) loadProjectMemory(filterProject.id);
+    } catch (e) {
+      error = String(e);
     }
   }
 
@@ -702,6 +794,9 @@
             title={i18n.t.library.instructionsHelp}
             onclick={() => ((instructionsDraft = instructions), (editingInstructions = true))}>{i18n.t.library.instructions}</button
           >
+          <button class="btn" title={i18n.t.library.projectBriefHelp} onclick={openBrief}
+            >{i18n.t.library.projectBrief}</button
+          >
           {#if onNewMeeting && !sessionRunning}
             <button class="btn primary" onclick={() => onNewMeeting(filterProject!.id)}>{i18n.t.library.newMeetingInProject}</button>
           {/if}
@@ -876,6 +971,38 @@
     </div>
   </Modal>
 
+  <Modal bind:open={knowledgeOpen} title={i18n.t.library.moveKnowledgeTitle}>
+    {#if knowledgeMove}
+      <p class="confirm-text">
+        {i18n.t.library.moveKnowledgeConfirm(knowledgeMove.count, projectName(knowledgeMove.to))}
+        {#if knowledgeMove.shared > 0}
+          {i18n.t.library.sharedKnowledgeStays(knowledgeMove.shared, projectName(knowledgeMove.from))}
+        {/if}
+      </p>
+    {/if}
+    <div class="confirm-actions">
+      <button class="btn" onclick={() => answerKnowledgeMove(false)}>{i18n.t.library.keepKnowledge}</button>
+      <button class="btn primary" onclick={() => answerKnowledgeMove(true)}>{i18n.t.library.moveKnowledge}</button>
+    </div>
+  </Modal>
+
+  <Modal bind:open={briefOpen} wide title={i18n.t.library.projectBrief}>
+    {#if briefError}
+      <div class="err">{briefError}</div>
+    {:else if !briefText}
+      <p class="confirm-text">{i18n.t.library.briefLoading}</p>
+    {:else}
+      <pre class="brief" aria-label={i18n.t.library.projectBrief}>{briefText}</pre>
+    {/if}
+    <div class="confirm-actions">
+      <button class="btn" onclick={() => (briefOpen = false)}>{i18n.t.library.close}</button>
+      <button class="btn" disabled={!briefText} onclick={copyBrief}
+        >{briefCopied ? i18n.t.library.copied : i18n.t.library.copy}</button
+      >
+      <button class="btn primary" disabled={!briefText} onclick={saveBrief}>{i18n.t.library.saveMd}</button>
+    </div>
+  </Modal>
+
   <Modal bind:open={shotConfirmOpen} title={i18n.t.library.deleteShotTitle}>
     <p class="confirm-text">{i18n.t.library.deleteShotConfirm}</p>
     <div class="confirm-actions">
@@ -955,6 +1082,18 @@
     border: 1px solid currentColor;
     opacity: 0.7;
     font-size: 0.75rem;
+  }
+  .brief {
+    max-height: 60vh;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-size: 0.85rem;
+    line-height: 1.45;
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: var(--surface);
+    margin: 0 0 12px;
   }
   .knowledge {
     font-size: 0.85rem;
