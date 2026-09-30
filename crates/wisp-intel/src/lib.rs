@@ -57,8 +57,8 @@ pub use analyze::{
 };
 pub use ask::{ask, ask_schema, prepare_ask, AskAnswer, AskInput, AskTurn, Citation};
 pub use brief::{
-    iso_date, project_brief, project_overview, BriefInput, BriefMeeting, ItemMeeting, OverviewItem,
-    ProjectOverview,
+    iso_date, item_counts, project_brief, project_overview, summary_tldr, BriefInput, BriefMeeting,
+    ItemMeeting, KnowledgeCandidate, MeetingGist, OverviewItem, ProjectOverview,
 };
 pub use edit::{
     append_user_edit, edit_manual_item, new_manual_item, original_texts, user_edit, EditError,

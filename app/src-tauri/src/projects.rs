@@ -52,8 +52,8 @@ pub(crate) fn edit_meeting_item(
     Ok(all_items(meeting))
 }
 
-/// What is live in a project across its meetings and hand-added items. Off the main thread: it
-/// replays every meeting in the project.
+/// What is live in a project across its meetings and hand-added items, each meeting's gist, and
+/// meeting knowledge not yet kept. Off the main thread: it replays every meeting in the project.
 #[tauri::command]
 pub(crate) async fn project_overview(
     app: AppHandle,
@@ -69,13 +69,16 @@ pub(crate) async fn project_overview(
         let manual = library
             .list_project_items(&project_id)
             .map_err(|e| e.to_string())?;
+        let memory = library
+            .list_memory(&project_id)
+            .map_err(|e| e.to_string())?;
         let meetings = brief_meetings(&library, &project_id, offset_minutes)?;
         Ok(overview(&BriefInput {
             project: "",
             date: "",
             now_ms: now_ms(),
             instructions: "",
-            memory: &[],
+            memory: &memory,
             meetings: &meetings,
             manual: &manual,
         }))

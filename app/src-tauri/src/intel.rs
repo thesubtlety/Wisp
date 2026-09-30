@@ -1690,6 +1690,9 @@ pub(crate) fn brief_meetings(
     project_id: &str,
     offset_minutes: i32,
 ) -> Result<Vec<BriefMeeting>, String> {
+    let mut summaries = library
+        .project_summaries(project_id)
+        .map_err(|e| e.to_string())?;
     Ok(library
         .list_notes()
         .map_err(|e| e.to_string())?
@@ -1703,6 +1706,7 @@ pub(crate) fn brief_meetings(
             BriefMeeting {
                 when: iso_date(n.started_at_ms, offset_minutes),
                 original_text: wisp_intel::original_texts(&n.id, &log),
+                summary: summaries.remove(&n.id),
                 id: n.id,
                 title: n.title,
                 started_at_ms: n.started_at_ms,

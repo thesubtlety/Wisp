@@ -6,7 +6,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { i18n } from "$lib/i18n.svelte";
   import EditableItem from "$lib/EditableItem.svelte";
-  import type { ItemChange, ItemKind, OverviewItem, ProjectOverview } from "$lib/intel.svelte";
+  import { summarizeMeeting, type ItemChange, type ItemKind, type OverviewItem, type ProjectOverview } from "$lib/intel.svelte";
 
   type Meeting = { id: string; title: string; started_at_ms: number };
 
@@ -27,6 +27,9 @@
   let error = $state("");
   // Sections start open, except Done.
   let closed = $state<Set<string>>(new Set(["done"]));
+  // Meetings being summarized from here, and the last summarize error.
+  let summarizing = $state<Set<string>>(new Set());
+  let summarizeError = $state("");
   // The section whose "Add" form is open, and its draft.
   let adding = $state<ItemKind | null>(null);
   let draft = $state({ text: "", owner: "", due: "" });
@@ -53,6 +56,23 @@
     adding = null;
     load(id);
   });
+
+  const gists = $derived(new Map((overview?.meetings ?? []).map((g) => [g.id, g])));
+
+  async function summarize(m: Meeting) {
+    summarizing = new Set(summarizing).add(m.id);
+    summarizeError = "";
+    try {
+      await summarizeMeeting(m.id, fmtDate(m.started_at_ms));
+      await load(projectId);
+    } catch (e) {
+      summarizeError = i18n.t.intel.summaryFailed(String(e));
+    } finally {
+      const next = new Set(summarizing);
+      next.delete(m.id);
+      summarizing = next;
+    }
+  }
 
   const sections = $derived(
     overview
@@ -206,10 +226,20 @@
     <section class="sec">
       {@render head("meetings", i18n.t.projects.recentMeetings, meetings.length, null)}
       {#if !closed.has("meetings")}
+        {#if summarizeError}<p class="err">{summarizeError}</p>{/if}
         {#each meetings.slice(0, RECENT_MEETINGS) as m (m.id)}
-          <button class="meeting" onclick={() => onOpenMeeting(m.id)}>
-            <span class="mt">{m.title}</span><span class="md">{fmtDate(m.started_at_ms)}</span>
-          </button>
+          {@const g = gists.get(m.id)}
+          <div class="meeting">
+            <button class="mopen" title={i18n.t.projects.openMeeting} onclick={() => onOpenMeeting(m.id)}>
+              <span class="mrow"><span class="mt">{m.title}</span><span class="md">{fmtDate(m.started_at_ms)}</span></span>
+              {#if g?.tldr}<span class="tldr" title={g.tldr}>{g.tldr}</span>{/if}
+            </button>
+            {#if g && !g.tldr}
+              <button class="link" disabled={summarizing.has(m.id)} onclick={() => summarize(m)}
+                >{summarizing.has(m.id) ? i18n.t.intel.summarizing : i18n.t.intel.summarize}</button
+              >
+            {/if}
+          </div>
         {:else}
           <p class="quiet">{i18n.t.projects.noMeetings}</p>
         {/each}
@@ -332,21 +362,60 @@
   }
   .meeting {
     display: flex;
-    justify-content: space-between;
-    gap: 12px;
-    width: 100%;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
     padding: 6px 0;
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  }
+  .mopen {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    width: 100%;
+    min-width: 0;
+    padding: 0;
     font: inherit;
     font-size: 13px;
     color: var(--text);
     text-align: left;
     background: none;
     border: 0;
-    border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
     cursor: pointer;
   }
-  .meeting:hover .mt {
+  .mrow {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    width: 100%;
+    min-width: 0;
+  }
+  .mopen:hover .mt {
     text-decoration: underline;
+  }
+  .tldr {
+    width: 100%;
+    font-size: 12.5px;
+    color: var(--muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .link {
+    font: inherit;
+    font-size: 12px;
+    color: var(--accent);
+    background: none;
+    border: 0;
+    padding: 0;
+    cursor: pointer;
+  }
+  .link:hover:not(:disabled) {
+    text-decoration: underline;
+  }
+  .link:disabled {
+    color: var(--muted);
+    cursor: default;
   }
   .mt {
     overflow: hidden;
