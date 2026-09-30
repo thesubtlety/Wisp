@@ -168,13 +168,13 @@ export const intel = $state({
   cards: [] as Card[],
   /** Cards shown since the Insights view was last open. */
   unseen: 0,
-  tab: "insights" as "insights" | "ask" | "state" | "review",
+  tab: "insights" as "insights" | "ask" | "state" | "review" | "summary",
   /** The just-saved meeting a post-call review can run on. */
   savedMeetingId: "",
   /** When the current live meeting started (epoch ms), for exports. */
   startedAt: 0,
-  /** The last export's outcome, shown next to its buttons. */
-  exportNote: "" as "" | "copied" | "saved" | `error:${string}`,
+  /** The just-saved meeting's summary, once made. */
+  summary: "",
   review: null as null | { followups: FollowUp[]; source: "model" | "state"; note: string | null },
   reviewBusy: false,
   reviewError: "",
@@ -265,38 +265,46 @@ export const removeContext = (sourceId: number) => attaching(() => invoke("remov
 let listening: Promise<unknown> | null = null;
 let listeningContext: Promise<unknown> | null = null;
 
-export type ExportKind = "record" | "packet" | "json";
+export type ExportKind = "summary" | "record" | "transcript" | "packet" | "json";
+export const EXPORT_KINDS: ExportKind[] = ["summary", "record", "transcript", "packet", "json"];
+
+/** Which meeting an export is of: `id` null means the live (or just-stopped, unsaved) one. `when`
+ *  is the display date; `title` overrides the stored one. */
+export type ExportTarget = { id: string | null; title: string | null; when: string };
 
 /** The live (or just-stopped) meeting while recording or when nothing was saved; else the saved one. */
-function exportArgs(kind: ExportKind, running: boolean, liveTitle: (when: string) => string) {
+export function liveExportTarget(running: boolean, liveTitle: (when: string) => string): ExportTarget {
   const when = new Date(intel.startedAt || Date.now()).toLocaleString();
   const id = !running && intel.savedMeetingId ? intel.savedMeetingId : null;
-  return { id, kind, title: id ? null : liveTitle(when), when };
+  return { id, title: id ? null : liveTitle(when), when };
 }
 
-/** Copies an export (the AI context packet, usually) to the clipboard. */
-export async function copyExport(kind: ExportKind, running: boolean, liveTitle: (when: string) => string) {
-  try {
-    const text = await invoke<string>("intel_export", exportArgs(kind, running, liveTitle));
-    await copyText(text);
-    intel.exportNote = "copied";
-  } catch (e) {
-    intel.exportNote = `error:${e}`;
-  }
+const EXPORT_FILE: Record<ExportKind, string> = {
+  summary: "summary",
+  record: "record",
+  transcript: "transcript",
+  packet: "context",
+  json: "state",
+};
+
+/** Copies a meeting export to the clipboard. */
+export async function copyMeetingExport(target: ExportTarget, kind: ExportKind) {
+  await copyText(await invoke<string>("intel_export", { ...target, kind }));
 }
 
-/** Saves an export to a file the user picks. */
-export async function saveExport(kind: ExportKind, running: boolean, liveTitle: (when: string) => string) {
-  try {
-    const stamp = new Date(intel.startedAt || Date.now()).toISOString().slice(0, 10);
-    const saved = await invoke<boolean>("intel_export_save", {
-      ...exportArgs(kind, running, liveTitle),
-      defaultName: `meeting-${kind === "json" ? "state" : "record"}-${stamp}`,
-    });
-    intel.exportNote = saved ? "saved" : "";
-  } catch (e) {
-    intel.exportNote = `error:${e}`;
-  }
+/** Saves a meeting export to a file the user picks. `false` on cancel. */
+export async function saveMeetingExport(target: ExportTarget, kind: ExportKind, startedAt: number): Promise<boolean> {
+  const stamp = new Date(startedAt || Date.now()).toISOString().slice(0, 10);
+  return invoke<boolean>("intel_export_save", {
+    ...target,
+    kind,
+    defaultName: `meeting-${EXPORT_FILE[kind]}-${stamp}`,
+  });
+}
+
+/** Summarizes a saved meeting and stores the summary on it, replacing any earlier one. */
+export async function summarizeMeeting(id: string, when: string) {
+  return invoke<{ markdown: string; fromTranscript: boolean }>("meeting_summarize", { id, when });
 }
 
 /** Starts listening for pass results (once per page load). */
@@ -354,7 +362,7 @@ export function resetIntel() {
   intel.audit = null;
   intel.scheduledEnd = "";
   intel.savedMeetingId = "";
-  intel.exportNote = "";
+  intel.summary = "";
   intel.context = [];
   intel.contextError = "";
   intel.speakerSuggestions = [];

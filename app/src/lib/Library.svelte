@@ -2,12 +2,18 @@
   // The Library — a browsable, searchable archive of finished notes. Reads from the SQLite-backed
   // store via the note commands; search uses the backend's full-text index (with a short-CJK
   // substring fallback). List ⇄ detail in one view; deletes go through a confirm modal.
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { i18n } from "$lib/i18n.svelte";
   import Modal from "$lib/Modal.svelte";
   import ShotThumb from "$lib/ShotThumb.svelte";
   import { intel, loadProjects, createProject, renameProject, type MemoryItem } from "$lib/intel.svelte";
+  import type { StateItem } from "$lib/intel.svelte";
+  import MeetingState from "$lib/MeetingState.svelte";
+  import MeetingExports from "$lib/MeetingExports.svelte";
+  import SummaryView from "$lib/SummaryView.svelte";
+  import PromptRunner from "$lib/PromptRunner.svelte";
+  import { copyText } from "$lib/clipboard";
 
   // "New meeting in this project": the page switches to Live with the project selected.
   // Hidden while a session runs: switching projects then would refile the running meeting.
@@ -102,6 +108,64 @@
   let newProjectOpen = $state(false);
   let newProjectName = $state("");
   let moveNote = $state("");
+  // After a move: knowledge learned only from this meeting can follow it to the new project.
+  type KnowledgeMove = { id: string; from: string; to: string; count: number; shared: number };
+  let knowledgeMove = $state<KnowledgeMove | null>(null);
+  let knowledgeOpen = $state(false);
+
+  // The project brief: rendered by the backend, previewed read-only, copied or saved as .md.
+  let briefOpen = $state(false);
+  let briefText = $state("");
+  let briefError = $state("");
+  let briefCopied = $state(false);
+
+  // The meeting page's tabs: its transcript, its structured state, and its summary. A state
+  // item's evidence chip jumps to (and highlights) its transcript line.
+  let detailTab = $state<"transcript" | "state" | "summary" | "prompts">("transcript");
+  // Who spoke, as the prompt library names them ("You", a given name, "Speaker 2", "Them").
+  const meetingSpeakers = $derived.by(() => {
+    const seen = new Set<string>();
+    for (const seg of detail?.segments ?? []) {
+      const named = seg.speaker !== null ? detail?.speakerNames[seg.speaker] : undefined;
+      if (seg.source === "mic") seen.add(named || i18n.t.library.you);
+      else seen.add(seg.speaker !== null ? diarizedLabel(seg.speaker) : i18n.t.library.them);
+    }
+    return [...seen];
+  });
+  let stateItems = $state<StateItem[]>([]);
+  let highlightIdx = $state<number | null>(null);
+  let shownMeetingId = "";
+  $effect(() => {
+    const id = detail?.meeting.id ?? "";
+    if (id === shownMeetingId) return;
+    shownMeetingId = id;
+    detailTab = "transcript";
+    highlightIdx = null;
+    stateItems = [];
+    if (!id) return;
+    invoke<StateItem[]>("intel_saved_state", { id })
+      .then((items) => {
+        if (detail?.meeting.id === id) stateItems = items;
+      })
+      .catch(() => {});
+  });
+
+  /** A transcript line's time, for an evidence ref into this meeting that still resolves. */
+  function refLabel(ref: string): string | null {
+    const m = /^M(.+):T(\d+)$/.exec(ref);
+    if (!detail || !m || m[1] !== detail.meeting.id) return null;
+    const seg = detail.segments.find((s) => s.idx === Number(m[2]));
+    return seg ? fmtDuration(seg.start_ms) : null;
+  }
+
+  async function showRef(ref: string) {
+    const m = /:T(\d+)$/.exec(ref);
+    if (!m) return;
+    highlightIdx = Number(m[1]);
+    detailTab = "transcript";
+    await tick();
+    document.getElementById(`seg-${highlightIdx}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
 
   // Speaker names: click a speaker to rename it everywhere in the meeting, or merge it into another
   // (diarization sometimes splits one person in two). Colours match the Live feed.
@@ -185,16 +249,59 @@
   }
 
   // The selected project's knowledge, shown above its meetings.
-  $effect(() => {
-    const id = filterProject?.id;
-    memory = [];
-    if (!id) return;
+  function loadProjectMemory(id: string) {
     invoke<MemoryItem[]>("list_project_memory", { projectId: id })
       .then((m) => {
         if (projectFilter === id) memory = m;
       })
       .catch(() => {});
+  }
+
+  $effect(() => {
+    const id = filterProject?.id;
+    memory = [];
+    if (id) loadProjectMemory(id);
   });
+
+  // Local UTC offset in minutes east, so the brief's dates match the user's calendar.
+  const offsetMinutes = () => -new Date().getTimezoneOffset();
+
+  async function openBrief() {
+    const id = filterProject?.id;
+    if (!id) return;
+    briefText = "";
+    briefError = "";
+    briefCopied = false;
+    briefOpen = true;
+    try {
+      const text = await invoke<string>("project_brief_markdown", { projectId: id, offsetMinutes: offsetMinutes() });
+      if (projectFilter === id) briefText = text;
+    } catch (e) {
+      briefError = String(e);
+    }
+  }
+
+  async function copyBrief() {
+    await copyText(briefText);
+    briefCopied = true;
+    setTimeout(() => (briefCopied = false), 1500);
+  }
+
+  async function saveBrief() {
+    const project = filterProject;
+    if (!project) return;
+    const stamp = new Date().toISOString().slice(0, 10);
+    const safe = project.name.replace(/[\\/:*?"<>|]+/g, "-").trim() || "project";
+    try {
+      await invoke<boolean>("project_brief_save", {
+        projectId: project.id,
+        offsetMinutes: offsetMinutes(),
+        defaultName: `${safe}-brief-${stamp}`,
+      });
+    } catch (e) {
+      briefError = String(e);
+    }
+  }
 
   $effect(() => {
     const id = filterProject?.id;
@@ -297,14 +404,52 @@
       return;
     }
     const from = detail.meeting.project_id;
+    const id = detail.meeting.id;
     try {
-      await invoke<boolean>("set_note_project", { id: detail.meeting.id, projectId: projectId || null });
+      await invoke<boolean>("set_note_project", { id, projectId: projectId || null });
       detail.meeting.project_id = projectId || null;
-      moveNote = from ? i18n.t.library.movedKeepsKnowledge(projectName(from)) : "";
+      moveNote = "";
       await loadList();
     } catch (e) {
       error = String(e);
       if (select) select.value = from ?? "";
+      return;
+    }
+    if (!from || from === projectId) return;
+    // Knowledge needs a project, so moving out of all projects leaves it where it was learned.
+    if (!projectId) {
+      moveNote = i18n.t.library.movedKeepsKnowledge(projectName(from));
+      return;
+    }
+    try {
+      const k = await invoke<{ exclusive: number; shared: number }>("note_knowledge", { id, projectId: from });
+      if (k.exclusive > 0) {
+        knowledgeMove = { id, from, to: projectId, count: k.exclusive, shared: k.shared };
+        knowledgeOpen = true;
+      } else if (k.shared > 0) {
+        moveNote = i18n.t.library.sharedKnowledgeStays(k.shared, projectName(from));
+      }
+    } catch {
+      moveNote = i18n.t.library.movedKeepsKnowledge(projectName(from));
+    }
+  }
+
+  async function answerKnowledgeMove(move: boolean) {
+    const m = knowledgeMove;
+    knowledgeOpen = false;
+    knowledgeMove = null;
+    if (!m) return;
+    const stays = m.shared > 0 ? " " + i18n.t.library.sharedKnowledgeStays(m.shared, projectName(m.from)) : "";
+    if (!move) {
+      moveNote = i18n.t.library.movedKeepsKnowledge(projectName(m.from));
+      return;
+    }
+    try {
+      const n = await invoke<number>("move_note_knowledge", { id: m.id, fromProject: m.from, toProject: m.to });
+      moveNote = i18n.t.library.knowledgeMoved(n, projectName(m.to)) + stays;
+      if (filterProject && (filterProject.id === m.from || filterProject.id === m.to)) loadProjectMemory(filterProject.id);
+    } catch (e) {
+      error = String(e);
     }
   }
 
@@ -558,27 +703,68 @@
       </div>
     </header>
 
-    {#if detail.meeting.summary}
-      <div class="summary">{detail.meeting.summary}</div>
-    {/if}
+    <div class="meeting-exports">
+      <MeetingExports
+        target={{ id: detail.meeting.id, title: null, when: fmtDate(detail.meeting.started_at_ms) }}
+        startedAt={detail.meeting.started_at_ms}
+        unavailable={[
+          ...(detail.meeting.summary ? [] : (["summary"] as const)),
+          ...(detail.segments.length ? [] : (["transcript"] as const)),
+        ]}
+      />
+    </div>
 
-    <div class="transcript">
-      {#each detail.segments as seg (seg.idx)}
-        <p class="seg">
-          <span class="ts" title={fmtClock(detail!.meeting.started_at_ms + seg.start_ms)}>{fmtDuration(seg.start_ms)}</span>
-          <span class="seg-body">
-            {#if speakerLabel(seg.source)}<span class="spk" class:them={seg.source === "system"}
-                >{speakerLabel(seg.source)}</span
-              >{/if}{#if seg.speaker !== null}{@const n = seg.speaker}<button
-                class="spk dia"
-                style="--spk: {speakerColor(n)}"
-                title={i18n.t.library.speakerTip}
-                onclick={() => startSpeakerEdit(n)}>{diarizedLabel(n)}</button
-              >{/if}<span class="txt">{seg.text}</span>
-          </span>
-        </p>
+    <div class="detail-tabs" role="tablist">
+      {#each [["transcript", i18n.t.library.tabTranscript], ["state", i18n.t.library.tabState], ["summary", i18n.t.library.tabSummary], ["prompts", i18n.t.prompts.tab]] as const as [tab, label] (tab)}
+        <button role="tab" aria-selected={detailTab === tab} class:on={detailTab === tab} onclick={() => (detailTab = tab)}
+          >{label}{#if tab === "state" && stateItems.length}<span class="tab-count">{stateItems.length}</span>{/if}</button
+        >
       {/each}
     </div>
+
+    {#if detailTab === "state"}
+      {#if stateItems.length}
+        <MeetingState items={stateItems} {refLabel} onRef={showRef} />
+      {:else}
+        <p class="move-note">{i18n.t.library.stateNone}</p>
+      {/if}
+    {:else if detailTab === "prompts"}
+      <PromptRunner
+        meetingId={detail.meeting.id}
+        speakers={meetingSpeakers}
+        title={detail.meeting.title}
+        date={fmtDate(detail.meeting.started_at_ms)}
+      />
+    {:else if detailTab === "summary"}
+      <SummaryView
+        meetingId={detail.meeting.id}
+        when={fmtDate(detail.meeting.started_at_ms)}
+        summary={detail.meeting.summary ?? ""}
+        hasState={stateItems.length > 0}
+        onSummary={(md, id) => {
+          // Only the meeting it was made for: the user may have opened another meanwhile.
+          if (detail && detail.meeting.id === id) detail.meeting.summary = md;
+        }}
+      />
+    {:else}
+      <div class="transcript">
+        {#each detail.segments as seg (seg.idx)}
+          <p class="seg" id="seg-{seg.idx}" class:hl={highlightIdx === seg.idx}>
+            <span class="ts" title={fmtClock(detail!.meeting.started_at_ms + seg.start_ms)}>{fmtDuration(seg.start_ms)}</span>
+            <span class="seg-body">
+              {#if speakerLabel(seg.source)}<span class="spk" class:them={seg.source === "system"}
+                  >{speakerLabel(seg.source)}</span
+                >{/if}{#if seg.speaker !== null}{@const n = seg.speaker}<button
+                  class="spk dia"
+                  style="--spk: {speakerColor(n)}"
+                  title={i18n.t.library.speakerTip}
+                  onclick={() => startSpeakerEdit(n)}>{diarizedLabel(n)}</button
+                >{/if}<span class="txt">{seg.text}</span>
+            </span>
+          </p>
+        {/each}
+      </div>
+    {/if}
   {:else}
     <header class="lib-head">
       <h2 class="lib-h2">{i18n.t.library.title}</h2>
@@ -626,6 +812,9 @@
             class="btn"
             title={i18n.t.library.instructionsHelp}
             onclick={() => ((instructionsDraft = instructions), (editingInstructions = true))}>{i18n.t.library.instructions}</button
+          >
+          <button class="btn" title={i18n.t.library.projectBriefHelp} onclick={openBrief}
+            >{i18n.t.library.projectBrief}</button
           >
           {#if onNewMeeting && !sessionRunning}
             <button class="btn primary" onclick={() => onNewMeeting(filterProject!.id)}>{i18n.t.library.newMeetingInProject}</button>
@@ -801,6 +990,38 @@
     </div>
   </Modal>
 
+  <Modal bind:open={knowledgeOpen} title={i18n.t.library.moveKnowledgeTitle}>
+    {#if knowledgeMove}
+      <p class="confirm-text">
+        {i18n.t.library.moveKnowledgeConfirm(knowledgeMove.count, projectName(knowledgeMove.to))}
+        {#if knowledgeMove.shared > 0}
+          {i18n.t.library.sharedKnowledgeStays(knowledgeMove.shared, projectName(knowledgeMove.from))}
+        {/if}
+      </p>
+    {/if}
+    <div class="confirm-actions">
+      <button class="btn" onclick={() => answerKnowledgeMove(false)}>{i18n.t.library.keepKnowledge}</button>
+      <button class="btn primary" onclick={() => answerKnowledgeMove(true)}>{i18n.t.library.moveKnowledge}</button>
+    </div>
+  </Modal>
+
+  <Modal bind:open={briefOpen} wide title={i18n.t.library.projectBrief}>
+    {#if briefError}
+      <div class="err">{briefError}</div>
+    {:else if !briefText}
+      <p class="confirm-text">{i18n.t.library.briefLoading}</p>
+    {:else}
+      <pre class="brief" aria-label={i18n.t.library.projectBrief}>{briefText}</pre>
+    {/if}
+    <div class="confirm-actions">
+      <button class="btn" onclick={() => (briefOpen = false)}>{i18n.t.library.close}</button>
+      <button class="btn" disabled={!briefText} onclick={copyBrief}
+        >{briefCopied ? i18n.t.library.copied : i18n.t.library.copy}</button
+      >
+      <button class="btn primary" disabled={!briefText} onclick={saveBrief}>{i18n.t.library.saveMd}</button>
+    </div>
+  </Modal>
+
   <Modal bind:open={shotConfirmOpen} title={i18n.t.library.deleteShotTitle}>
     <p class="confirm-text">{i18n.t.library.deleteShotConfirm}</p>
     <div class="confirm-actions">
@@ -880,6 +1101,18 @@
     border: 1px solid currentColor;
     opacity: 0.7;
     font-size: 0.75rem;
+  }
+  .brief {
+    max-height: 60vh;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-size: 0.85rem;
+    line-height: 1.45;
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: var(--surface);
+    margin: 0 0 12px;
   }
   .knowledge {
     font-size: 0.85rem;
@@ -1136,15 +1369,33 @@
     border-color: var(--stop);
   }
 
-  .summary {
-    padding: 13px 15px;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    font-size: 13.5px;
-    line-height: 1.6;
+  .detail-tabs {
+    display: flex;
+    gap: 4px;
+    border-bottom: 1px solid var(--border);
+  }
+  .detail-tabs button {
+    font: inherit;
+    font-size: 13px;
+    color: var(--muted);
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    padding: 6px 10px;
+    cursor: pointer;
+  }
+  .detail-tabs button.on {
     color: var(--text);
-    white-space: pre-wrap;
+    border-bottom-color: var(--accent);
+  }
+  .tab-count {
+    margin-left: 6px;
+    font-size: 11px;
+    color: var(--muted);
+  }
+  .seg.hl {
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
   }
 
   .transcript {

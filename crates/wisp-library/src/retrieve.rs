@@ -812,6 +812,8 @@ mod tests {
                      DROP TABLE project_memory;
                      DROP TABLE llm_call;
                      DROP TABLE speaker_name;
+                     DROP TABLE prompt_run;
+                     DROP TABLE prompt;
                      ALTER TABLE project DROP COLUMN instructions;
                      PRAGMA user_version = 3;",
                 )

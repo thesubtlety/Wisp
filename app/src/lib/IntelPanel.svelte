@@ -6,6 +6,9 @@
   import ShotThumb from "$lib/ShotThumb.svelte";
   import Modal from "$lib/Modal.svelte";
   import AiActivity from "$lib/AiActivity.svelte";
+  import MeetingState from "$lib/MeetingState.svelte";
+  import MeetingExports from "$lib/MeetingExports.svelte";
+  import SummaryView from "$lib/SummaryView.svelte";
   import {
     intel,
     askQuestion,
@@ -22,16 +25,12 @@
     saveLearning,
     loadMemory,
     deleteMemory,
-    copyExport,
-    saveExport,
+    liveExportTarget,
     importContext,
     describeContext,
     removeContext,
-    type ExportKind,
     CLASS_ORDER,
-    KIND_ORDER,
     GAP_ORDER,
-    type StateItem,
     type AskAnswer,
   } from "$lib/intel.svelte";
 
@@ -71,11 +70,6 @@
   let feedEl = $state<HTMLDivElement>();
 
   const asking = $derived(intel.turns.some((t) => t.pending));
-  const groups = $derived(
-    KIND_ORDER.map((kind) => ({ kind, items: intel.items.filter((i) => i.kind === kind) })).filter(
-      (g) => g.items.length,
-    ),
-  );
 
   async function send(text = draft) {
     if (!text.trim() || asking) return;
@@ -104,15 +98,10 @@
   }
 
   const liveTitle = (when: string) => i18n.t.library.newNoteTitle(when);
-  const doCopy = (kind: ExportKind) => copyExport(kind, running, liveTitle);
-  const doSave = (kind: ExportKind) => saveExport(kind, running, liveTitle);
+  const exportTarget = $derived(liveExportTarget(running, liveTitle));
 
   async function analyze() {
     notRunning = !(await analyzeNow());
-  }
-
-  function badge(item: StateItem): string {
-    return `${i18n.t.intel.status[item.status]} · ${Math.round(item.confidence * 100)}%`;
   }
 </script>
 
@@ -135,6 +124,9 @@
     {#if canReview}
       <button role="tab" aria-selected={intel.tab === "review"} class:on={intel.tab === "review"} onclick={() => (intel.tab = "review")}>
         {i18n.t.intel.tabReview}
+      </button>
+      <button role="tab" aria-selected={intel.tab === "summary"} class:on={intel.tab === "summary"} onclick={() => (intel.tab = "summary")}>
+        {i18n.t.intel.tabSummary}
       </button>
     {/if}
     <button class="activity" onclick={() => (activityOpen = true)}>{i18n.t.audit.title}</button>
@@ -221,6 +213,19 @@
           </div>
         </div>
       {/each}
+    </div>
+  {:else if intel.tab === "summary" && canReview}
+    <div class="feed">
+      <SummaryView
+        meetingId={intel.savedMeetingId}
+        when={exportTarget.when}
+        summary={intel.summary}
+        hasState={intel.items.length > 0}
+        onSummary={(md) => (intel.summary = md)}
+      />
+    </div>
+    <div class="export-row">
+      <MeetingExports target={exportTarget} startedAt={intel.startedAt} unavailable={intel.summary ? [] : ["summary"]} />
     </div>
   {:else if intel.tab === "review" && canReview}
     <div class="feed">
@@ -415,20 +420,13 @@
         {intel.analyzing ? i18n.t.intel.analyzing : i18n.t.intel.analyzeNow}
       </button>
     </div>
-    {#if groups.length}
-      <div class="export-row">
-        <button class="btn" onclick={() => doCopy("packet")}>{i18n.t.intel.copyPacket}</button>
-        <button class="btn" onclick={() => doSave("record")}>{i18n.t.intel.exportRecord}</button>
-        <button class="btn" onclick={() => doSave("json")}>{i18n.t.intel.exportJson}</button>
-        {#if intel.exportNote === "copied"}
-          <span class="status">{i18n.t.intel.packetCopied}</span>
-        {:else if intel.exportNote === "saved"}
-          <span class="status">{i18n.t.intel.exportSaved}</span>
-        {:else if intel.exportNote.startsWith("error:")}
-          <span class="status error">{i18n.t.intel.exportFailed(intel.exportNote.slice(6))}</span>
-        {/if}
-      </div>
-    {/if}
+    <div class="export-row">
+      <MeetingExports
+        target={exportTarget}
+        startedAt={intel.startedAt}
+        unavailable={exportTarget.id && intel.summary ? [] : ["summary"]}
+      />
+    </div>
     <div class="feed">
       {#if intel.context.length || intel.contextError || (running && intel.projectId)}
         <section class="group shots">
@@ -467,7 +465,7 @@
           {/each}
         </section>
       {/if}
-      {#if !groups.length}
+      {#if !intel.items.length}
         <p class="hint">{i18n.t.intel.stateEmpty}</p>
       {/if}
       {#if intel.projectId && intel.memory.length}
@@ -490,23 +488,9 @@
           {/each}
         </section>
       {/if}
-      {#each groups as g (g.kind)}
-        <section class="group">
-          <h4>{i18n.t.intel.kinds[g.kind]}</h4>
-          {#each g.items as item (item.id)}
-            <div class="item" class:muted={item.lifecycle === "resolved"}>
-              <p class="itext">{item.text}</p>
-              <p class="imeta">
-                <span class="st {item.status}">{badge(item)}</span>
-                {#if item.lifecycle !== "active"}<span class="lc">{i18n.t.intel.lifecycle[item.lifecycle]}</span>{/if}
-                {#if item.owner}<span>{i18n.t.intel.owner}: {item.owner}</span>{/if}
-                {#if item.due}<span>{i18n.t.intel.due}: {item.due}</span>{/if}
-                <span class="iid">{item.id}</span>
-              </p>
-            </div>
-          {/each}
-        </section>
-      {/each}
+      {#if intel.items.length}
+        <MeetingState items={intel.items} />
+      {/if}
     </div>
   {/if}
 </div>
@@ -998,11 +982,6 @@
   .shot-body {
     flex: 1;
     min-width: 0;
-  }
-
-  .item.muted .itext {
-    color: var(--muted);
-    text-decoration: line-through;
   }
 
   .itext {

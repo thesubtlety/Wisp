@@ -12,6 +12,7 @@
 //! - [`analyze`] — "Analyze Now": one observer pass through a
 //!   [`wisp_reasoning::ReasoningBackend`].
 //! - [`ask`] — questions about the meeting, answered with checked citations.
+//! - [`brief`] — the project brief: knowledge and live items across a project's meetings.
 //! - [`export`] — the meeting record, the AI context packet and the state as JSON.
 //! - [`endgame`] — wrap-up signals and the gap audit run when the meeting is closing.
 //! - [`intervene`] — proposed interventions and the conservative local filter that decides
@@ -21,6 +22,7 @@
 //! - [`headline`] — short forms (headlines, short answers) for reading at a glance.
 //! - [`screenshot`] — a screenshot attached as context, described once by a vision backend.
 //! - [`speakers`] — speaker-name suggestions from the transcript, checked and deduplicated.
+//! - [`summary`] — the meeting summary, from its state (or the transcript's end when it has none).
 //! - [`runtime`] — the live worker: final lines in over a channel that never blocks, batched
 //!   passes out, one at a time.
 //!
@@ -29,6 +31,7 @@
 pub mod about;
 pub mod analyze;
 pub mod ask;
+pub mod brief;
 pub mod endgame;
 pub mod evidence;
 pub mod export;
@@ -42,6 +45,7 @@ pub mod review;
 pub mod runtime;
 pub mod screenshot;
 pub mod speakers;
+pub mod summary;
 
 pub use about::{about_you, ABOUT_HEADING};
 pub use analyze::{
@@ -49,6 +53,7 @@ pub use analyze::{
     PreparedPass,
 };
 pub use ask::{ask, ask_schema, prepare_ask, AskAnswer, AskInput, AskTurn, Citation};
+pub use brief::{iso_date, project_brief, BriefInput, BriefMeeting};
 pub use endgame::{
     audit, prepare_audit, wrap_probability, AuditInput, AuditReport, EndgameTrigger, Gap,
     GapCategory,
@@ -68,10 +73,14 @@ pub use review::{
     FollowUp, FollowUpClass, ReviewEdit,
 };
 pub use runtime::{
-    remap_refs, saved_positions, Finished, IntelRuntime, IntelUpdate, NoRetrieval, Retriever,
-    RuntimeConfig, TriggerPolicy, LIVE_MEETING_ID,
+    remap_refs, saved_positions, Finished, IntelRuntime, IntelUpdate, NoRetrieval, ProjectContext,
+    Retriever, RuntimeConfig, TriggerPolicy, LIVE_MEETING_ID,
 };
 pub use screenshot::{describe_screenshot, ScreenshotDescription, ScreenshotInput};
 pub use speakers::{
     validate_speaker_name, RawSpeakerName, SpeakerReject, SpeakerSuggestion, SpeakerSuggestions,
+};
+pub use summary::{
+    parse_summary, participants, summary_context, summary_request, MeetingSummary, SummaryContext,
+    SummaryMeta,
 };

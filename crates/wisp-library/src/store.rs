@@ -13,7 +13,7 @@ use crate::retention::RetentionPolicy;
 use crate::Result;
 
 /// On-disk schema version, bumped on schema changes (drives migration via `PRAGMA user_version`).
-const SCHEMA_VERSION: i64 = 10;
+const SCHEMA_VERSION: i64 = 11;
 
 /// Characters of transcript kept as a list preview.
 const PREVIEW_CHARS: usize = 160;
@@ -259,6 +259,30 @@ ALTER TABLE llm_call ADD COLUMN cost_usd REAL;
 ALTER TABLE llm_call ADD COLUMN model_reported TEXT;
 ";
 
+/// Schema v11 — the prompt library: saved prompts (built-ins are seeded on open, see
+/// `Library::seed_prompts`) and the stored output of each run over a saved meeting. A run quotes
+/// the transcript, so it goes with the meeting and is pruned with the transcript.
+pub(crate) const SCHEMA_V11: &str = "\
+CREATE TABLE prompt (
+    id            TEXT PRIMARY KEY,
+    name          TEXT NOT NULL,
+    body          TEXT NOT NULL,
+    scope         TEXT NOT NULL,
+    builtin       INTEGER NOT NULL DEFAULT 0,
+    updated_at_ms INTEGER NOT NULL
+);
+CREATE TABLE prompt_run (
+    id          INTEGER PRIMARY KEY,
+    meeting_id  TEXT NOT NULL REFERENCES meeting (id) ON DELETE CASCADE,
+    prompt_name TEXT NOT NULL,
+    speaker     TEXT,
+    output      TEXT NOT NULL,
+    backend     TEXT NOT NULL,
+    at_ms       INTEGER NOT NULL
+);
+CREATE INDEX prompt_run_meeting ON prompt_run (meeting_id);
+";
+
 /// A handle to the meeting knowledge base. Open once and reuse across queries. With no embedder it
 /// is full-text only; configure one via [`Library::set_embedder`] to enable semantic and hybrid
 /// search.
@@ -314,6 +338,7 @@ impl Library {
             retention: RetentionPolicy::default(),
         };
         lib.migrate()?;
+        lib.seed_prompts()?;
         Ok(lib)
     }
 
@@ -323,7 +348,7 @@ impl Library {
             .pragma_query_value(None, "user_version", |r| r.get(0))?;
         // Each step commits with its version, so a failed step leaves the database at the previous
         // version rather than half-migrated (a re-run ALTER TABLE would fail on the duplicate column).
-        let steps: [(i64, &str); 10] = [
+        let steps: [(i64, &str); 11] = [
             (1, SCHEMA_V1),
             (2, SCHEMA_V2),
             (3, SCHEMA_V3),
@@ -334,6 +359,7 @@ impl Library {
             (8, SCHEMA_V8),
             (9, SCHEMA_V9),
             (10, SCHEMA_V10),
+            (11, SCHEMA_V11),
         ];
         for (step, sql) in steps {
             if version >= step {
@@ -385,14 +411,19 @@ impl Library {
         let expires_at_ms = self.retention.transcript_expiry(started_at_ms);
 
         let tx = self.conn.transaction()?;
-        let project_id: Option<String> = tx
-            .query_row("SELECT project_id FROM meeting WHERE id = ?1", [id], |r| {
-                r.get(0)
-            })
+        let (project_id, old_summary): (Option<String>, Option<String>) = tx
+            .query_row(
+                "SELECT project_id, summary FROM meeting WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
             .optional()?
-            .flatten();
+            .unwrap_or_default();
+        // A re-save without a summary keeps the one already stored.
+        let summary = meta.summary.clone().or(old_summary);
         // Deleting the meeting cascades its speaker names; carry them over like the project.
         let names = crate::speakers::read_names(&tx, id)?;
+        let runs = crate::prompts::read_runs(&tx, id)?;
         tx.execute("DELETE FROM meeting WHERE id = ?1", [id])?;
         tx.execute(
             "INSERT INTO meeting
@@ -406,7 +437,7 @@ impl Library {
                 duration_ms,
                 meta.language,
                 meta.engine,
-                meta.summary,
+                summary,
                 finals.len() as i64,
                 project_id,
                 expires_at_ms,
@@ -414,6 +445,7 @@ impl Library {
         )?;
         insert_segments(&tx, id, &finals)?;
         crate::speakers::write_names(&tx, id, &names)?;
+        crate::prompts::write_runs(&tx, &runs)?;
         if let Some(chunks) = &chunks {
             insert_chunks(&tx, id, chunks)?;
         }
@@ -822,6 +854,16 @@ impl Library {
         Ok(affected > 0)
     }
 
+    /// Replaces a meeting's summary (trimmed; empty clears it). Returns whether the meeting exists.
+    pub fn set_summary(&self, id: &str, summary: &str) -> Result<bool> {
+        let summary = Some(summary.trim()).filter(|s| !s.is_empty());
+        let n = self.conn.execute(
+            "UPDATE meeting SET summary = ?2 WHERE id = ?1",
+            rusqlite::params![id, summary],
+        )?;
+        Ok(n > 0)
+    }
+
     /// Number of meetings stored.
     pub fn count(&self) -> Result<i64> {
         Ok(self
@@ -1088,6 +1130,30 @@ mod tests {
         assert_eq!(m.segment_count, 0);
         assert_eq!(m.duration_ms, 0);
         assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn a_summary_is_set_cleared_and_kept_across_a_resave() {
+        let mut lib = Library::open_in_memory().unwrap();
+        let segs = [seg(0, 0, 1000, "hello", AudioSourceKind::Microphone)];
+        lib.save_note("m1", &meta("M"), 0, &segs).unwrap();
+        assert_eq!(lib.get_note("m1").unwrap().unwrap().0.summary, None);
+
+        assert!(lib.set_summary("m1", "  **TL;DR** Ship it.\n ").unwrap());
+        assert_eq!(
+            lib.get_note("m1").unwrap().unwrap().0.summary.as_deref(),
+            Some("**TL;DR** Ship it.")
+        );
+        lib.save_note("m1", &meta("M"), 0, &segs).unwrap();
+        assert_eq!(
+            lib.get_note("m1").unwrap().unwrap().0.summary.as_deref(),
+            Some("**TL;DR** Ship it."),
+            "a re-save without a summary keeps the stored one"
+        );
+
+        assert!(lib.set_summary("m1", " ").unwrap());
+        assert_eq!(lib.get_note("m1").unwrap().unwrap().0.summary, None);
+        assert!(!lib.set_summary("nope", "x").unwrap());
     }
 
     #[test]

@@ -8,6 +8,7 @@
   import { onDestroy, onMount } from "svelte";
   import { fly } from "svelte/transition";
   import Modal from "$lib/Modal.svelte";
+  import PromptRunner from "$lib/PromptRunner.svelte";
   import ParamsPanel from "$lib/ParamsPanel.svelte";
   import AiNotes from "$lib/AiNotes.svelte";
   import AssistPanel, { savedAssistWidth } from "$lib/AssistPanel.svelte";
@@ -833,10 +834,36 @@
     if (intelEnabled) loadProjects();
   });
   async function submitNewProject() {
-    newProjectError = await createProject(newProjectName);
+    const name = newProjectName.trim();
+    newProjectError = await createProject(name, false);
     if (!newProjectError) {
       newProjectOpen = false;
       newProjectName = "";
+      const created = intel.projects.find((p) => p.name === name);
+      if (created) await pickProject(created.id);
+    }
+  }
+  // Picking a project mid-meeting moves the live meeting there: later passes, screenshots and the
+  // save use it. A short notice confirms the switch.
+  let projectNoticeTimer: ReturnType<typeof setTimeout> | undefined;
+  async function pickProject(id: string) {
+    if (!running) {
+      selectProject(id);
+      return;
+    }
+    try {
+      // Switch the analysis first, so a failure leaves save and analysis on the same project.
+      await invoke<boolean>("intel_set_project", { projectId: id || null });
+      selectProject(id);
+      const name = intel.projects.find((p) => p.id === id)?.name ?? i18n.t.intel.noProject;
+      const text = i18n.t.intel.nowUsingProject(name);
+      liveNotice = text;
+      clearTimeout(projectNoticeTimer);
+      projectNoticeTimer = setTimeout(() => {
+        if (liveNotice === text) liveNotice = "";
+      }, 4000);
+    } catch (e) {
+      error = String(e);
     }
   }
   $effect(() => {
@@ -1232,6 +1259,8 @@
   let liveAssistOpen = $state(false);
   // The "⋯" menu that holds the AI assist (it sits behind meeting intelligence, not beside it).
   let moreOpen = $state(false);
+  // The saved-prompt runner, opened from the "⋯" menu over the current Live or File transcript.
+  let promptsOpen = $state(false);
   // Whether the transcript's compact "Export ▾" menu is open (collapses MD/TXT/SRT into one control).
   let exportMenuOpen = $state(false);
   let liveBodyEl = $state<HTMLElement | null>(null);
@@ -1374,6 +1403,12 @@
   const acceptSpeakerSuggestion = (s: SpeakerSuggestion) => nameLiveSpeaker(s.speakerId, s.name);
 
   // The File transcript assembled as plain text for the AI Notes panel.
+  // Who spoke in the current transcript, as the prompt library names them.
+  const promptSpeakers = $derived(
+    mode === "file"
+      ? [...new Set(fileParagraphs.filter((p) => p.speaker !== null).map((p) => speakerLabel(p.speaker!)))]
+      : [...new Set(segments.filter((s) => s.isFinal).map((s) => assistWho(s)))],
+  );
   const fileTranscriptText = $derived(
     fileParagraphs
       .map((p) => {
@@ -1962,6 +1997,13 @@
               moreOpen = false;
             }}>{assistOn ? i18n.t.live.hideAssist : i18n.t.live.openAssist}</button
           >
+          <button
+            role="menuitem"
+            onclick={() => {
+              promptsOpen = true;
+              moreOpen = false;
+            }}>{i18n.t.prompts.runSaved}</button
+          >
         </div>
       {/if}
     </span>
@@ -2383,13 +2425,12 @@
                   <select
                     aria-label={i18n.t.intel.project}
                     value={intel.projectId}
-                    disabled={running}
                     onchange={(e) => {
                       const v = e.currentTarget.value;
                       if (v === "__new") {
                         e.currentTarget.value = intel.projectId;
                         newProjectOpen = true;
-                      } else selectProject(v);
+                      } else pickProject(v);
                     }}
                   >
                     <option value="">{i18n.t.intel.noProject}</option>
@@ -3062,6 +3103,17 @@
   {/if}
   <!-- Delete-model confirmation: a focused dialog so removing a multi-GB model is a deliberate act,
        never a one-click mistake. -->
+  <Modal bind:open={promptsOpen} title={i18n.t.prompts.tab}>
+    {#if promptsOpen}
+      <PromptRunner
+        live
+        transcript={mode === "file" ? fileTranscriptText : liveTranscriptText}
+        speakers={promptSpeakers}
+        title={meetingTitle.trim() || undefined}
+      />
+    {/if}
+  </Modal>
+
   <Modal bind:open={deleteModalOpen} title={i18n.t.live.deleteModel.title}>
     {#if dmToDelete}
       <p class="confirm-text">

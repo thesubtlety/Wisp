@@ -18,13 +18,15 @@ use wisp_intel::{
     apply_edits, ask, fallback_followups, generate_followups, interpret_reply, parse_reply,
     remap_refs, review_ops, saved_positions, AppliedOp, AskAnswer, AskInput, AskTurn, Card,
     EndgameTrigger, Finished, FollowUp, FollowUpClass, Gap, IntelRuntime, IntelUpdate, LogEntry,
-    MeetingState, Retriever, ReviewEdit, RuntimeConfig, SpeakerSuggestion, StateItem,
-    TranscriptLine, LIVE_MEETING_ID,
+    MeetingState, ProjectContext, Retriever, ReviewEdit, RuntimeConfig, SpeakerSuggestion,
+    StateItem, TranscriptLine, LIVE_MEETING_ID,
 };
 use wisp_intel::{context_packet, meeting_record, memory_ref, state_json, ExportMeta};
+use wisp_intel::{iso_date, project_brief, BriefInput, BriefMeeting};
+use wisp_intel::{parse_summary, participants, summary_context, summary_request, SummaryMeta};
 use wisp_intel::{propose_learning, LearningInput, Proposal};
 use wisp_library::{meeting_ref, Library, RetrievalQuery, Snippet, StoredLogEntry, StoredOp};
-use wisp_library::{MemoryEntry, Project};
+use wisp_library::{MeetingKnowledge, MemoryEntry, Project};
 use wisp_reasoning::CancelToken;
 
 use crate::AppState;
@@ -245,6 +247,36 @@ pub(crate) fn start(app: &AppHandle, project_id: Option<String>, meeting_label: 
         return;
     };
     *slot = Some(runtime);
+}
+
+/// Moves the live meeting to `project_id` (or out of any project): later passes retrieve from it
+/// and read its knowledge and instructions, new screenshots are filed there, and Ask and the export
+/// use it. Saving files the meeting under the project the webview passes then. Returns whether
+/// intelligence was running.
+#[tauri::command]
+pub(crate) fn intel_set_project(
+    app: AppHandle,
+    project_id: Option<String>,
+) -> Result<bool, String> {
+    let project_id = project_id.filter(|p| !p.is_empty());
+    let state = app.state::<AppState>();
+    if let Ok(mut slot) = state.intel.project.lock() {
+        slot.clone_from(&project_id);
+    }
+    crate::context::set_project(&app, project_id.clone());
+    let memory = project_memory(&state, project_id.as_deref());
+    let focus = about_you(&state, project_id.as_deref());
+    let retriever = Box::new(LibraryRetriever {
+        app: app.clone(),
+        project_id,
+    });
+    with_runtime(&state, |rt| {
+        rt.set_project(ProjectContext {
+            retriever,
+            memory,
+            focus,
+        });
+    })
 }
 
 /// The speaker label a line carries into the reasoning context: the name the user gave the speaker
@@ -676,6 +708,86 @@ pub(crate) fn intel_saved_items(
     Ok(meeting.live_items().into_iter().cloned().collect())
 }
 
+/// Every item of a saved meeting's state, superseded and withdrawn ones included, by kind then id.
+/// Empty if it has none.
+#[tauri::command]
+pub(crate) fn intel_saved_state(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Vec<StateItem>, String> {
+    let (meeting, _) = saved_meeting(&state, &id)?;
+    let mut items: Vec<StateItem> = meeting.items.into_values().collect();
+    items.sort_by_key(|i| (i.kind, item_number(&i.id)));
+    Ok(items)
+}
+
+/// The number part of an item id, for ordering `REQ-2` before `REQ-10`.
+fn item_number(id: &str) -> u32 {
+    id.rsplit_once('-')
+        .and_then(|(_, n)| n.parse().ok())
+        .unwrap_or(0)
+}
+
+/// A new summary, and whether it had to be made from the transcript (the meeting has no state).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SummaryDto {
+    markdown: String,
+    from_transcript: bool,
+}
+
+/// Summarizes a saved meeting in one reasoning call over its state (the end of its transcript
+/// when it has none), and stores the result as its summary, replacing any earlier one. `when` is
+/// the display date, formatted by the webview.
+#[tauri::command]
+pub(crate) async fn meeting_summarize(
+    app: AppHandle,
+    id: String,
+    when: Option<String>,
+) -> Result<SummaryDto, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let (meeting, lines) = saved_meeting(&state, &id)?;
+        if meeting.live_items().is_empty() && lines.is_empty() {
+            return Err("nothing to summarize: this meeting has no state or transcript".to_owned());
+        }
+        let title = state
+            .library
+            .lock()
+            .map_err(|_| "library lock poisoned".to_owned())?
+            .get_note(&id)
+            .map_err(|e| e.to_string())?
+            .map(|(note, _)| note.title)
+            .unwrap_or_default();
+        let meta = SummaryMeta {
+            title,
+            when: when.unwrap_or_default(),
+            participants: participants(&lines),
+        };
+        let context = summary_context(&meta, &meeting, &lines);
+        let backend = crate::reasoning::backend_for(&state, Some(id.clone()));
+        let response = backend
+            .invoke(
+                &summary_request(&context, std::time::Duration::from_secs(180)),
+                &CancelToken::new(),
+            )
+            .map_err(|e| e.to_string())?;
+        let markdown = parse_summary(response.output)?.to_markdown();
+        state
+            .library
+            .lock()
+            .map_err(|_| "library lock poisoned".to_owned())?
+            .set_summary(&id, &markdown)
+            .map_err(|e| e.to_string())?;
+        Ok(SummaryDto {
+            markdown,
+            from_transcript: context.from_transcript,
+        })
+    })
+    .await
+    .map_err(|e| format!("summary task failed: {e}"))?
+}
+
 /// A review's follow-ups, and where they came from: `"model"`, or `"state"` when no model was
 /// available (then `note` says why).
 #[derive(Serialize)]
@@ -1019,6 +1131,39 @@ pub(crate) fn set_note_project(
         })
 }
 
+/// How `project_id`'s knowledge relates to the saved meeting `id`: entries learned only from it
+/// (which can move with it) and entries that also cite other evidence (which stay).
+#[tauri::command]
+pub(crate) fn note_knowledge(
+    state: State<'_, AppState>,
+    id: String,
+    project_id: String,
+) -> Result<MeetingKnowledge, String> {
+    state
+        .library
+        .lock()
+        .map_err(|_| "library lock poisoned".to_owned())?
+        .meeting_knowledge(&id, &project_id)
+        .map_err(|e| e.to_string())
+}
+
+/// Moves the knowledge learned only from meeting `id` from one project to another. Returns how
+/// many entries moved.
+#[tauri::command]
+pub(crate) fn move_note_knowledge(
+    state: State<'_, AppState>,
+    id: String,
+    from_project: String,
+    to_project: String,
+) -> Result<usize, String> {
+    state
+        .library
+        .lock()
+        .map_err(|_| "library lock poisoned".to_owned())?
+        .move_meeting_knowledge(&id, &from_project, &to_project)
+        .map_err(|e| e.to_string())
+}
+
 /// A memory entry with whether each piece of its evidence still exists.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1326,6 +1471,110 @@ fn export_source(
     })
 }
 
+/// A stored segment as a transcript segment, for the transcript formatters.
+fn stored_segment(s: &wisp_library::Segment) -> TranscriptSegment {
+    let ms = |v: i64| std::time::Duration::from_millis(v.max(0) as u64);
+    TranscriptSegment {
+        id: s.idx.max(0) as u64,
+        text: s.text.clone(),
+        start: ms(s.start_ms),
+        end: ms(s.end_ms),
+        status: wisp_core::transcript::SegmentStatus::Final,
+        source: match s.source.as_str() {
+            "mic" => AudioSourceKind::Microphone,
+            "system" => AudioSourceKind::System,
+            _ => AudioSourceKind::File,
+        },
+        speaker: s.speaker.and_then(|n| u32::try_from(n).ok()).map(SpeakerId),
+        confidence: None,
+        words: Vec::new(),
+        aux_text: None,
+    }
+}
+
+/// The transcript as Markdown: the live (or just-stopped) meeting's when `id` is `None`, else the
+/// saved meeting's, led by its summary.
+fn render_transcript(
+    state: &AppState,
+    id: Option<&str>,
+    title: Option<String>,
+    when: Option<String>,
+) -> Result<String, String> {
+    let title = title.filter(|t| !t.trim().is_empty());
+    let (mut segments, names, meta) = match id {
+        None => {
+            let segments = state
+                .live_segments
+                .lock()
+                .map_err(|_| "state lock poisoned".to_owned())?
+                .clone();
+            let meta = wisp_core::export::MeetingMeta {
+                title: Some(title.unwrap_or_else(|| "Current meeting".to_owned())),
+                date: when,
+                ..Default::default()
+            };
+            (segments, live_speaker_names(state), meta)
+        }
+        Some(id) => {
+            let library = state
+                .library
+                .lock()
+                .map_err(|_| "library lock poisoned".to_owned())?;
+            let (note, stored) = library
+                .get_note(id)
+                .map_err(|e| e.to_string())?
+                .ok_or("no such meeting")?;
+            let names = library.speaker_names(id).map_err(|e| e.to_string())?;
+            let meta = wisp_core::export::MeetingMeta {
+                title: Some(title.unwrap_or(note.title)),
+                date: when,
+                engine: note.engine,
+                language: note.language,
+                summary: note.summary,
+            };
+            (stored.iter().map(stored_segment).collect(), names, meta)
+        }
+    };
+    if segments.is_empty() {
+        return Err("this meeting has no transcript".to_owned());
+    }
+    segments.sort_by_key(|s| s.start);
+    Ok(wisp_core::export::format_markdown_named(
+        &segments, &meta, &names,
+    ))
+}
+
+/// The saved meeting's summary as a document. The live meeting has none until it is saved.
+fn render_summary(
+    state: &AppState,
+    id: Option<&str>,
+    title: Option<String>,
+    when: Option<String>,
+) -> Result<String, String> {
+    let id = id.ok_or("the meeting has no summary yet")?;
+    let note = state
+        .library
+        .lock()
+        .map_err(|_| "library lock poisoned".to_owned())?
+        .get_note(id)
+        .map_err(|e| e.to_string())?
+        .ok_or("no such meeting")?
+        .0;
+    let summary = note
+        .summary
+        .filter(|s| !s.trim().is_empty())
+        .ok_or("the meeting has no summary yet")?;
+    let title = title.filter(|t| !t.trim().is_empty()).unwrap_or(note.title);
+    let mut out = format!("# {title}\n\n");
+    if let Some(when) = when.filter(|w| !w.trim().is_empty()) {
+        out.push_str(&format!("_{when}_\n\n"));
+    }
+    out.push_str(summary.trim());
+    out.push('\n');
+    Ok(out)
+}
+
+/// `kind` is `summary`, `record`, `transcript`, `packet` or `json`.
 fn render_export(
     state: &AppState,
     id: Option<&str>,
@@ -1333,6 +1582,11 @@ fn render_export(
     title: Option<String>,
     when: Option<String>,
 ) -> Result<String, String> {
+    match kind {
+        "summary" => return render_summary(state, id, title, when),
+        "transcript" => return render_transcript(state, id, title, when),
+        _ => {}
+    }
     let source = export_source(state, id, title, when)?;
     source.render(kind, |r| {
         state
@@ -1346,8 +1600,8 @@ fn render_export(
     })
 }
 
-/// A meeting's state as a document: `kind` is `record`, `packet` or `json`. `id` `None` means the
-/// live (or just-stopped) meeting. `when` is the display date, formatted by the webview.
+/// A meeting as a document: `kind` is `summary`, `record`, `transcript`, `packet` or `json`. `id`
+/// `None` means the live (or just-stopped) meeting. `when` is the display date, formatted by the webview.
 #[tauri::command]
 pub(crate) fn intel_export(
     state: State<'_, AppState>,
@@ -1389,6 +1643,94 @@ pub(crate) async fn intel_export_save(
     })
     .await
     .map_err(|e| format!("export task failed: {e}"))?
+}
+
+/// The project brief (see [`wisp_intel::project_brief`]) as Markdown. `offset_minutes` is the
+/// webview's UTC offset (east positive), so dates read as the user's calendar.
+fn render_brief(state: &AppState, project_id: &str, offset_minutes: i32) -> Result<String, String> {
+    let library = state
+        .library
+        .lock()
+        .map_err(|_| "library lock poisoned".to_owned())?;
+    let instructions = library
+        .project_instructions(project_id)
+        .map_err(|e| e.to_string())?
+        .ok_or("no such project")?;
+    let project = project_name(&library, Some(project_id)).unwrap_or_default();
+    let memory = library.list_memory(project_id).map_err(|e| e.to_string())?;
+    let meetings: Vec<BriefMeeting> = library
+        .list_notes()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|n| n.project_id.as_deref() == Some(project_id))
+        .map(|n| {
+            // A meeting whose log won't replay still counts; it just has no items.
+            let state = stored_log(&library, &n.id)
+                .ok()
+                .and_then(|log| MeetingState::replay(&n.id, &log).ok())
+                .unwrap_or_else(|| MeetingState::new(&n.id));
+            BriefMeeting {
+                when: iso_date(n.started_at_ms, offset_minutes),
+                id: n.id,
+                title: n.title,
+                started_at_ms: n.started_at_ms,
+                state,
+            }
+        })
+        .collect();
+    let now = now_ms();
+    Ok(project_brief(&BriefInput {
+        project: &project,
+        date: &iso_date(now, offset_minutes),
+        now_ms: now,
+        instructions: &instructions,
+        memory: &memory,
+        meetings: &meetings,
+    }))
+}
+
+/// A project's brief, for the preview.
+/// Off the main thread: the brief replays every meeting in the project.
+#[tauri::command]
+pub(crate) async fn project_brief_markdown(
+    app: AppHandle,
+    project_id: String,
+    offset_minutes: i32,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        render_brief(&app.state::<AppState>(), &project_id, offset_minutes)
+    })
+    .await
+    .map_err(|e| format!("brief task failed: {e}"))?
+}
+
+/// Saves the project brief to a Markdown file the user picks, like [`intel_export_save`]. Returns
+/// `false` on cancel.
+#[tauri::command]
+pub(crate) async fn project_brief_save(
+    app: AppHandle,
+    project_id: String,
+    offset_minutes: i32,
+    default_name: String,
+) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use tauri_plugin_dialog::DialogExt;
+        let content = render_brief(&app.state::<AppState>(), &project_id, offset_minutes)?;
+        let Some(picked) = app
+            .dialog()
+            .file()
+            .set_file_name(format!("{default_name}.md"))
+            .add_filter("MD", &["md"])
+            .blocking_save_file()
+        else {
+            return Ok(false);
+        };
+        let dest = picked.into_path().map_err(|e| e.to_string())?;
+        std::fs::write(&dest, content).map_err(|e| format!("write {}: {e}", dest.display()))?;
+        Ok(true)
+    })
+    .await
+    .map_err(|e| format!("brief task failed: {e}"))?
 }
 
 #[cfg(test)]

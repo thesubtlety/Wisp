@@ -67,6 +67,7 @@ mod dictation;
 mod intel;
 mod meeting;
 mod permissions;
+mod prompts;
 mod reasoning;
 mod retention;
 mod tray;
@@ -4584,6 +4585,8 @@ pub fn run() {
             assist::realtime::start_assist_realtime,
             intel::intel_analyze_now,
             intel::intel_saved_items,
+            intel::intel_saved_state,
+            intel::meeting_summarize,
             intel::intel_export,
             context::capture_context,
             context::paste_context_image,
@@ -4615,8 +4618,22 @@ pub fn run() {
             intel::get_project_instructions,
             intel::set_project_instructions,
             reasoning::suggest_title,
+            prompts::list_prompts,
+            prompts::create_prompt,
+            prompts::update_prompt,
+            prompts::delete_prompt,
+            prompts::reset_prompt,
+            prompts::run_prompt,
+            prompts::list_prompt_runs,
+            prompts::delete_prompt_run,
+            prompts::save_prompt_output,
             intel::rename_note,
             intel::set_note_project,
+            intel::note_knowledge,
+            intel::move_note_knowledge,
+            intel::intel_set_project,
+            intel::project_brief_markdown,
+            intel::project_brief_save,
             intel::intel_learning_propose,
             intel::intel_learning_save,
             retention::get_retention,
