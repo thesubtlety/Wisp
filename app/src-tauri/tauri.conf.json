@@ -14,8 +14,8 @@
     "windows": [
       {
         "title": "Wisp",
-        "width": 1040,
-        "height": 740,
+        "width": 1200,
+        "height": 850,
         "minWidth": 820,
         "minHeight": 640
       }
