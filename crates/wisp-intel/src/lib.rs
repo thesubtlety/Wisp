@@ -12,6 +12,7 @@
 //! - [`analyze`] — "Analyze Now": one observer pass through a
 //!   [`wisp_reasoning::ReasoningBackend`].
 //! - [`ask`] — questions about the meeting, answered with checked citations.
+//! - [`brief`] — the project brief: knowledge and live items across a project's meetings.
 //! - [`export`] — the meeting record, the AI context packet and the state as JSON.
 //! - [`endgame`] — wrap-up signals and the gap audit run when the meeting is closing.
 //! - [`intervene`] — proposed interventions and the conservative local filter that decides
@@ -29,6 +30,7 @@
 pub mod about;
 pub mod analyze;
 pub mod ask;
+pub mod brief;
 pub mod endgame;
 pub mod evidence;
 pub mod export;
@@ -49,6 +51,7 @@ pub use analyze::{
     PreparedPass,
 };
 pub use ask::{ask, ask_schema, prepare_ask, AskAnswer, AskInput, AskTurn, Citation};
+pub use brief::{iso_date, project_brief, BriefInput, BriefMeeting};
 pub use endgame::{
     audit, prepare_audit, wrap_probability, AuditInput, AuditReport, EndgameTrigger, Gap,
     GapCategory,
@@ -68,8 +71,8 @@ pub use review::{
     FollowUp, FollowUpClass, ReviewEdit,
 };
 pub use runtime::{
-    remap_refs, saved_positions, Finished, IntelRuntime, IntelUpdate, NoRetrieval, Retriever,
-    RuntimeConfig, TriggerPolicy, LIVE_MEETING_ID,
+    remap_refs, saved_positions, Finished, IntelRuntime, IntelUpdate, NoRetrieval, ProjectContext,
+    Retriever, RuntimeConfig, TriggerPolicy, LIVE_MEETING_ID,
 };
 pub use screenshot::{describe_screenshot, ScreenshotDescription, ScreenshotInput};
 pub use speakers::{
