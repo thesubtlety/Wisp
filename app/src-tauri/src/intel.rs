@@ -22,6 +22,7 @@ use wisp_intel::{
     TranscriptLine, LIVE_MEETING_ID,
 };
 use wisp_intel::{context_packet, meeting_record, memory_ref, state_json, ExportMeta};
+use wisp_intel::{parse_summary, participants, summary_context, summary_request, SummaryMeta};
 use wisp_intel::{propose_learning, LearningInput, Proposal};
 use wisp_library::{meeting_ref, Library, RetrievalQuery, Snippet, StoredLogEntry, StoredOp};
 use wisp_library::{MemoryEntry, Project};
@@ -676,6 +677,86 @@ pub(crate) fn intel_saved_items(
     Ok(meeting.live_items().into_iter().cloned().collect())
 }
 
+/// Every item of a saved meeting's state, superseded and withdrawn ones included, by kind then id.
+/// Empty if it has none.
+#[tauri::command]
+pub(crate) fn intel_saved_state(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Vec<StateItem>, String> {
+    let (meeting, _) = saved_meeting(&state, &id)?;
+    let mut items: Vec<StateItem> = meeting.items.into_values().collect();
+    items.sort_by_key(|i| (i.kind, item_number(&i.id)));
+    Ok(items)
+}
+
+/// The number part of an item id, for ordering `REQ-2` before `REQ-10`.
+fn item_number(id: &str) -> u32 {
+    id.rsplit_once('-')
+        .and_then(|(_, n)| n.parse().ok())
+        .unwrap_or(0)
+}
+
+/// A new summary, and whether it had to be made from the transcript (the meeting has no state).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SummaryDto {
+    markdown: String,
+    from_transcript: bool,
+}
+
+/// Summarizes a saved meeting in one reasoning call over its state (the end of its transcript
+/// when it has none), and stores the result as its summary, replacing any earlier one. `when` is
+/// the display date, formatted by the webview.
+#[tauri::command]
+pub(crate) async fn meeting_summarize(
+    app: AppHandle,
+    id: String,
+    when: Option<String>,
+) -> Result<SummaryDto, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let (meeting, lines) = saved_meeting(&state, &id)?;
+        if meeting.live_items().is_empty() && lines.is_empty() {
+            return Err("nothing to summarize: this meeting has no state or transcript".to_owned());
+        }
+        let title = state
+            .library
+            .lock()
+            .map_err(|_| "library lock poisoned".to_owned())?
+            .get_note(&id)
+            .map_err(|e| e.to_string())?
+            .map(|(note, _)| note.title)
+            .unwrap_or_default();
+        let meta = SummaryMeta {
+            title,
+            when: when.unwrap_or_default(),
+            participants: participants(&lines),
+        };
+        let context = summary_context(&meta, &meeting, &lines);
+        let backend = crate::reasoning::backend_for(&state, Some(id.clone()));
+        let response = backend
+            .invoke(
+                &summary_request(&context, std::time::Duration::from_secs(180)),
+                &CancelToken::new(),
+            )
+            .map_err(|e| e.to_string())?;
+        let markdown = parse_summary(response.output)?.to_markdown();
+        state
+            .library
+            .lock()
+            .map_err(|_| "library lock poisoned".to_owned())?
+            .set_summary(&id, &markdown)
+            .map_err(|e| e.to_string())?;
+        Ok(SummaryDto {
+            markdown,
+            from_transcript: context.from_transcript,
+        })
+    })
+    .await
+    .map_err(|e| format!("summary task failed: {e}"))?
+}
+
 /// A review's follow-ups, and where they came from: `"model"`, or `"state"` when no model was
 /// available (then `note` says why).
 #[derive(Serialize)]
@@ -1326,6 +1407,110 @@ fn export_source(
     })
 }
 
+/// A stored segment as a transcript segment, for the transcript formatters.
+fn stored_segment(s: &wisp_library::Segment) -> TranscriptSegment {
+    let ms = |v: i64| std::time::Duration::from_millis(v.max(0) as u64);
+    TranscriptSegment {
+        id: s.idx.max(0) as u64,
+        text: s.text.clone(),
+        start: ms(s.start_ms),
+        end: ms(s.end_ms),
+        status: wisp_core::transcript::SegmentStatus::Final,
+        source: match s.source.as_str() {
+            "mic" => AudioSourceKind::Microphone,
+            "system" => AudioSourceKind::System,
+            _ => AudioSourceKind::File,
+        },
+        speaker: s.speaker.and_then(|n| u32::try_from(n).ok()).map(SpeakerId),
+        confidence: None,
+        words: Vec::new(),
+        aux_text: None,
+    }
+}
+
+/// The transcript as Markdown: the live (or just-stopped) meeting's when `id` is `None`, else the
+/// saved meeting's, led by its summary.
+fn render_transcript(
+    state: &AppState,
+    id: Option<&str>,
+    title: Option<String>,
+    when: Option<String>,
+) -> Result<String, String> {
+    let title = title.filter(|t| !t.trim().is_empty());
+    let (mut segments, names, meta) = match id {
+        None => {
+            let segments = state
+                .live_segments
+                .lock()
+                .map_err(|_| "state lock poisoned".to_owned())?
+                .clone();
+            let meta = wisp_core::export::MeetingMeta {
+                title: Some(title.unwrap_or_else(|| "Current meeting".to_owned())),
+                date: when,
+                ..Default::default()
+            };
+            (segments, live_speaker_names(state), meta)
+        }
+        Some(id) => {
+            let library = state
+                .library
+                .lock()
+                .map_err(|_| "library lock poisoned".to_owned())?;
+            let (note, stored) = library
+                .get_note(id)
+                .map_err(|e| e.to_string())?
+                .ok_or("no such meeting")?;
+            let names = library.speaker_names(id).map_err(|e| e.to_string())?;
+            let meta = wisp_core::export::MeetingMeta {
+                title: Some(title.unwrap_or(note.title)),
+                date: when,
+                engine: note.engine,
+                language: note.language,
+                summary: note.summary,
+            };
+            (stored.iter().map(stored_segment).collect(), names, meta)
+        }
+    };
+    if segments.is_empty() {
+        return Err("this meeting has no transcript".to_owned());
+    }
+    segments.sort_by_key(|s| s.start);
+    Ok(wisp_core::export::format_markdown_named(
+        &segments, &meta, &names,
+    ))
+}
+
+/// The saved meeting's summary as a document. The live meeting has none until it is saved.
+fn render_summary(
+    state: &AppState,
+    id: Option<&str>,
+    title: Option<String>,
+    when: Option<String>,
+) -> Result<String, String> {
+    let id = id.ok_or("the meeting has no summary yet")?;
+    let note = state
+        .library
+        .lock()
+        .map_err(|_| "library lock poisoned".to_owned())?
+        .get_note(id)
+        .map_err(|e| e.to_string())?
+        .ok_or("no such meeting")?
+        .0;
+    let summary = note
+        .summary
+        .filter(|s| !s.trim().is_empty())
+        .ok_or("the meeting has no summary yet")?;
+    let title = title.filter(|t| !t.trim().is_empty()).unwrap_or(note.title);
+    let mut out = format!("# {title}\n\n");
+    if let Some(when) = when.filter(|w| !w.trim().is_empty()) {
+        out.push_str(&format!("_{when}_\n\n"));
+    }
+    out.push_str(summary.trim());
+    out.push('\n');
+    Ok(out)
+}
+
+/// `kind` is `summary`, `record`, `transcript`, `packet` or `json`.
 fn render_export(
     state: &AppState,
     id: Option<&str>,
@@ -1333,6 +1518,11 @@ fn render_export(
     title: Option<String>,
     when: Option<String>,
 ) -> Result<String, String> {
+    match kind {
+        "summary" => return render_summary(state, id, title, when),
+        "transcript" => return render_transcript(state, id, title, when),
+        _ => {}
+    }
     let source = export_source(state, id, title, when)?;
     source.render(kind, |r| {
         state
@@ -1346,8 +1536,8 @@ fn render_export(
     })
 }
 
-/// A meeting's state as a document: `kind` is `record`, `packet` or `json`. `id` `None` means the
-/// live (or just-stopped) meeting. `when` is the display date, formatted by the webview.
+/// A meeting as a document: `kind` is `summary`, `record`, `transcript`, `packet` or `json`. `id`
+/// `None` means the live (or just-stopped) meeting. `when` is the display date, formatted by the webview.
 #[tauri::command]
 pub(crate) fn intel_export(
     state: State<'_, AppState>,

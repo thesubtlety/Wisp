@@ -20,6 +20,8 @@ pub enum TaskKind {
     Assist,
     /// A short title for a meeting.
     Title,
+    /// A meeting summary, built from its structured state.
+    Summary,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

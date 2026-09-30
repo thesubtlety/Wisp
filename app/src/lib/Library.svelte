@@ -2,12 +2,16 @@
   // The Library — a browsable, searchable archive of finished notes. Reads from the SQLite-backed
   // store via the note commands; search uses the backend's full-text index (with a short-CJK
   // substring fallback). List ⇄ detail in one view; deletes go through a confirm modal.
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { i18n } from "$lib/i18n.svelte";
   import Modal from "$lib/Modal.svelte";
   import ShotThumb from "$lib/ShotThumb.svelte";
   import { intel, loadProjects, createProject, renameProject, type MemoryItem } from "$lib/intel.svelte";
+  import type { StateItem } from "$lib/intel.svelte";
+  import MeetingState from "$lib/MeetingState.svelte";
+  import MeetingExports from "$lib/MeetingExports.svelte";
+  import SummaryView from "$lib/SummaryView.svelte";
 
   // "New meeting in this project": the page switches to Live with the project selected.
   // Hidden while a session runs: switching projects then would refile the running meeting.
@@ -102,6 +106,44 @@
   let newProjectOpen = $state(false);
   let newProjectName = $state("");
   let moveNote = $state("");
+
+  // The meeting page's tabs: its transcript, its structured state, and its summary. A state
+  // item's evidence chip jumps to (and highlights) its transcript line.
+  let detailTab = $state<"transcript" | "state" | "summary">("transcript");
+  let stateItems = $state<StateItem[]>([]);
+  let highlightIdx = $state<number | null>(null);
+  let shownMeetingId = "";
+  $effect(() => {
+    const id = detail?.meeting.id ?? "";
+    if (id === shownMeetingId) return;
+    shownMeetingId = id;
+    detailTab = "transcript";
+    highlightIdx = null;
+    stateItems = [];
+    if (!id) return;
+    invoke<StateItem[]>("intel_saved_state", { id })
+      .then((items) => {
+        if (detail?.meeting.id === id) stateItems = items;
+      })
+      .catch(() => {});
+  });
+
+  /** A transcript line's time, for an evidence ref into this meeting that still resolves. */
+  function refLabel(ref: string): string | null {
+    const m = /^M(.+):T(\d+)$/.exec(ref);
+    if (!detail || !m || m[1] !== detail.meeting.id) return null;
+    const seg = detail.segments.find((s) => s.idx === Number(m[2]));
+    return seg ? fmtDuration(seg.start_ms) : null;
+  }
+
+  async function showRef(ref: string) {
+    const m = /:T(\d+)$/.exec(ref);
+    if (!m) return;
+    highlightIdx = Number(m[1]);
+    detailTab = "transcript";
+    await tick();
+    document.getElementById(`seg-${highlightIdx}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
 
   // Speaker names: click a speaker to rename it everywhere in the meeting, or merge it into another
   // (diarization sometimes splits one person in two). Colours match the Live feed.
@@ -558,27 +600,60 @@
       </div>
     </header>
 
-    {#if detail.meeting.summary}
-      <div class="summary">{detail.meeting.summary}</div>
-    {/if}
+    <div class="meeting-exports">
+      <MeetingExports
+        target={{ id: detail.meeting.id, title: null, when: fmtDate(detail.meeting.started_at_ms) }}
+        startedAt={detail.meeting.started_at_ms}
+        unavailable={[
+          ...(detail.meeting.summary ? [] : (["summary"] as const)),
+          ...(detail.segments.length ? [] : (["transcript"] as const)),
+        ]}
+      />
+    </div>
 
-    <div class="transcript">
-      {#each detail.segments as seg (seg.idx)}
-        <p class="seg">
-          <span class="ts" title={fmtClock(detail!.meeting.started_at_ms + seg.start_ms)}>{fmtDuration(seg.start_ms)}</span>
-          <span class="seg-body">
-            {#if speakerLabel(seg.source)}<span class="spk" class:them={seg.source === "system"}
-                >{speakerLabel(seg.source)}</span
-              >{/if}{#if seg.speaker !== null}{@const n = seg.speaker}<button
-                class="spk dia"
-                style="--spk: {speakerColor(n)}"
-                title={i18n.t.library.speakerTip}
-                onclick={() => startSpeakerEdit(n)}>{diarizedLabel(n)}</button
-              >{/if}<span class="txt">{seg.text}</span>
-          </span>
-        </p>
+    <div class="detail-tabs" role="tablist">
+      {#each [["transcript", i18n.t.library.tabTranscript], ["state", i18n.t.library.tabState], ["summary", i18n.t.library.tabSummary]] as const as [tab, label] (tab)}
+        <button role="tab" aria-selected={detailTab === tab} class:on={detailTab === tab} onclick={() => (detailTab = tab)}
+          >{label}{#if tab === "state" && stateItems.length}<span class="tab-count">{stateItems.length}</span>{/if}</button
+        >
       {/each}
     </div>
+
+    {#if detailTab === "state"}
+      {#if stateItems.length}
+        <MeetingState items={stateItems} {refLabel} onRef={showRef} />
+      {:else}
+        <p class="move-note">{i18n.t.library.stateNone}</p>
+      {/if}
+    {:else if detailTab === "summary"}
+      <SummaryView
+        meetingId={detail.meeting.id}
+        when={fmtDate(detail.meeting.started_at_ms)}
+        summary={detail.meeting.summary ?? ""}
+        hasState={stateItems.length > 0}
+        onSummary={(md) => {
+          if (detail) detail.meeting.summary = md;
+        }}
+      />
+    {:else}
+      <div class="transcript">
+        {#each detail.segments as seg (seg.idx)}
+          <p class="seg" id="seg-{seg.idx}" class:hl={highlightIdx === seg.idx}>
+            <span class="ts" title={fmtClock(detail!.meeting.started_at_ms + seg.start_ms)}>{fmtDuration(seg.start_ms)}</span>
+            <span class="seg-body">
+              {#if speakerLabel(seg.source)}<span class="spk" class:them={seg.source === "system"}
+                  >{speakerLabel(seg.source)}</span
+                >{/if}{#if seg.speaker !== null}{@const n = seg.speaker}<button
+                  class="spk dia"
+                  style="--spk: {speakerColor(n)}"
+                  title={i18n.t.library.speakerTip}
+                  onclick={() => startSpeakerEdit(n)}>{diarizedLabel(n)}</button
+                >{/if}<span class="txt">{seg.text}</span>
+            </span>
+          </p>
+        {/each}
+      </div>
+    {/if}
   {:else}
     <header class="lib-head">
       <h2 class="lib-h2">{i18n.t.library.title}</h2>
@@ -1136,15 +1211,33 @@
     border-color: var(--stop);
   }
 
-  .summary {
-    padding: 13px 15px;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    font-size: 13.5px;
-    line-height: 1.6;
+  .detail-tabs {
+    display: flex;
+    gap: 4px;
+    border-bottom: 1px solid var(--border);
+  }
+  .detail-tabs button {
+    font: inherit;
+    font-size: 13px;
+    color: var(--muted);
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    padding: 6px 10px;
+    cursor: pointer;
+  }
+  .detail-tabs button.on {
     color: var(--text);
-    white-space: pre-wrap;
+    border-bottom-color: var(--accent);
+  }
+  .tab-count {
+    margin-left: 6px;
+    font-size: 11px;
+    color: var(--muted);
+  }
+  .seg.hl {
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
   }
 
   .transcript {
