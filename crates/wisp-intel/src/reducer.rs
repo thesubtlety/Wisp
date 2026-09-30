@@ -366,7 +366,7 @@ impl Ctx<'_> {
 }
 
 /// Item text with whitespace collapsed; present, non-empty, and within [`MAX_TEXT_CHARS`].
-fn clean_text(text: Option<&str>) -> Result<String, RejectReason> {
+pub(crate) fn clean_text(text: Option<&str>) -> Result<String, RejectReason> {
     let text = text.ok_or(RejectReason::Missing("text"))?;
     let cleaned = text.split_whitespace().collect::<Vec<_>>().join(" ");
     let n = cleaned.chars().count();
@@ -380,7 +380,7 @@ fn clean_text(text: Option<&str>) -> Result<String, RejectReason> {
 }
 
 /// An owner or due value, trimmed and shortened; blank means absent.
-fn clean_field(value: Option<&str>) -> Option<String> {
+pub(crate) fn clean_field(value: Option<&str>) -> Option<String> {
     let v = value?.split_whitespace().collect::<Vec<_>>().join(" ");
     (!v.is_empty()).then(|| v.chars().take(MAX_FIELD_CHARS).collect())
 }

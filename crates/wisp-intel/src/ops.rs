@@ -84,6 +84,20 @@ pub enum ResolvedOp {
         superseded_by: Option<String>,
         add_refs: Vec<SourceRef>,
     },
+    /// A change the user made by hand to a saved meeting's item. It cites no evidence: the user is
+    /// the source. Fields that are `Some` change; an empty `owner` or `due` clears it. The reducer
+    /// never produces it; [`crate::edit::user_edit`] does.
+    UserEdit {
+        id: String,
+        #[serde(default)]
+        text: Option<String>,
+        #[serde(default)]
+        owner: Option<String>,
+        #[serde(default)]
+        due: Option<String>,
+        #[serde(default)]
+        lifecycle: Option<Lifecycle>,
+    },
 }
 
 impl ResolvedOp {
@@ -92,7 +106,8 @@ impl ResolvedOp {
         match self {
             ResolvedOp::Add { id, .. }
             | ResolvedOp::Update { id, .. }
-            | ResolvedOp::SetLifecycle { id, .. } => id,
+            | ResolvedOp::SetLifecycle { id, .. }
+            | ResolvedOp::UserEdit { id, .. } => id,
         }
     }
 }
@@ -209,6 +224,28 @@ impl MeetingState {
                     item.superseded_by = superseded_by.clone();
                 }
                 push_new(&mut item.source_refs, add_refs);
+                touch(item, at);
+            }
+            ResolvedOp::UserEdit {
+                id,
+                text,
+                owner,
+                due,
+                lifecycle,
+            } => {
+                let item = self.item_mut(seq, id)?;
+                if let Some(t) = text {
+                    item.text = t.clone();
+                }
+                if let Some(o) = owner {
+                    item.owner = (!o.is_empty()).then(|| o.clone());
+                }
+                if let Some(d) = due {
+                    item.due = (!d.is_empty()).then(|| d.clone());
+                }
+                if let Some(l) = lifecycle {
+                    item.lifecycle = *l;
+                }
                 touch(item, at);
             }
         }

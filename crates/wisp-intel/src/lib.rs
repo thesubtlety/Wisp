@@ -13,6 +13,8 @@
 //!   [`wisp_reasoning::ReasoningBackend`].
 //! - [`ask`] — questions about the meeting, answered with checked citations.
 //! - [`brief`] — the project brief: knowledge and live items across a project's meetings.
+//! - [`edit`] — the user's hand edits to items, appended to a meeting's log, and hand-added
+//!   project items.
 //! - [`export`] — the meeting record, the AI context packet and the state as JSON.
 //! - [`endgame`] — wrap-up signals and the gap audit run when the meeting is closing.
 //! - [`intervene`] — proposed interventions and the conservative local filter that decides
@@ -32,6 +34,7 @@ pub mod about;
 pub mod analyze;
 pub mod ask;
 pub mod brief;
+pub mod edit;
 pub mod endgame;
 pub mod evidence;
 pub mod export;
@@ -53,7 +56,14 @@ pub use analyze::{
     PreparedPass,
 };
 pub use ask::{ask, ask_schema, prepare_ask, AskAnswer, AskInput, AskTurn, Citation};
-pub use brief::{iso_date, project_brief, BriefInput, BriefMeeting};
+pub use brief::{
+    iso_date, project_brief, project_overview, BriefInput, BriefMeeting, ItemMeeting, OverviewItem,
+    ProjectOverview,
+};
+pub use edit::{
+    append_user_edit, edit_manual_item, new_manual_item, user_edit, EditError, ItemChange,
+    MANUAL_KINDS,
+};
 pub use endgame::{
     audit, prepare_audit, wrap_probability, AuditInput, AuditReport, EndgameTrigger, Gap,
     GapCategory,
