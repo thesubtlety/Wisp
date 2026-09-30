@@ -22,8 +22,8 @@ use wisp_intel::{
     StateItem, TranscriptLine, LIVE_MEETING_ID,
 };
 use wisp_intel::{context_packet, meeting_record, memory_ref, state_json, ExportMeta};
-use wisp_intel::{parse_summary, participants, summary_context, summary_request, SummaryMeta};
 use wisp_intel::{iso_date, project_brief, BriefInput, BriefMeeting};
+use wisp_intel::{parse_summary, participants, summary_context, summary_request, SummaryMeta};
 use wisp_intel::{propose_learning, LearningInput, Proposal};
 use wisp_library::{meeting_ref, Library, RetrievalQuery, Snippet, StoredLogEntry, StoredOp};
 use wisp_library::{MeetingKnowledge, MemoryEntry, Project};
