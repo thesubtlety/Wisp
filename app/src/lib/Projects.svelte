@@ -10,6 +10,8 @@
   import ShotThumb from "$lib/ShotThumb.svelte";
   import MeetingPage from "$lib/MeetingPage.svelte";
   import ProjectOverview from "$lib/ProjectOverview.svelte";
+  import MeetingKnowledge from "$lib/MeetingKnowledge.svelte";
+  import Markdown from "$lib/Markdown.svelte";
   import { intel, loadProjects, createProject, renameProject, type MemoryItem } from "$lib/intel.svelte";
   import { copyText } from "$lib/clipboard";
 
@@ -524,6 +526,12 @@
             {/each}
           </ul>
         {/if}
+        <MeetingKnowledge
+          projectId={project.id}
+          {memory}
+          onOpenMeeting={(id) => (openMeeting = id)}
+          onKept={() => project && loadMemory(project.id)}
+        />
         {#if shots.length}
           <h3 class="h3">{i18n.t.library.screenshots} <span class="quiet">{shots.length}</span></h3>
           <ul class="shots">
@@ -555,7 +563,7 @@
         {:else if !briefText}
           <p class="quiet">{i18n.t.library.briefLoading}</p>
         {:else}
-          <pre class="brief" aria-label={i18n.t.library.projectBrief}>{briefText}</pre>
+          <article class="brief" aria-label={i18n.t.library.projectBrief}><Markdown md={briefText} /></article>
         {/if}
       {:else}
         <div class="settings">
@@ -957,15 +965,11 @@
     white-space: nowrap;
   }
   .brief {
-    white-space: pre-wrap;
-    word-break: break-word;
-    font-size: 0.85rem;
-    line-height: 1.45;
-    padding: 10px 12px;
-    border-radius: 8px;
+    max-width: 760px;
+    padding: 18px 22px;
+    border-radius: 12px;
     background: var(--surface);
     border: 1px solid var(--border);
-    margin: 0;
   }
   .settings {
     display: flex;

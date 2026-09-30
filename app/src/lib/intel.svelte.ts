@@ -129,12 +129,23 @@ export type OverviewItem = {
   meeting: { id: string; title: string; when: string; startedAtMs: number; itemId: string } | null;
   manualId: string | null;
 };
+/** A meeting's summary in one line: `tldr` is null when it has no summary. */
+export type MeetingGist = { id: string; tldr: string | null; counts: string };
+/** A meeting item that could be kept as project knowledge (as `knowledgeKind`). */
+export type KnowledgeCandidate = OverviewItem & {
+  knowledgeKind: string;
+  status: "stated" | "inferred";
+  confidence: number;
+  provenance: ProvenanceRef[];
+};
 export type ProjectOverview = {
   commitments: OverviewItem[];
   openQuestions: OverviewItem[];
   decisions: OverviewItem[];
   risks: OverviewItem[];
   done: OverviewItem[];
+  meetings: MeetingGist[];
+  fromMeetings: KnowledgeCandidate[];
 };
 /** Kinds whose items can be marked done. */
 export const RESOLVABLE: ItemKind[] = ["commitment", "task_candidate", "open_question", "risk"];
@@ -490,6 +501,20 @@ export async function proposeLearning() {
   } finally {
     intel.learningBusy = false;
   }
+}
+
+/** Keeps one meeting item as knowledge of the meeting's project. */
+export async function keepAsKnowledge(c: KnowledgeCandidate) {
+  if (!c.meeting) return;
+  const proposal: Proposal = {
+    kind: c.knowledgeKind,
+    text: c.text,
+    status: c.status,
+    confidence: c.confidence,
+    provenance: c.provenance,
+    accepted: true,
+  };
+  await invoke<number>("intel_learning_save", { id: c.meeting.id, proposals: [proposal] });
 }
 
 /** Stores the accepted proposals in the project. */
