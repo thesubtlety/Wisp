@@ -1107,6 +1107,7 @@ mod tests {
             ("source", q("SELECT count(*) FROM source WHERE project_id = ?1", project)),
             ("source_chunk", q("SELECT count(*) FROM source_chunk c JOIN source s ON s.id = c.source_id WHERE s.project_id = ?1", project)),
             ("project_memory", q("SELECT count(*) FROM project_memory WHERE project_id = ?1", project)),
+            ("project_item", q("SELECT count(*) FROM project_item WHERE project_id = ?1", project)),
         ]
     }
 
@@ -1145,6 +1146,19 @@ mod tests {
                 confidence: 1.0,
                 provenance: vec![],
                 meeting_id: Some("m1".into()),
+            },
+            T0,
+        )
+        .unwrap();
+        lib.add_project_item(
+            "p",
+            "pi-1",
+            &crate::ProjectItemInput {
+                kind: "risk".into(),
+                text: "Budget may slip".into(),
+                owner: None,
+                due: None,
+                lifecycle: "active".into(),
             },
             T0,
         )
