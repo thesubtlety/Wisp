@@ -679,8 +679,16 @@ impl Worker {
             && self.guess_passes < GUESS_PASSES
     }
 
+    /// One pass. The gap before the next one (and any backoff) counts from when this one ends:
+    /// a CLI pass can take longer than a fast cadence's interval, which would otherwise make
+    /// passes run back to back.
     fn pass(&mut self) {
         self.last_pass = Some(Instant::now());
+        self.run_pass();
+        self.last_pass = Some(Instant::now());
+    }
+
+    fn run_pass(&mut self) {
         let guessing = self.guessing();
         let query = retrieval_text(&self.state, &self.lines);
         let retrieved = self.with_pins(if query.is_empty() {

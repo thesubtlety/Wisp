@@ -75,14 +75,16 @@ impl MeetingType {
         CardStyle::parse(&self.card_style).unwrap_or(CardStyle::Balanced)
     }
 
-    /// The same type with text trimmed, blank list lines dropped, and unknown knob names replaced
-    /// by the defaults. What the store writes.
+    /// The same type with text trimmed, blank and repeated list lines dropped (case-insensitive;
+    /// a repeated summary heading would break a strict output schema), and unknown knob names
+    /// replaced by the defaults. What the store writes.
     pub fn cleaned(&self) -> Self {
         let list = |items: &[String]| -> Vec<String> {
+            let mut seen = std::collections::HashSet::new();
             items
                 .iter()
                 .map(|s| s.trim().to_owned())
-                .filter(|s| !s.is_empty())
+                .filter(|s| !s.is_empty() && seen.insert(s.to_lowercase()))
                 .collect()
         };
         Self {
@@ -288,9 +290,11 @@ impl Library {
 
     /// Records (or with `None` clears) the type a saved meeting ran as. Returns whether the meeting
     /// exists.
+    /// Records a meeting's type. An id that no longer names a type (deleted meanwhile) is stored as
+    /// none, so no row points at a missing type.
     pub fn set_meeting_type(&self, meeting_id: &str, type_id: Option<&str>) -> Result<bool> {
         let n = self.conn.execute(
-            "UPDATE meeting SET type_id = ?2 WHERE id = ?1",
+            "UPDATE meeting SET type_id = (SELECT id FROM meeting_type WHERE id = ?2) WHERE id = ?1",
             rusqlite::params![meeting_id, type_id],
         )?;
         Ok(n > 0)
@@ -418,6 +422,13 @@ mod tests {
     }
 
     #[test]
+    fn repeated_and_blank_list_lines_are_dropped() {
+        let mut t = custom("u1");
+        t.summary_sections = vec!["Risks".into(), " risks ".into(), "".into(), "Owners".into()];
+        assert_eq!(t.cleaned().summary_sections, ["Risks", "Owners"]);
+    }
+
+    #[test]
     fn a_meeting_keeps_its_type_across_a_resave_and_loses_a_deleted_one() {
         let mut lib = Library::open_in_memory().unwrap();
         lib.save_note("m1", &MeetingMeta::default(), 0, &[])
@@ -439,6 +450,10 @@ mod tests {
         lib.delete_meeting_type("u1").unwrap();
         assert_eq!(lib.meeting_type_id("m1").unwrap(), None);
         assert_eq!(lib.project_default_type("p").unwrap(), None);
+        // A save that names the deleted type (e.g. a meeting still running when it was deleted)
+        // records none.
+        assert!(lib.set_meeting_type("m1", Some("u1")).unwrap());
+        assert_eq!(lib.meeting_type_id("m1").unwrap(), None);
         assert_eq!(lib.meeting_type_id("missing").unwrap(), None);
     }
 

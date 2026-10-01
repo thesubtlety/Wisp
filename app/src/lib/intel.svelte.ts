@@ -291,6 +291,9 @@ export const intel = $state({
   projectDefaultType: "",
   /** The type the live meeting runs as, as the backend reports it. */
   liveType: null as null | { typeId: string; name: string; chosen: boolean },
+  // The user picked a type during this meeting (even "Auto"): a suggestion from a pass already
+  // running then never shows.
+  typePickedLive: false,
   /** A suggested type, until switched to or dismissed. */
   typeGuess: null as null | TypeGuess,
 });
@@ -403,7 +406,7 @@ export function ensureIntelListener(): Promise<unknown> {
     }
     if (u.kind === "typeSuggested") {
       // Sent at most once per meeting; a choice made meanwhile wins.
-      if (!intel.liveType?.chosen) {
+      if (!intel.liveType?.chosen && !intel.typePickedLive) {
         intel.typeGuess = u.guess;
         intel.unseen += 1;
       }
@@ -443,6 +446,7 @@ export function ensureIntelListener(): Promise<unknown> {
 /** Clears state and conversation for a new meeting. */
 export function resetIntel() {
   intel.liveType = null;
+  intel.typePickedLive = false;
   intel.typeGuess = null;
   intel.items = [];
   intel.lastPass = null;
@@ -525,7 +529,10 @@ export function autoTypeId(): string {
 export async function pickMeetingType(id: string, running: boolean) {
   intel.typePick = id;
   intel.typeGuess = null;
-  if (running) await invoke<boolean>("intel_set_meeting_type", { typeId: id || null });
+  if (running) {
+    intel.typePickedLive = true;
+    await invoke<boolean>("intel_set_meeting_type", { typeId: id || null });
+  }
 }
 
 /** Switches to the suggested type. */
