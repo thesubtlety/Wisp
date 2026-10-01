@@ -33,6 +33,7 @@
     speakers,
     title,
     date,
+    suggested = [],
   }: {
     /** A saved meeting to run over. Its runs are kept. */
     meetingId?: string;
@@ -46,6 +47,8 @@
     title?: string;
     /** Fills {date}; a saved meeting defaults to its start date. */
     date?: string;
+    /** Prompt names the meeting's type suggests: listed first, and the first is preselected. */
+    suggested?: string[];
   } = $props();
 
   const t = $derived(i18n.t.prompts);
@@ -63,6 +66,22 @@
 
   const saved = $derived(!live && !!meetingId);
   const current = $derived(prompts.find((p) => p.id === promptId) ?? prompts[0]);
+  // The meeting type's suggested prompts, in its order (matched by name, or by id), then the rest.
+  const suggestedPrompts = $derived(
+    suggested
+      .map((name) => prompts.find((p) => p.name.toLowerCase() === name.trim().toLowerCase() || p.id === name))
+      .filter((p, i, all): p is Prompt => !!p && all.indexOf(p) === i),
+  );
+  const otherPrompts = $derived(prompts.filter((p) => !suggestedPrompts.includes(p)));
+  // A typed meeting opens on its first suggested prompt.
+  let preselected = "";
+  $effect(() => {
+    const first = suggestedPrompts[0]?.id;
+    if (first && preselected !== first) {
+      preselected = first;
+      promptId = first;
+    }
+  });
   const needsSpeaker = $derived(current?.scope === "speaker");
   const hasTranscript = $derived(saved || transcript.trim() !== "");
   const canRun = $derived(
@@ -321,9 +340,22 @@
         onchange={(e) => remember(e.currentTarget.value)}
         disabled={running}
       >
-        {#each prompts as p (p.id)}
-          <option value={p.id}>{p.name}</option>
-        {/each}
+        {#if suggestedPrompts.length}
+          <optgroup label={i18n.t.meetingTypes.suggested}>
+            {#each suggestedPrompts as p (p.id)}
+              <option value={p.id}>{p.name}</option>
+            {/each}
+          </optgroup>
+          <optgroup label={i18n.t.meetingTypes.otherPrompts}>
+            {#each otherPrompts as p (p.id)}
+              <option value={p.id}>{p.name}</option>
+            {/each}
+          </optgroup>
+        {:else}
+          {#each prompts as p (p.id)}
+            <option value={p.id}>{p.name}</option>
+          {/each}
+        {/if}
       </select>
     </label>
 

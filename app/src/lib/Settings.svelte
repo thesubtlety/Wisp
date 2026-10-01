@@ -10,6 +10,7 @@
   import EndpointsManager from "$lib/EndpointsManager.svelte";
   import NotesSearch from "$lib/NotesSearch.svelte";
   import AiActivity from "$lib/AiActivity.svelte";
+  import MeetingTypesManager from "$lib/MeetingTypesManager.svelte";
   import { i18n } from "$lib/i18n.svelte";
 
   let {
@@ -26,9 +27,10 @@
     detectMeetingsSupported?: boolean;
   } = $props();
 
-  type Section = "models" | "search" | "downloads" | "dictation" | "storage" | "activity";
+  type Section = "models" | "meetingTypes" | "search" | "downloads" | "dictation" | "storage" | "activity";
   const sections = $derived<{ id: Section; label: string }[]>([
     { id: "models", label: i18n.t.settings.aiModels },
+    { id: "meetingTypes", label: i18n.t.meetingTypes.title },
     { id: "search", label: i18n.t.settings.search },
     { id: "downloads", label: i18n.t.settings.downloads },
     { id: "dictation", label: i18n.t.settings.dictation },
@@ -388,6 +390,8 @@
         <div class="settings-content">
           {#if section === "models"}
             <EndpointsManager />
+          {:else if section === "meetingTypes"}
+            <MeetingTypesManager />
           {:else if section === "activity"}
             <AiActivity />
           {:else if section === "search"}

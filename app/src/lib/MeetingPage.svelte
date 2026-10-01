@@ -6,7 +6,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { i18n } from "$lib/i18n.svelte";
   import Modal from "$lib/Modal.svelte";
-  import { intel, createProject, type ItemChange, type StateItem } from "$lib/intel.svelte";
+  import { intel, createProject, loadMeetingTypes, type ItemChange, type StateItem } from "$lib/intel.svelte";
   import MeetingState from "$lib/MeetingState.svelte";
   import MeetingExports from "$lib/MeetingExports.svelte";
   import SummaryView from "$lib/SummaryView.svelte";
@@ -46,7 +46,17 @@
     text: string;
   };
   // `speakerNames` maps a diarized speaker id (0-based) to the name the user gave it.
-  type Detail = { meeting: Note; segments: Segment[]; speakerNames: Record<number, string> };
+  // The saved type's suggested prompts come from the type list.
+  $effect(() => {
+    if (!intel.meetingTypes.length) loadMeetingTypes();
+  });
+  type Detail = {
+    meeting: Note;
+    segments: Segment[];
+    speakerNames: Record<number, string>;
+    /** The meeting type it ran as, if recorded. */
+    meetingType: { id: string; name: string } | null;
+  };
 
   let detail = $state<Detail | null>(null);
   let error = $state("");
@@ -375,6 +385,9 @@
           .meeting.engine
           ? ` · ${detail.meeting.engine}`
           : ""}
+        {#if detail.meetingType}<span class="type-chip" title={i18n.t.meetingTypes.label}
+            >{detail.meetingType.name}</span
+          >{/if}
       </span>
       <span class="project-row">
         <span class="project-label">{i18n.t.library.project}</span>
@@ -484,6 +497,7 @@
   {:else if detailTab === "prompts"}
     <PromptRunner
       meetingId={detail.meeting.id}
+      suggested={intel.meetingTypes.find((t) => t.id === detail?.meetingType?.id)?.suggestedPrompts ?? []}
       speakers={meetingSpeakers}
       title={detail.meeting.title}
       date={fmtDate(detail.meeting.started_at_ms)}
@@ -745,6 +759,17 @@
   }
 
   .spk.dia,
+  .type-chip {
+    display: inline-block;
+    margin-left: 6px;
+    font-size: 11px;
+    padding: 1px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    vertical-align: 1px;
+  }
+
   .spk-chip {
     padding: 0;
     font: inherit;

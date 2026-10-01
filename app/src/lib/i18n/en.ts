@@ -718,6 +718,53 @@ export const en = {
     emptyAfter: "), or OpenAI.",
   },
 
+  // Meeting types: what kind of meeting this is, which tunes live intelligence.
+  meetingTypes: {
+    label: "Meeting type",
+    auto: (name: string) => `Auto · ${name}`,
+    nowUsing: (name: string) => `Meeting type: ${name}`,
+    suggestion: (name: string) => `Looks like ${name}. Switch?`,
+    switch: "Switch",
+    projectDefault: "Default meeting type",
+    projectDefaultHelp: "Meetings in this project start as this type unless you pick another.",
+    noDefault: "None (General)",
+    title: "Meeting types",
+    help: "A meeting type tunes live insights: how often they run, what they watch for, which cards you see, the wrap-up checklist, the summary, and which prompts are offered first.",
+    newType: "New type",
+    untitled: "New meeting type",
+    name: "Name",
+    description: "When to use it",
+    descriptionHelp: "Also helps Wisp suggest a type when you didn't pick one.",
+    watchFor: "Watch for",
+    watchForHelp: "Added to every live pass.",
+    cardStyle: "Cards",
+    cardStyles: {
+      questions: "Questions to ask",
+      gaps: "Gaps",
+      risks: "Risks and conflicts",
+      balanced: "Balanced",
+    },
+    cadence: "Cadence",
+    cadences: {
+      fast: "Fast (every 15–30 s)",
+      normal: "Normal",
+      calm: "Calm (less often)",
+    },
+    wrapChecklist: "Wrap-up checklist",
+    summarySections: "Summary sections",
+    suggestedPrompts: "Suggested prompts",
+    onePerLine: "One per line.",
+    suggested: "Suggested for this meeting type",
+    otherPrompts: "Other prompts",
+    builtin: "Built-in",
+    edited: "Edited",
+    save: "Save",
+    cancel: "Cancel",
+    delete: "Delete",
+    deleteConfirm: (name: string) => `Delete "${name}"? Meetings that used it keep no type.`,
+    reset: "Reset to default",
+  },
+
   // User-facing error toasts (set in <script>).
   // Meeting intelligence panel (IntelPanel.svelte).
   intel: {

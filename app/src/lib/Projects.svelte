@@ -12,7 +12,15 @@
   import ProjectOverview from "$lib/ProjectOverview.svelte";
   import MeetingKnowledge from "$lib/MeetingKnowledge.svelte";
   import Markdown from "$lib/Markdown.svelte";
-  import { intel, loadProjects, createProject, renameProject, type MemoryItem } from "$lib/intel.svelte";
+  import {
+    intel,
+    loadProjects,
+    createProject,
+    renameProject,
+    loadMeetingTypes,
+    loadProjectDefaultType,
+    type MemoryItem,
+  } from "$lib/intel.svelte";
   import { copyText } from "$lib/clipboard";
 
   // "New meeting in this project": the page switches to Live with the project selected. Hidden
@@ -166,7 +174,32 @@
         if (selected === id) instructions = text;
       })
       .catch(() => {});
+    defaultType = "";
+    invoke<string | null>("get_project_default_type", { projectId: id })
+      .then((t) => {
+        if (selected === id) defaultType = t ?? "";
+      })
+      .catch(() => {});
   });
+
+  // The project's default meeting type: new meetings in it start as this type.
+  let defaultType = $state("");
+  $effect(() => {
+    if (tab === "settings" && !intel.meetingTypes.length) loadMeetingTypes();
+  });
+  async function saveDefaultType(typeId: string) {
+    const id = project?.id;
+    if (!id) return;
+    try {
+      await invoke("set_project_default_type", { projectId: id, typeId: typeId || null });
+      defaultType = typeId;
+      settingsError = "";
+      // The live picker's "Auto" follows the selected project's default.
+      if (intel.projectId === id) loadProjectDefaultType();
+    } catch (e) {
+      settingsError = String(e);
+    }
+  }
 
   // Local UTC offset in minutes east, so the brief's dates match the user's calendar.
   const offsetMinutes = () => -new Date().getTimezoneOffset();
@@ -597,6 +630,19 @@
               <button class="btn" onclick={() => ((instructionsDraft = instructions), (editingInstructions = true))}>{i18n.t.items.edit}</button>
             </div>
           {/if}
+
+          <label class="label" for="project-default-type">{i18n.t.meetingTypes.projectDefault}</label>
+          <p class="quiet small">{i18n.t.meetingTypes.projectDefaultHelp}</p>
+          <div class="row-btns">
+            <select
+              id="project-default-type"
+              value={defaultType}
+              onchange={(e) => saveDefaultType(e.currentTarget.value)}
+            >
+              <option value="">{i18n.t.meetingTypes.noDefault}</option>
+              {#each intel.meetingTypes as t (t.id)}<option value={t.id}>{t.name}</option>{/each}
+            </select>
+          </div>
 
           <div class="danger-zone">
             <button class="btn danger-outline" onclick={() => (deleteOpen = true)}>{i18n.t.projects.deleteProject}</button>
