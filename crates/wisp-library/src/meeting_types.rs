@@ -9,6 +9,7 @@ use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use wisp_core::meeting_types::{
     builtin_meeting_type, BuiltinMeetingType, Cadence, CardStyle, BUILTIN_MEETING_TYPES,
+    GENERAL_TYPE_ID,
 };
 
 use crate::store::Library;
@@ -321,12 +322,36 @@ impl Library {
         )?;
         Ok(n > 0)
     }
+
+    /// The type a meeting runs as: the one the user picked, else the project's default, else
+    /// General. A pick or default that no longer exists is skipped. The flag says whether it was
+    /// chosen (picked or the project's default) rather than fallen back on; only then is a type
+    /// not suggested.
+    pub fn resolve_meeting_type(
+        &self,
+        picked: Option<&str>,
+        project_id: Option<&str>,
+    ) -> Result<(MeetingType, bool)> {
+        let default = match project_id {
+            Some(p) => self.project_default_type(p)?,
+            None => None,
+        };
+        for id in [picked.map(str::to_owned), default].into_iter().flatten() {
+            if let Some(t) = self.get_meeting_type(&id)? {
+                return Ok((t, true));
+            }
+        }
+        let general = match self.get_meeting_type(GENERAL_TYPE_ID)? {
+            Some(t) => t,
+            None => MeetingType::from_builtin(&BUILTIN_MEETING_TYPES[0]),
+        };
+        Ok((general, false))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use wisp_core::export::MeetingMeta;
-    use wisp_core::meeting_types::GENERAL_TYPE_ID;
 
     use super::*;
 
@@ -415,6 +440,31 @@ mod tests {
         assert_eq!(lib.meeting_type_id("m1").unwrap(), None);
         assert_eq!(lib.project_default_type("p").unwrap(), None);
         assert_eq!(lib.meeting_type_id("missing").unwrap(), None);
+    }
+
+    #[test]
+    fn the_type_is_the_pick_then_the_project_default_then_general() {
+        let lib = Library::open_in_memory().unwrap();
+        lib.create_project("p", "Acme", 0).unwrap();
+        lib.create_project("q", "Beta", 0).unwrap();
+        lib.set_project_default_type("p", Some("builtin-engineering"))
+            .unwrap();
+        let id = |picked: Option<&str>, project: Option<&str>| {
+            let (t, chosen) = lib.resolve_meeting_type(picked, project).unwrap();
+            (t.id, chosen)
+        };
+        assert_eq!(
+            id(Some("builtin-interview"), Some("p")),
+            ("builtin-interview".into(), true)
+        );
+        assert_eq!(id(None, Some("p")), ("builtin-engineering".into(), true));
+        assert_eq!(id(None, Some("q")), (GENERAL_TYPE_ID.into(), false));
+        assert_eq!(id(None, None), (GENERAL_TYPE_ID.into(), false));
+        assert_eq!(
+            id(Some("gone"), Some("p")),
+            ("builtin-engineering".into(), true),
+            "a deleted pick falls through"
+        );
     }
 
     #[test]
