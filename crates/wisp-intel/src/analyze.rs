@@ -13,6 +13,10 @@ use wisp_reasoning::{CancelToken, ReasoningBackend, ReasoningError, ReasoningReq
 
 use crate::evidence::{render_snippets, render_transcript, EvidencePacket, TranscriptLine};
 use crate::intervene::{validate_candidate_in_batch, Candidate, MAX_CANDIDATES_PER_PASS};
+use crate::meeting_type::{
+    render_type_block, render_type_choices, type_guess_schema, validate_type_guess, TypeGuess,
+    GUESS_INSTRUCTIONS,
+};
 use crate::model::MeetingState;
 use crate::ops::{output_schema, OpBatch};
 use crate::reducer::{reduce, ApplyReport, RejectReason};
@@ -97,6 +101,12 @@ pub struct AnalyzeInput<'a> {
     /// The project's accepted knowledge.
     pub memory: &'a [wisp_library::MemoryEntry],
     pub timeout: Duration,
+    /// The kind of meeting this is: its "This meeting" block shapes the pass. `None` (or General)
+    /// adds nothing.
+    pub meeting_type: Option<&'a wisp_library::MeetingType>,
+    /// Types the pass may suggest because none was chosen (see [`crate::meeting_type`]). Empty
+    /// asks for no suggestion.
+    pub type_choices: &'a [wisp_library::MeetingType],
 }
 
 /// A request ready to send, with the packet the reducer checks citations against.
@@ -121,6 +131,8 @@ pub struct AnalyzeOutcome {
     pub speaker_names: Vec<SpeakerSuggestion>,
     /// Proposed speaker names that failed the check: the proposal and why.
     pub rejected_speaker_names: Vec<(String, SpeakerReject)>,
+    /// The suggested meeting type, if one was asked for and checked out.
+    pub type_guess: Option<TypeGuess>,
     pub new_lines: usize,
     /// New lines left for the next pass because this one was full.
     pub remaining_lines: usize,
@@ -207,6 +219,13 @@ pub fn prepare_observe(
     );
 
     let mut context = crate::about::render_about(input.focus);
+    if let Some(t) = input.meeting_type {
+        context.push_str(&render_type_block(t));
+    }
+    let guessing = !input.type_choices.is_empty();
+    if guessing {
+        context.push_str(&render_type_choices(input.type_choices));
+    }
     if input.endgame {
         context.push_str(
             "## The meeting is wrapping up\n\nFocus candidates on what must be resolved before \
@@ -221,9 +240,13 @@ pub fn prepare_observe(
     Ok(PreparedPass {
         request: ReasoningRequest {
             task: TaskKind::Observe,
-            instructions: INSTRUCTIONS.to_owned(),
+            instructions: if guessing {
+                format!("{INSTRUCTIONS}\n\n{GUESS_INSTRUCTIONS}")
+            } else {
+                INSTRUCTIONS.to_owned()
+            },
             context,
-            output_schema: output_schema(),
+            output_schema: observe_schema(guessing),
             timeout: input.timeout,
             images: Vec::new(),
         },
@@ -231,6 +254,18 @@ pub fn prepare_observe(
         through: new.last().map(|l| l.idx),
         new_lines: new.len(),
     })
+}
+
+/// The op schema, plus the `meeting_type_guess` list while a type may be suggested.
+fn observe_schema(guessing: bool) -> serde_json::Value {
+    let mut schema = output_schema();
+    if guessing {
+        schema["properties"]["meeting_type_guess"] = type_guess_schema();
+        if let Some(required) = schema["required"].as_array_mut() {
+            required.push("meeting_type_guess".into());
+        }
+    }
+    schema
 }
 
 /// Up to `cap` memory entries, kept in their stored order: all of them when they fit, else those
@@ -302,6 +337,11 @@ pub fn analyze_now(
             }
         }
     }
+    let type_guess = batch
+        .meeting_type_guess
+        .first()
+        .filter(|_| !input.type_choices.is_empty())
+        .and_then(|raw| validate_type_guess(raw, input.type_choices).ok());
     state.analyzed_through = pass.through.or(state.analyzed_through);
     let remaining_lines = new_lines(state, input.transcript).len();
     Ok(AnalyzeOutcome {
@@ -310,6 +350,7 @@ pub fn analyze_now(
         rejected_candidates,
         speaker_names,
         rejected_speaker_names,
+        type_guess,
         new_lines: pass.new_lines,
         remaining_lines,
         backend: response.backend,
@@ -397,6 +438,8 @@ mod tests {
             endgame: false,
             memory: &[],
             timeout: Duration::from_secs(60),
+            meeting_type: None,
+            type_choices: &[],
         }
     }
 
@@ -658,6 +701,92 @@ mod tests {
         assert_eq!(out.speaker_names.len(), 1);
         assert_eq!(out.speaker_names[0].name, "Laurie");
         assert_eq!(out.rejected_speaker_names.len(), 1);
+    }
+
+    fn builtin_type(id: &str) -> wisp_library::MeetingType {
+        wisp_library::MeetingType::from_builtin(
+            wisp_core::meeting_types::builtin_meeting_type(id).unwrap(),
+        )
+    }
+
+    #[test]
+    fn a_meeting_type_adds_its_block_and_general_adds_nothing() {
+        let transcript = vec![line(0, "Them", "I led the migration at my last job.")];
+        let state = MeetingState::new("live");
+        let plain = prepare_observe(&state, &input(&transcript, &[])).unwrap();
+        let general = builtin_type(wisp_core::meeting_types::GENERAL_TYPE_ID);
+        let as_general = prepare_observe(
+            &state,
+            &AnalyzeInput {
+                meeting_type: Some(&general),
+                ..input(&transcript, &[])
+            },
+        )
+        .unwrap();
+        assert_eq!(as_general.request.context, plain.request.context);
+        assert_eq!(as_general.request.instructions, plain.request.instructions);
+        assert_eq!(
+            as_general.request.output_schema,
+            plain.request.output_schema
+        );
+
+        let interview = builtin_type("builtin-interview");
+        let pass = prepare_observe(
+            &state,
+            &AnalyzeInput {
+                meeting_type: Some(&interview),
+                ..input(&transcript, &[])
+            },
+        )
+        .unwrap();
+        assert!(pass.request.context.contains("## This meeting: Interview"));
+        assert!(pass.request.context.contains("Watch for:"));
+        assert!(!pass.request.context.contains("## Meeting types"));
+    }
+
+    #[test]
+    fn a_pass_without_a_chosen_type_may_suggest_one() {
+        let transcript = vec![
+            line(0, "You", "Tell me about a project you led."),
+            line(1, "Them", "I led the migration at my last job."),
+        ];
+        let choices: Vec<wisp_library::MeetingType> =
+            wisp_core::meeting_types::BUILTIN_MEETING_TYPES
+                .iter()
+                .map(wisp_library::MeetingType::from_builtin)
+                .collect();
+        let guessing = AnalyzeInput {
+            type_choices: &choices,
+            ..input(&transcript, &[])
+        };
+        let pass = prepare_observe(&MeetingState::new("live"), &guessing).unwrap();
+        assert!(pass
+            .request
+            .context
+            .contains("- builtin-interview: Interview"));
+        assert!(pass.request.instructions.contains("meeting_type_guess"));
+        let schema = &pass.request.output_schema;
+        assert_eq!(
+            schema["properties"]["meeting_type_guess"][wisp_reasoning::OPTIONAL_MARK],
+            json!(true)
+        );
+        assert!(wisp_reasoning::validate(schema, &json!({"ops": [], "candidates": []})).is_ok());
+
+        let backend = ScriptedBackend::named("scripted");
+        let reply = json!({"ops": [], "candidates": [], "meeting_type_guess": [
+            {"type_id": "builtin-interview", "confidence": 0.85, "reason": "Questions about past work."}
+        ]});
+        backend.push_ok(reply);
+        backend.push_ok(json!({"ops": [], "candidates": [], "meeting_type_guess": [
+            {"type_id": "builtin-interview", "confidence": 0.4, "reason": "Maybe."}
+        ]}));
+        let mut state = MeetingState::new("live");
+        let out = analyze_now(&backend, &CancelToken::new(), &mut state, &guessing, 1).unwrap();
+        assert_eq!(out.type_guess.unwrap().type_id, "builtin-interview");
+
+        let mut state = MeetingState::new("live");
+        let out = analyze_now(&backend, &CancelToken::new(), &mut state, &guessing, 1).unwrap();
+        assert!(out.type_guess.is_none(), "too unsure to suggest");
     }
 
     #[test]

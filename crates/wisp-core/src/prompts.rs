@@ -112,6 +112,19 @@ pub const BUILTIN_PROMPTS: &[BuiltinPrompt] = &[
                \"No decisions.\" Reply in the meeting's main language.",
         scope: PromptScope::Meeting,
     },
+    BuiltinPrompt {
+        id: "builtin-interview-scorecard",
+        name: "Interview scorecard",
+        body: "Write an interview scorecard for {speaker}, based only on what was said in this \
+               interview. Use Markdown. Start with a one-line overall impression. Then a table \
+               with the columns Area | Rating (1-5) | Evidence, one row per skill or topic that \
+               was actually covered; quote or paraphrase the transcript as evidence. Then list \
+               Strengths, Concerns, and Not covered (topics the interview did not reach). End \
+               with a recommendation (strong yes, yes, no, strong no) and one sentence of \
+               reasoning. Do not judge anything the transcript does not show. Reply in the \
+               meeting's main language.",
+        scope: PromptScope::Speaker,
+    },
 ];
 
 /// The built-in prompt with this id.

@@ -80,6 +80,18 @@ pub struct MeetingSummary {
     pub open_questions: Vec<String>,
     #[serde(default)]
     pub next_steps: Vec<String>,
+    /// The meeting type's own sections (see [`summary_request_with_sections`]), in order.
+    #[serde(default)]
+    pub sections: Vec<SummarySection>,
+}
+
+/// One section the meeting type asked for, like "Strengths" for an interview.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SummarySection {
+    #[serde(default)]
+    pub heading: String,
+    #[serde(default)]
+    pub points: Vec<String>,
 }
 
 /// Who does what, by when.
@@ -253,16 +265,57 @@ pub fn summary_schema() -> Value {
 
 /// The request for one summary call.
 pub fn summary_request(context: &SummaryContext, timeout: Duration) -> ReasoningRequest {
+    summary_request_with_sections(context, timeout, &[])
+}
+
+/// The request for one summary call that also fills the meeting type's `sections` (headings, in
+/// order). With none, the same as [`summary_request`].
+pub fn summary_request_with_sections(
+    context: &SummaryContext,
+    timeout: Duration,
+    sections: &[String],
+) -> ReasoningRequest {
+    let base = if context.from_transcript {
+        INSTRUCTIONS_TRANSCRIPT
+    } else {
+        INSTRUCTIONS_STATE
+    };
+    let headings: Vec<String> = sections
+        .iter()
+        .map(|h| one_line(h))
+        .filter(|h| !h.is_empty())
+        .collect();
+    let mut schema = summary_schema();
+    let instructions = if headings.is_empty() {
+        base.to_owned()
+    } else {
+        schema["properties"]["sections"] = json!({
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["heading", "points"],
+                "properties": {
+                    "heading": {"type": "string", "enum": headings},
+                    "points": {"type": "array", "items": {"type": "string"}}
+                }
+            }
+        });
+        if let Some(required) = schema["required"].as_array_mut() {
+            required.push("sections".into());
+        }
+        format!(
+            "{base} sections: one entry per heading, in this order: {}. points: short sentences \
+             for that heading, from the same material; leave points empty when nothing supports \
+             it.",
+            headings.join("; ")
+        )
+    };
     ReasoningRequest {
         task: TaskKind::Summary,
-        instructions: if context.from_transcript {
-            INSTRUCTIONS_TRANSCRIPT
-        } else {
-            INSTRUCTIONS_STATE
-        }
-        .to_owned(),
+        instructions,
         context: context.text.clone(),
-        output_schema: summary_schema(),
+        output_schema: schema,
         timeout,
         images: Vec::new(),
     }
@@ -294,6 +347,12 @@ impl MeetingSummary {
         if !tldr.is_empty() {
             let _ = writeln!(out, "**TL;DR:** {tldr}");
         }
+        let extra: Vec<(String, Vec<String>)> = self
+            .sections
+            .iter()
+            .map(|s| (one_line(&s.heading), clean(&s.points)))
+            .filter(|(h, _)| !h.is_empty())
+            .collect();
         let mut section = |heading: &str, lines: Vec<String>| {
             if lines.is_empty() {
                 return;
@@ -306,6 +365,9 @@ impl MeetingSummary {
                 let _ = writeln!(out, "- {l}");
             }
         };
+        for (heading, points) in extra {
+            section(&heading, points);
+        }
         section("Decisions", clean(&self.decisions));
         let commitments = self
             .commitments
@@ -407,6 +469,47 @@ mod tests {
              - [decision] Use OIDC\n\
              - [commitment] Send traffic numbers (owner: Laurie; due: Friday)\n\
              - [fact] Runs in Azure\n"
+        );
+    }
+
+    #[test]
+    fn a_meeting_types_sections_are_asked_for_and_rendered_after_the_tldr() {
+        let ctx = SummaryContext {
+            text: "Meeting: Interview".into(),
+            from_transcript: false,
+        };
+        let plain = summary_request(&ctx, Duration::from_secs(1));
+        assert!(plain.output_schema["properties"].get("sections").is_none());
+        let typed = summary_request_with_sections(
+            &ctx,
+            Duration::from_secs(1),
+            &["Strengths".into(), " ".into(), "Concerns".into()],
+        );
+        assert!(typed
+            .instructions
+            .contains("in this order: Strengths; Concerns."));
+        assert_eq!(
+            typed.output_schema["properties"]["sections"]["items"]["properties"]["heading"]["enum"],
+            json!(["Strengths", "Concerns"])
+        );
+        assert!(typed.output_schema["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("sections")));
+
+        let summary = parse_summary(json!({
+            "tldr": "Strong systems candidate.", "decisions": [], "commitments": [],
+            "open_questions": [], "next_steps": ["Send the take-home"],
+            "sections": [
+                {"heading": "Strengths", "points": ["Led a migration"]},
+                {"heading": "Concerns", "points": []}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(
+            summary.to_markdown(),
+            "**TL;DR:** Strong systems candidate.\n\n### Strengths\n\n- Led a migration\n\n\
+             ### Next steps\n\n- Send the take-home\n"
         );
     }
 

@@ -278,8 +278,8 @@ pub(crate) mod tests {
             let lib = Library::open(&path).unwrap();
             lib.insert_llm_call(&call(1, Some("m1"))).unwrap();
             lib.conn
-                .execute_batch(
-                    "ALTER TABLE llm_call DROP COLUMN cache_read_tokens;
+                .execute_batch(&format!(
+                    "{}ALTER TABLE llm_call DROP COLUMN cache_read_tokens;
                      ALTER TABLE llm_call DROP COLUMN cache_write_tokens;
                      ALTER TABLE llm_call DROP COLUMN cost_usd;
                      ALTER TABLE llm_call DROP COLUMN model_reported;
@@ -287,7 +287,8 @@ pub(crate) mod tests {
                      DROP TABLE prompt;
                      DROP TABLE project_item;
                      PRAGMA user_version = 9;",
-                )
+                    crate::store::DROP_V13
+                ))
                 .unwrap();
         }
         let lib = Library::open(&path).unwrap();
@@ -301,7 +302,7 @@ pub(crate) mod tests {
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 12);
+        assert_eq!(version, 13);
     }
 
     #[test]
