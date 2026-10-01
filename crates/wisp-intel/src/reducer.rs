@@ -486,6 +486,7 @@ mod tests {
                 ops,
                 candidates: vec![],
                 speaker_names: vec![],
+                meeting_type_guess: vec![],
             },
             &packet(),
             NOW,

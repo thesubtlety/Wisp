@@ -19,6 +19,7 @@
 //! - [`endgame`] — wrap-up signals and the gap audit run when the meeting is closing.
 //! - [`intervene`] — proposed interventions and the conservative local filter that decides
 //!   which reach the user, with a log for tuning.
+//! - [`meeting_type`] — how a meeting type tunes the passes, the audit, and the type suggestion.
 //! - [`learning`] — end-of-meeting proposals for project memory, with hashed provenance.
 //! - [`review`] — post-call follow-up review, corrected in plain words, applied to the state.
 //! - [`headline`] — short forms (headlines, short answers) for reading at a glance.
@@ -41,6 +42,7 @@ pub mod export;
 pub mod headline;
 pub mod intervene;
 pub mod learning;
+pub mod meeting_type;
 pub mod model;
 pub mod ops;
 pub mod reducer;
@@ -72,9 +74,13 @@ pub use evidence::{memory_ref, EvidenceDetail, EvidencePacket, TranscriptLine};
 pub use export::{context_packet, meeting_record, state_json, ExportMeta};
 pub use intervene::{
     validate_candidate, Candidate, CandidateKind, Card, Decision, InterventionFilter,
-    InterventionPolicy, LogEntry, RawCandidate, Suppressed,
+    InterventionPolicy, LogEntry, Prefer, RawCandidate, Suppressed,
 };
 pub use learning::{prepare_learning, propose_learning, LearningInput, Proposal, KNOWLEDGE_KINDS};
+pub use meeting_type::{
+    apply_type, intervention_policy, trigger_policy, validate_type_guess, GuessReject,
+    RawTypeGuess, TypeGuess,
+};
 pub use model::{EpistemicStatus, ItemKind, Lifecycle, MeetingState, SourceRef, StateItem};
 pub use ops::{output_schema, AppliedOp, ModelOp, OpBatch, OpKind, ReplayError, ResolvedOp};
 pub use reducer::{reduce, ApplyReport, RejectReason, Rejection};
@@ -91,6 +97,6 @@ pub use speakers::{
     validate_speaker_name, RawSpeakerName, SpeakerReject, SpeakerSuggestion, SpeakerSuggestions,
 };
 pub use summary::{
-    parse_summary, participants, summary_context, summary_request, MeetingSummary, SummaryContext,
-    SummaryMeta,
+    parse_summary, participants, summary_context, summary_request, summary_request_with_sections,
+    MeetingSummary, SummaryContext, SummaryMeta, SummarySection,
 };

@@ -66,6 +66,7 @@ mod context;
 mod dictation;
 mod intel;
 mod meeting;
+mod meeting_types;
 mod permissions;
 mod projects;
 mod prompts;
@@ -2862,6 +2863,9 @@ struct LiveOptions {
     /// The id the meeting will be saved under, so its AI calls are logged under it.
     #[serde(default)]
     meeting_id: Option<String>,
+    /// The meeting type the user picked. None runs the project's default type, else General.
+    #[serde(default)]
+    meeting_type_id: Option<String>,
 }
 
 /// Resolves the engine a live session will run from `options` + app state: an on-device model, or a
@@ -2992,6 +2996,7 @@ fn start_session_blocking(app: AppHandle, options: LiveOptions) -> Result<Option
             &app,
             options.project_id.clone(),
             options.meeting_label.clone(),
+            options.meeting_type_id.clone(),
         );
     }
     // A start that fails from here on drops the runtime it just made.
@@ -3822,6 +3827,15 @@ struct LibraryNoteDetail {
     segments: Vec<Segment>,
     /// Names the user gave the meeting's diarized speakers, keyed by speaker id.
     speaker_names: SpeakerNames,
+    /// The meeting type it ran as, if recorded and still there.
+    meeting_type: Option<MeetingTypeRef>,
+}
+
+/// A meeting type by id and name, for display.
+#[derive(Serialize)]
+struct MeetingTypeRef {
+    id: String,
+    name: String,
 }
 
 /// Saves the just-finished transcript (`source` `"live"` by default, or `"file"`) into the meeting
@@ -3835,6 +3849,7 @@ fn save_note(
     started_at_ms: i64,
     source: Option<String>,
     project_id: Option<String>,
+    type_id: Option<String>,
 ) -> Result<(), String> {
     let live = !matches!(source.as_deref(), Some("file"));
     let buffer = if live {
@@ -3861,6 +3876,11 @@ fn save_note(
         // A project deleted meanwhile must not cost the meeting itself.
         if let Err(e) = library.set_meeting_project(&id, Some(project)) {
             eprintln!("wisp: filing the meeting under its project failed: {e}");
+        }
+    }
+    if let Some(type_id) = type_id.as_deref().filter(|t| !t.is_empty()) {
+        if let Err(e) = library.set_meeting_type(&id, Some(type_id)) {
+            eprintln!("wisp: recording the meeting type failed: {e}");
         }
     }
     if live {
@@ -3962,10 +3982,19 @@ fn get_library_note(
         return Ok(None);
     };
     let speaker_names = library.speaker_names(&id).map_err(|e| e.to_string())?;
+    let meeting_type = library
+        .meeting_type_id(&id)
+        .map_err(|e| e.to_string())?
+        .and_then(|t| library.get_meeting_type(&t).ok().flatten())
+        .map(|t| MeetingTypeRef {
+            id: t.id,
+            name: t.name,
+        });
     Ok(Some(LibraryNoteDetail {
         meeting,
         segments,
         speaker_names,
+        meeting_type,
     }))
 }
 
@@ -4633,6 +4662,13 @@ pub fn run() {
             intel::note_knowledge,
             intel::move_note_knowledge,
             intel::intel_set_project,
+            intel::intel_set_meeting_type,
+            meeting_types::list_meeting_types,
+            meeting_types::save_meeting_type,
+            meeting_types::delete_meeting_type,
+            meeting_types::reset_meeting_type,
+            meeting_types::get_project_default_type,
+            meeting_types::set_project_default_type,
             intel::project_brief_markdown,
             intel::project_brief_save,
             projects::edit_meeting_item,

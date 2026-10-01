@@ -26,6 +26,7 @@ use crate::endgame::{
 };
 use crate::evidence::TranscriptLine;
 use crate::intervene::{Card, InterventionFilter, InterventionPolicy, LogEntry};
+use crate::meeting_type::{apply_type, TypeGuess, GUESS_PASSES};
 use crate::model::{MeetingState, StateItem};
 use crate::ops::{AppliedOp, ResolvedOp};
 use crate::speakers::{SpeakerSuggestion, SpeakerSuggestions};
@@ -123,6 +124,9 @@ pub enum IntelUpdate {
     /// The live speaker-name suggestions changed (sent after the pass that changed them): the
     /// whole list, at most one per speaker, without dismissed or since-named ones.
     SpeakerNames(Vec<SpeakerSuggestion>),
+    /// The meeting looks like this type; advisory (the type never changes by itself), sent at most
+    /// once per meeting and only while no type was chosen.
+    TypeSuggested(TypeGuess),
 }
 
 /// Settings for one meeting's runtime.
@@ -142,6 +146,12 @@ pub struct RuntimeConfig {
     pub scheduled_end_ms: Option<i64>,
     /// The project's accepted knowledge, given to every pass.
     pub memory: Vec<wisp_library::MemoryEntry>,
+    /// The kind of meeting this is (see [`crate::meeting_type::apply_type`]). `None` runs as
+    /// General.
+    pub meeting_type: Option<wisp_library::MeetingType>,
+    /// Types the first [`GUESS_PASSES`] passes may suggest, because nobody chose one. Empty
+    /// suggests nothing; choosing a type ([`IntelRuntime::set_meeting_type`]) ends suggesting.
+    pub type_choices: Vec<wisp_library::MeetingType>,
 }
 
 /// Longest the wrap-up audit may take.
@@ -156,6 +166,8 @@ impl Default for RuntimeConfig {
             interventions: InterventionPolicy::default(),
             scheduled_end_ms: None,
             memory: Vec::new(),
+            meeting_type: None,
+            type_choices: Vec::new(),
         }
     }
 }
@@ -202,6 +214,8 @@ enum Msg {
     Unpin(String),
     /// The meeting moved to another project (or out of any).
     SetProject(ProjectContext),
+    /// The user chose the kind of meeting this is.
+    SetType(Box<wisp_library::MeetingType>),
     Stop,
     /// Analyze whatever is still pending, then stop.
     Finish,
@@ -271,6 +285,8 @@ impl IntelRuntime {
                     endgame: None,
                     wrap_suggested: false,
                     speaker_names: SpeakerSuggestions::default(),
+                    guess_passes: 0,
+                    type_suggested: false,
                 }
                 .run(rx)
             })
@@ -328,6 +344,13 @@ impl IntelRuntime {
     /// and pinned context stay.
     pub fn set_project(&self, context: ProjectContext) {
         let _ = self.tx.send(Msg::SetProject(context));
+    }
+
+    /// Runs the meeting as type `t` from the next pass on: its cadence, card policy, "This meeting"
+    /// block and wrap-up checklist. The state so far stays. A chosen type is never second-guessed,
+    /// so no type is suggested after this.
+    pub fn set_meeting_type(&self, t: wisp_library::MeetingType) {
+        let _ = self.tx.send(Msg::SetType(Box::new(t)));
     }
 
     /// Records that the user dismissed a card, so the filter holds back repeats.
@@ -439,6 +462,10 @@ struct Worker {
     wrap_suggested: bool,
     /// Speaker-name suggestions for this meeting.
     speaker_names: SpeakerSuggestions,
+    /// Passes that were asked to suggest a type.
+    guess_passes: u32,
+    /// Whether a type suggestion has been sent.
+    type_suggested: bool,
 }
 
 impl Worker {
@@ -488,6 +515,11 @@ impl Worker {
                         self.retriever = context.retriever;
                         self.config.memory = context.memory;
                         self.config.focus = context.focus;
+                    }
+                    Msg::SetType(t) => {
+                        apply_type(&mut self.config, *t);
+                        self.filter.policy = self.config.interventions.clone();
+                        self.config.type_choices.clear();
                     }
                     Msg::Stop => stop = true,
                     Msg::Finish => finish = true,
@@ -603,6 +635,7 @@ impl Worker {
                 memory: &self.config.memory,
                 focus: self.config.focus.as_deref(),
                 timeout: AUDIT_TIMEOUT.max(self.config.timeout),
+                meeting_type: self.config.meeting_type.as_ref(),
             },
         );
         let update = match result {
@@ -638,8 +671,17 @@ impl Worker {
             .map_or(0, |l| l.iter().map(|x| x.text.chars().count()).sum())
     }
 
+    /// Whether this pass may suggest a type: nobody chose one, none was suggested yet, and the
+    /// first passes haven't all been used.
+    fn guessing(&self) -> bool {
+        !self.config.type_choices.is_empty()
+            && !self.type_suggested
+            && self.guess_passes < GUESS_PASSES
+    }
+
     fn pass(&mut self) {
         self.last_pass = Some(Instant::now());
+        let guessing = self.guessing();
         let query = retrieval_text(&self.state, &self.lines);
         let retrieved = self.with_pins(if query.is_empty() {
             Vec::new()
@@ -653,9 +695,16 @@ impl Worker {
             endgame: self.endgame.is_some(),
             memory: &self.config.memory,
             timeout: self.config.timeout,
+            meeting_type: self.config.meeting_type.as_ref(),
+            type_choices: if guessing {
+                &self.config.type_choices
+            } else {
+                &[]
+            },
         };
         let now = (self.now_ms)();
         let mut names_changed = false;
+        let mut suggestion = None;
         let update = match analyze_now(
             self.backend.as_ref(),
             &self.cancel,
@@ -679,6 +728,13 @@ impl Worker {
                 }
                 self.pending_since = (out.remaining_lines > 0).then(Instant::now);
                 names_changed = self.speaker_names.offer(out.speaker_names);
+                if guessing {
+                    self.guess_passes += 1;
+                    if let Some(guess) = out.type_guess {
+                        self.type_suggested = true;
+                        suggestion = Some(guess);
+                    }
+                }
                 IntelUpdate::Pass {
                     applied: out.report.applied.len(),
                     rejected: out.report.rejected.len(),
@@ -698,6 +754,9 @@ impl Worker {
             (self.on_update)(update);
             if names_changed {
                 (self.on_update)(IntelUpdate::SpeakerNames(self.speaker_names.current()));
+            }
+            if let Some(guess) = suggestion {
+                (self.on_update)(IntelUpdate::TypeSuggested(guess));
             }
         }
     }
@@ -878,6 +937,8 @@ mod tests {
             endgame: None,
             wrap_suggested: false,
             speaker_names: SpeakerSuggestions::default(),
+            guess_passes: 0,
+            type_suggested: false,
         };
         assert_eq!(w.backoff(), Duration::ZERO);
         w.failures = 1;
@@ -1209,6 +1270,139 @@ mod tests {
         assert!(next.contains("Project: Beta"), "new about block");
         assert!(next.contains("Beta retrieval"), "new retriever");
         assert!(!next.contains("Acme"), "nothing from the old project");
+    }
+
+    fn builtin_type(id: &str) -> wisp_library::MeetingType {
+        wisp_library::MeetingType::from_builtin(
+            wisp_core::meeting_types::builtin_meeting_type(id).unwrap(),
+        )
+    }
+
+    fn all_types() -> Vec<wisp_library::MeetingType> {
+        wisp_core::meeting_types::BUILTIN_MEETING_TYPES
+            .iter()
+            .map(wisp_library::MeetingType::from_builtin)
+            .collect()
+    }
+
+    #[test]
+    fn a_type_switch_changes_the_cadence_and_reaches_the_next_pass() {
+        let backend = Arc::new(ScriptedBackend::with_responder("s", |_| {
+            Ok(json!({"ops": [], "candidates": []}))
+        }));
+        let (seen, on_update) = collect();
+        let rt = IntelRuntime::spawn(
+            backend.clone(),
+            Box::new(NoRetrieval),
+            RuntimeConfig {
+                type_choices: all_types(),
+                ..RuntimeConfig::default()
+            },
+            on_update,
+            Box::new(|| 0),
+        );
+        // 320 characters: under the normal cadence's 1200, over the fast one's 300.
+        rt.push_final("Them", 0, "x".repeat(320));
+        std::thread::sleep(TICK * 2);
+        assert_eq!(backend.request_count(), 0, "normal cadence waits");
+        rt.set_meeting_type(builtin_type("builtin-interview"));
+        wait_for(&seen, 1);
+        rt.stop();
+        let requests = backend.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1, "the fast cadence ran a pass");
+        let context = &requests[0].context;
+        assert!(context.contains("## This meeting: Interview"));
+        assert!(context.contains("Answers that are vague"), "its watch_for");
+        assert!(
+            !context.contains("## Meeting types"),
+            "a chosen type is not second-guessed"
+        );
+    }
+
+    #[test]
+    fn a_type_is_suggested_once_and_only_in_the_first_passes() {
+        let backend = Arc::new(ScriptedBackend::with_responder("s", |req| {
+            // Always ready to guess, but only answers what the schema asks for.
+            Ok(
+                if req.output_schema["properties"]
+                    .get("meeting_type_guess")
+                    .is_some()
+                {
+                    json!({"ops": [], "candidates": [], "meeting_type_guess": [
+                        {"type_id": "builtin-interview", "confidence": 0.9, "reason": "Questions about past roles."}
+                    ]})
+                } else {
+                    json!({"ops": [], "candidates": []})
+                },
+            )
+        }));
+        let (seen, on_update) = collect();
+        let rt = IntelRuntime::spawn(
+            backend.clone(),
+            Box::new(NoRetrieval),
+            RuntimeConfig {
+                policy: fast_policy(),
+                type_choices: all_types(),
+                ..RuntimeConfig::default()
+            },
+            on_update,
+            Box::new(|| 0),
+        );
+        rt.push_final("You", 0, "Tell me about a project you led last year.");
+        wait_for(&seen, 2);
+        rt.push_final("Them", 1000, "I led the database migration at my last job.");
+        wait_for(&seen, 3);
+        rt.stop();
+        let updates = seen.lock().unwrap().clone();
+        let suggested: Vec<&TypeGuess> = updates
+            .iter()
+            .filter_map(|u| match u {
+                IntelUpdate::TypeSuggested(g) => Some(g),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !updates.iter().any(|u| matches!(u, IntelUpdate::Failed(_))),
+            "{updates:?}"
+        );
+        assert_eq!(suggested.len(), 1, "once per meeting");
+        assert_eq!(suggested[0].type_id, "builtin-interview");
+        let requests = backend.requests.lock().unwrap();
+        assert!(requests[0].context.contains("## Meeting types"));
+        assert!(
+            !requests[1].context.contains("## Meeting types"),
+            "no more asking once suggested"
+        );
+    }
+
+    #[test]
+    fn suggesting_stops_after_the_first_passes() {
+        let backend = Arc::new(ScriptedBackend::with_responder("s", |_| {
+            Ok(json!({"ops": [], "candidates": []}))
+        }));
+        let (seen, on_update) = collect();
+        let rt = IntelRuntime::spawn(
+            backend.clone(),
+            Box::new(NoRetrieval),
+            RuntimeConfig {
+                policy: fast_policy(),
+                type_choices: all_types(),
+                ..RuntimeConfig::default()
+            },
+            on_update,
+            Box::new(|| 0),
+        );
+        for i in 0..3 {
+            rt.push_final("Them", i * 1000, "Enough words to cross the threshold.");
+            wait_for(&seen, i as usize + 1);
+        }
+        rt.stop();
+        let requests = backend.requests.lock().unwrap();
+        let asked: Vec<bool> = requests
+            .iter()
+            .map(|r| r.context.contains("## Meeting types"))
+            .collect();
+        assert_eq!(asked, [true, true, false]);
     }
 
     #[test]

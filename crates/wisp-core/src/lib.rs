@@ -19,6 +19,7 @@ pub mod engine;
 pub mod error;
 pub mod export;
 pub mod meeting;
+pub mod meeting_types;
 pub mod model;
 pub mod params;
 pub mod perf;

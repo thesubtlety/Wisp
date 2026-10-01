@@ -51,6 +51,10 @@ pub struct OpBatch {
     /// Names the transcript gives unnamed speakers; checked before anything is shown.
     #[serde(default)]
     pub speaker_names: Vec<crate::speakers::RawSpeakerName>,
+    /// The kind of meeting this looks like, asked for only while no type was chosen; at most one
+    /// entry is read.
+    #[serde(default)]
+    pub meeting_type_guess: Vec<crate::meeting_type::RawTypeGuess>,
 }
 
 /// A validated change with canonical refs and real ids. This is what the log stores.

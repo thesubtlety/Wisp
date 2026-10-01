@@ -260,6 +260,41 @@ pub struct InterventionPolicy {
     pub max_per_hour: usize,
     /// Word overlap (0..1) at which a candidate counts as a repeat.
     pub duplicate_overlap: f64,
+    /// Candidates the meeting type favours, which score [`PREFERENCE_BONUS`] higher.
+    #[serde(default)]
+    pub prefer: Prefer,
+}
+
+/// Added to the score of a candidate the meeting type favours: enough to lift one just under the
+/// threshold, not enough to show a weak one.
+pub const PREFERENCE_BONUS: f64 = 0.08;
+
+/// Which candidates a meeting type favours (see [`crate::meeting_type`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Prefer {
+    /// None: every candidate scores the same way.
+    #[default]
+    Nothing,
+    /// Those that carry a question You can ask now.
+    Questions,
+    /// Conflicts, unconfirmed assumptions and scope ambiguity.
+    Risks,
+}
+
+impl Prefer {
+    fn favours(self, c: &Candidate) -> bool {
+        match self {
+            Prefer::Nothing => false,
+            Prefer::Questions => c.suggested_question.is_some(),
+            Prefer::Risks => matches!(
+                c.kind,
+                CandidateKind::Conflict
+                    | CandidateKind::UnconfirmedAssumption
+                    | CandidateKind::ScopeAmbiguity
+            ),
+        }
+    }
 }
 
 impl Default for InterventionPolicy {
@@ -271,16 +306,22 @@ impl Default for InterventionPolicy {
             cooldown_ms: 4 * 60 * 1000,
             max_per_hour: 5,
             duplicate_overlap: 0.6,
+            prefer: Prefer::Nothing,
         }
     }
 }
 
 impl InterventionPolicy {
     /// value × confidence × urgency − interruption cost, where value is the mean of importance and
-    /// future-work risk.
+    /// future-work risk, plus [`PREFERENCE_BONUS`] when the meeting type favours the candidate.
     pub fn score(&self, c: &Candidate) -> f64 {
         let value = (c.importance + c.future_work_risk) / 2.0;
-        value * c.confidence * c.urgency - self.interruption_cost
+        let bonus = if self.prefer.favours(c) {
+            PREFERENCE_BONUS
+        } else {
+            0.0
+        };
+        value * c.confidence * c.urgency - self.interruption_cost + bonus
     }
 }
 

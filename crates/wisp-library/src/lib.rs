@@ -11,6 +11,7 @@
 
 mod embed;
 mod llm_log;
+mod meeting_types;
 mod memory;
 mod project_items;
 mod prompts;
@@ -23,6 +24,7 @@ mod store;
 
 pub use embed::Embedder;
 pub use llm_log::{LlmCall, LlmTotals};
+pub use meeting_types::MeetingType;
 pub use memory::{MeetingKnowledge, MemoryEntry, MemoryInput, ProvenanceRef};
 pub use project_items::{ProjectItem, ProjectItemInput};
 pub use prompts::{Prompt, PromptRun};

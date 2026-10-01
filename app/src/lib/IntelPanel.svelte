@@ -31,6 +31,8 @@
     removeContext,
     CLASS_ORDER,
     GAP_ORDER,
+    acceptTypeGuess,
+    dismissTypeGuess,
     type AskAnswer,
   } from "$lib/intel.svelte";
 
@@ -138,17 +140,35 @@
 
   {#if intel.tab === "insights"}
     <div class="feed">
-      <label class="ends" title={i18n.t.intel.endsAtHint}>
-        {i18n.t.intel.endsAt}
-        <input
-          type="time"
-          value={intel.scheduledEnd}
-          onchange={(e) => {
-            intel.scheduledEndTyped = true;
-            setScheduledEnd(e.currentTarget.value);
-          }}
-        />
-      </label>
+      <div class="feed-head">
+        <label class="ends" title={i18n.t.intel.endsAtHint}>
+          {i18n.t.intel.endsAt}
+          <input
+            type="time"
+            value={intel.scheduledEnd}
+            onchange={(e) => {
+              intel.scheduledEndTyped = true;
+              setScheduledEnd(e.currentTarget.value);
+            }}
+          />
+        </label>
+        {#if intel.liveType}
+          <span class="type-chip" title={i18n.t.meetingTypes.label}>{intel.liveType.name}</span>
+        {/if}
+      </div>
+      {#if intel.typeGuess && running}
+        <div class="wrap-banner" title={intel.typeGuess.reason}>
+          <p>{i18n.t.meetingTypes.suggestion(intel.typeGuess.name)}</p>
+          <div class="cactions">
+            <button
+              class="btn primary"
+              onclick={() => acceptTypeGuess(running).catch((e) => (intel.error = String(e)))}
+              >{i18n.t.meetingTypes.switch}</button
+            >
+            <button class="copy" aria-label={i18n.t.common.dismiss} onclick={dismissTypeGuess}>×</button>
+          </div>
+        </div>
+      {/if}
       {#if intel.wrapSuggested && !intel.endgame}
         <div class="wrap-banner">
           <p>{i18n.t.intel.wrapSuggested[intel.wrapSuggested === "scheduled" ? "scheduled" : "semantic"]}</p>
@@ -674,6 +694,22 @@
     -webkit-line-clamp: 2;
     line-clamp: 2;
     -webkit-box-orient: vertical;
+  }
+
+  .feed-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .type-chip {
+    font-size: 11.5px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    white-space: nowrap;
   }
 
   .ends {

@@ -29,6 +29,11 @@
     dismissSpeakerSuggestion,
     clearSpeakerSuggestion,
     type SpeakerSuggestion,
+    loadMeetingTypes,
+    loadProjectDefaultType,
+    pickMeetingType,
+    autoTypeId,
+    typeName,
   } from "$lib/intel.svelte";
   import Settings from "$lib/Settings.svelte";
   import Library from "$lib/Library.svelte";
@@ -832,8 +837,24 @@
   let newProjectName = $state("");
   let newProjectError = $state("");
   $effect(() => {
-    if (intelEnabled) loadProjects();
+    if (intelEnabled) {
+      loadProjects();
+      loadMeetingTypes();
+    }
   });
+  // The project's default type labels "Auto" in the type picker and applies at Start.
+  $effect(() => {
+    void intel.projectId;
+    if (intelEnabled) loadProjectDefaultType();
+  });
+  // Picking a type mid-meeting switches the live analysis from its next pass.
+  async function pickType(id: string) {
+    try {
+      await pickMeetingType(id, running);
+    } catch (e) {
+      error = String(e);
+    }
+  }
   async function submitNewProject() {
     const name = newProjectName.trim();
     newProjectError = await createProject(name, false);
@@ -979,6 +1000,7 @@
           assist: true,
           intel: intelEnabled,
           projectId: intelEnabled && intel.projectId ? intel.projectId : null,
+          meetingTypeId: intelEnabled && intel.typePick ? intel.typePick : null,
           meetingLabel: i18n.t.library.newNoteTitle(new Date().toLocaleString()),
           meetingId: nextMeetingId,
         },
@@ -1028,8 +1050,9 @@
     }
     running = false;
     liveNotice = "";
-    // This meeting's end time never applies to the next one.
+    // This meeting's end time and type never apply to the next one.
     intel.scheduledEndTyped = false;
+    intel.typePick = "";
     clearTimeout(titleTimer);
 
     if (autoSave && segments.length > 0 && meetingId) {
@@ -1045,6 +1068,7 @@
           startedAtMs: meetingStartedAt,
           source: "live",
           projectId: intelEnabled && intel.projectId ? intel.projectId : null,
+          typeId: intelEnabled ? (intel.liveType?.typeId ?? null) : null,
         });
         // Re-title from the whole meeting after saving, unless the user named it; the save itself
         // never waits on the model.
@@ -2461,6 +2485,15 @@
                     <option value="__new">{i18n.t.intel.newProject}</option>
                   </select>
                 {/if}
+                <select
+                  aria-label={i18n.t.meetingTypes.label}
+                  title={i18n.t.meetingTypes.label}
+                  value={intel.typePick}
+                  onchange={(e) => pickType(e.currentTarget.value)}
+                >
+                  <option value="">{i18n.t.meetingTypes.auto(typeName(autoTypeId()))}</option>
+                  {#each intel.meetingTypes as t (t.id)}<option value={t.id}>{t.name}</option>{/each}
+                </select>
               </span>
             {/if}
             <span class="pane-actions">
@@ -3130,6 +3163,9 @@
     {#if promptsOpen}
       <PromptRunner
         live
+        suggested={mode === "file"
+          ? []
+          : (intel.meetingTypes.find((t) => t.id === intel.liveType?.typeId)?.suggestedPrompts ?? [])}
         transcript={mode === "file" ? fileTranscriptText : liveTranscriptText}
         speakers={promptSpeakers}
         title={meetingTitle.trim() || undefined}

@@ -13,7 +13,7 @@ use crate::retention::RetentionPolicy;
 use crate::Result;
 
 /// On-disk schema version, bumped on schema changes (drives migration via `PRAGMA user_version`).
-const SCHEMA_VERSION: i64 = 12;
+const SCHEMA_VERSION: i64 = 13;
 
 /// Characters of transcript kept as a list preview.
 const PREVIEW_CHARS: usize = 160;
@@ -301,6 +301,36 @@ CREATE TABLE project_item (
 CREATE INDEX project_item_project ON project_item (project_id);
 ";
 
+/// Schema v13 — meeting types: what kind of meeting this is, which tunes live intelligence (built-ins
+/// are seeded on open, see `Library::seed_meeting_types`). A meeting keeps the type it ran as; a
+/// project may name a default type. Neither column is a foreign key: deleting a type clears them
+/// by hand, so a meeting's record never blocks a delete.
+pub(crate) const SCHEMA_V13: &str = "\
+CREATE TABLE meeting_type (
+    id                TEXT PRIMARY KEY,
+    name              TEXT NOT NULL,
+    description       TEXT NOT NULL DEFAULT '',
+    watch_for         TEXT NOT NULL DEFAULT '',
+    card_style        TEXT NOT NULL,
+    cadence           TEXT NOT NULL,
+    wrap_checklist    TEXT NOT NULL DEFAULT '[]',
+    summary_sections  TEXT NOT NULL DEFAULT '[]',
+    suggested_prompts TEXT NOT NULL DEFAULT '[]',
+    builtin           INTEGER NOT NULL DEFAULT 0,
+    updated_at_ms     INTEGER NOT NULL
+);
+ALTER TABLE meeting ADD COLUMN type_id TEXT;
+ALTER TABLE project ADD COLUMN default_type_id TEXT;
+";
+
+/// Undoes [`SCHEMA_V13`], for tests that rebuild an older database from a current one.
+#[cfg(test)]
+pub(crate) const DROP_V13: &str = "\
+DROP TABLE meeting_type;
+ALTER TABLE meeting DROP COLUMN type_id;
+ALTER TABLE project DROP COLUMN default_type_id;
+";
+
 /// A handle to the meeting knowledge base. Open once and reuse across queries. With no embedder it
 /// is full-text only; configure one via [`Library::set_embedder`] to enable semantic and hybrid
 /// search.
@@ -357,6 +387,7 @@ impl Library {
         };
         lib.migrate()?;
         lib.seed_prompts()?;
+        lib.seed_meeting_types()?;
         Ok(lib)
     }
 
@@ -366,7 +397,7 @@ impl Library {
             .pragma_query_value(None, "user_version", |r| r.get(0))?;
         // Each step commits with its version, so a failed step leaves the database at the previous
         // version rather than half-migrated (a re-run ALTER TABLE would fail on the duplicate column).
-        let steps: [(i64, &str); 12] = [
+        let steps: [(i64, &str); 13] = [
             (1, SCHEMA_V1),
             (2, SCHEMA_V2),
             (3, SCHEMA_V3),
@@ -379,6 +410,7 @@ impl Library {
             (10, SCHEMA_V10),
             (11, SCHEMA_V11),
             (12, SCHEMA_V12),
+            (13, SCHEMA_V13),
         ];
         for (step, sql) in steps {
             if version >= step {
@@ -430,11 +462,11 @@ impl Library {
         let expires_at_ms = self.retention.transcript_expiry(started_at_ms);
 
         let tx = self.conn.transaction()?;
-        let (project_id, old_summary): (Option<String>, Option<String>) = tx
-            .query_row(
-                "SELECT project_id, summary FROM meeting WHERE id = ?1",
+        let (project_id, old_summary, type_id): (Option<String>, Option<String>, Option<String>) =
+            tx.query_row(
+                "SELECT project_id, summary, type_id FROM meeting WHERE id = ?1",
                 [id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?
             .unwrap_or_default();
@@ -447,8 +479,8 @@ impl Library {
         tx.execute(
             "INSERT INTO meeting
                  (id, title, started_at_ms, duration_ms, language, engine, summary, segment_count,
-                  project_id, transcript_expires_at_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                  project_id, transcript_expires_at_ms, type_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             rusqlite::params![
                 id,
                 title,
@@ -460,6 +492,7 @@ impl Library {
                 finals.len() as i64,
                 project_id,
                 expires_at_ms,
+                type_id,
             ],
         )?;
         insert_segments(&tx, id, &finals)?;

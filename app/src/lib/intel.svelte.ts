@@ -182,7 +182,32 @@ type IntelUpdate =
     }
   | { kind: "nothingNew" }
   | { kind: "speakerNames"; suggestions: SpeakerSuggestion[] }
+  | { kind: "typeSuggested"; guess: TypeGuess }
+  | { kind: "meetingType"; typeId: string; name: string; chosen: boolean }
   | { kind: "failed"; message: string };
+
+/** A meeting type: tunes live intelligence for a kind of meeting. Built-ins can be edited and reset. */
+export type MeetingType = {
+  id: string;
+  name: string;
+  description: string;
+  watchFor: string;
+  cardStyle: "questions" | "gaps" | "risks" | "balanced";
+  cadence: "fast" | "normal" | "calm";
+  wrapChecklist: string[];
+  summarySections: string[];
+  /** Saved prompts, by name, offered first after the meeting. */
+  suggestedPrompts: string[];
+  builtin: boolean;
+  customized: boolean;
+  updatedAtMs: number;
+};
+export const GENERAL_TYPE_ID = "builtin-general";
+export const CARD_STYLES: MeetingType["cardStyle"][] = ["questions", "gaps", "risks", "balanced"];
+export const CADENCES: MeetingType["cadence"][] = ["fast", "normal", "calm"];
+
+/** "This looks like an interview": a suggestion only; the type never changes by itself. */
+export type TypeGuess = { typeId: string; name: string; confidence: number; reason: string };
 
 /** "Speaker 2 is probably Laurie", from the transcript. `speakerId` is 0-based. */
 export type SpeakerSuggestion = {
@@ -259,6 +284,15 @@ export const intel = $state({
   contextError: "",
   /** Live speaker-name suggestions, one per speaker at most. */
   speakerSuggestions: [] as SpeakerSuggestion[],
+  meetingTypes: [] as MeetingType[],
+  /** The type picked for the next (or current) meeting; "" lets the project default or General apply. */
+  typePick: "",
+  /** The selected project's default type ("" for none). */
+  projectDefaultType: "",
+  /** The type the live meeting runs as, as the backend reports it. */
+  liveType: null as null | { typeId: string; name: string; chosen: boolean },
+  /** A suggested type, until switched to or dismissed. */
+  typeGuess: null as null | TypeGuess,
 });
 
 /** Suggestions dismissed this meeting, so one already in flight doesn't come back. */
@@ -362,6 +396,19 @@ export function ensureIntelListener(): Promise<unknown> {
   });
   listening ??= listen<IntelUpdate>("intel://update", (e) => {
     const u = e.payload;
+    if (u.kind === "meetingType") {
+      intel.liveType = { typeId: u.typeId, name: u.name, chosen: u.chosen };
+      if (u.chosen) intel.typeGuess = null;
+      return;
+    }
+    if (u.kind === "typeSuggested") {
+      // Sent at most once per meeting; a choice made meanwhile wins.
+      if (!intel.liveType?.chosen) {
+        intel.typeGuess = u.guess;
+        intel.unseen += 1;
+      }
+      return;
+    }
     intel.analyzing = false;
     if (u.kind === "pass") {
       intel.items = u.items;
@@ -395,6 +442,8 @@ export function ensureIntelListener(): Promise<unknown> {
 
 /** Clears state and conversation for a new meeting. */
 export function resetIntel() {
+  intel.liveType = null;
+  intel.typeGuess = null;
   intel.items = [];
   intel.lastPass = null;
   intel.note = "";
@@ -435,6 +484,59 @@ export async function loadProjects() {
   } catch {
     intel.projects = [];
   }
+}
+
+/** Loads the meeting types. */
+export async function loadMeetingTypes() {
+  try {
+    intel.meetingTypes = await invoke<MeetingType[]>("list_meeting_types");
+  } catch {
+    intel.meetingTypes = [];
+  }
+}
+
+/** Loads the selected project's default type. */
+export async function loadProjectDefaultType() {
+  const projectId = intel.projectId;
+  let id = "";
+  if (projectId) {
+    try {
+      id = (await invoke<string | null>("get_project_default_type", { projectId })) ?? "";
+    } catch {
+      id = "";
+    }
+  }
+  if (intel.projectId === projectId) intel.projectDefaultType = id;
+}
+
+/** The name of a type by id, or "" when there is no such type. */
+export function typeName(id: string): string {
+  return intel.meetingTypes.find((t) => t.id === id)?.name ?? "";
+}
+
+/** The type "Auto" means: the project's default, else General. */
+export function autoTypeId(): string {
+  const id = intel.projectDefaultType;
+  return id && intel.meetingTypes.some((t) => t.id === id) ? id : GENERAL_TYPE_ID;
+}
+
+/** Picks the meeting type; while recording, the live meeting switches from its next pass ("" means
+ *  the project default, else General). */
+export async function pickMeetingType(id: string, running: boolean) {
+  intel.typePick = id;
+  intel.typeGuess = null;
+  if (running) await invoke<boolean>("intel_set_meeting_type", { typeId: id || null });
+}
+
+/** Switches to the suggested type. */
+export async function acceptTypeGuess(running: boolean) {
+  const guess = intel.typeGuess;
+  if (guess) await pickMeetingType(guess.typeId, running);
+}
+
+/** Dismisses the suggestion for this meeting (the runtime sends it only once). */
+export function dismissTypeGuess() {
+  intel.typeGuess = null;
 }
 
 /** Chooses the project new meetings are filed under. */

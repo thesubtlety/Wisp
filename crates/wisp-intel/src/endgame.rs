@@ -271,6 +271,8 @@ pub struct AuditInput<'a> {
     /// What matters to the user here (see [`crate::about_you`]).
     pub focus: Option<&'a str>,
     pub timeout: Duration,
+    /// The kind of meeting this is: its wrap-up checklist joins the audit.
+    pub meeting_type: Option<&'a wisp_library::MeetingType>,
 }
 
 /// Builds the audit request: every state item (history included, to catch weakened promises), the
@@ -305,6 +307,9 @@ pub fn prepare_audit(input: &AuditInput) -> (ReasoningRequest, EvidencePacket) {
     );
 
     let mut context = crate::about::render_about(input.focus);
+    if let Some(t) = input.meeting_type {
+        context.push_str(&crate::meeting_type::render_checklist(t));
+    }
     context.push_str(&crate::ask::render_items_for(input.state, &packet));
     context.push_str(&project);
     context.push_str(&transcript);
@@ -435,6 +440,7 @@ mod tests {
             memory: &[],
             focus: Some("Scope the migration"),
             timeout: Duration::from_secs(60),
+            meeting_type: None,
         }
     }
 
@@ -580,6 +586,23 @@ mod tests {
             report.to_markdown(),
             "## Before you wrap\n\nNothing outstanding found."
         );
+    }
+
+    #[test]
+    fn the_meeting_types_checklist_joins_the_audit() {
+        let t = vec![line(0, "Thanks for your time today.")];
+        let s = MeetingState::new("live");
+        let interview = wisp_library::MeetingType::from_builtin(
+            wisp_core::meeting_types::builtin_meeting_type("builtin-interview").unwrap(),
+        );
+        let (plain, _) = prepare_audit(&input(&t, &s));
+        assert!(!plain.context.contains("This meeting"));
+        let (req, _) = prepare_audit(&AuditInput {
+            meeting_type: Some(&interview),
+            ..input(&t, &s)
+        });
+        assert!(req.context.contains("## This meeting: Interview"));
+        assert!(req.context.contains("- Candidate's questions answered"));
     }
 
     #[test]

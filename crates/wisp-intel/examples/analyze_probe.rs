@@ -93,6 +93,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             endgame: false,
             memory: &[],
             timeout: Duration::from_secs(240),
+            meeting_type: None,
+            type_choices: &[],
         };
         if dry_run {
             let pass = prepare_observe(&state, &input)?;

@@ -19,14 +19,15 @@ use wisp_intel::{
     remap_refs, review_ops, saved_positions, AppliedOp, AskAnswer, AskInput, AskTurn, Card,
     EndgameTrigger, Finished, FollowUp, FollowUpClass, Gap, IntelRuntime, IntelUpdate, LogEntry,
     MeetingState, ProjectContext, Retriever, ReviewEdit, RuntimeConfig, SpeakerSuggestion,
-    StateItem, TranscriptLine, LIVE_MEETING_ID,
+    StateItem, TranscriptLine, TypeGuess, LIVE_MEETING_ID,
 };
+use wisp_intel::{apply_type, SummaryMeta};
 use wisp_intel::{context_packet, meeting_record, memory_ref, state_json, ExportMeta};
 use wisp_intel::{iso_date, project_brief, BriefInput, BriefMeeting};
-use wisp_intel::{parse_summary, participants, summary_context, summary_request, SummaryMeta};
+use wisp_intel::{parse_summary, participants, summary_context, summary_request_with_sections};
 use wisp_intel::{propose_learning, LearningInput, Proposal};
 use wisp_library::{meeting_ref, Library, RetrievalQuery, Snippet, StoredLogEntry, StoredOp};
-use wisp_library::{MeetingKnowledge, MemoryEntry, Project};
+use wisp_library::{MeetingKnowledge, MeetingType, MemoryEntry, Project};
 use wisp_reasoning::CancelToken;
 
 use crate::AppState;
@@ -82,6 +83,17 @@ enum IntelUpdateDto {
     SpeakerNames {
         suggestions: Vec<SpeakerSuggestion>,
     },
+    /// The meeting looks like this type: offer to switch (never switched by itself).
+    TypeSuggested {
+        guess: TypeGuess,
+    },
+    /// The type the live meeting runs as now; `chosen` is false when it fell back on General.
+    #[serde(rename_all = "camelCase")]
+    MeetingType {
+        type_id: String,
+        name: String,
+        chosen: bool,
+    },
 }
 
 impl From<IntelUpdate> for IntelUpdateDto {
@@ -112,6 +124,7 @@ impl From<IntelUpdate> for IntelUpdateDto {
             },
             IntelUpdate::Failed(message) => IntelUpdateDto::Failed { message },
             IntelUpdate::SpeakerNames(suggestions) => IntelUpdateDto::SpeakerNames { suggestions },
+            IntelUpdate::TypeSuggested(guess) => IntelUpdateDto::TypeSuggested { guess },
         }
     }
 }
@@ -196,9 +209,44 @@ impl Drop for StartGuard<'_> {
     }
 }
 
+/// The type a meeting runs as (see [`Library::resolve_meeting_type`]), and whether it was chosen.
+/// General when the library can't be read.
+fn resolve_type(
+    state: &AppState,
+    picked: Option<&str>,
+    project_id: Option<&str>,
+) -> (MeetingType, bool) {
+    state
+        .library
+        .lock()
+        .ok()
+        .and_then(|l| l.resolve_meeting_type(picked, project_id).ok())
+        .unwrap_or_else(|| {
+            (
+                MeetingType::from_builtin(&wisp_core::meeting_types::BUILTIN_MEETING_TYPES[0]),
+                false,
+            )
+        })
+}
+
+fn type_dto(t: &MeetingType, chosen: bool) -> IntelUpdateDto {
+    IntelUpdateDto::MeetingType {
+        type_id: t.id.clone(),
+        name: t.name.clone(),
+        chosen,
+    }
+}
+
 /// Starts the runtime for a new live session, using the Codex CLI and falling back to Claude Code.
-/// `meeting_label` names the meeting in screenshot labels.
-pub(crate) fn start(app: &AppHandle, project_id: Option<String>, meeting_label: Option<String>) {
+/// `meeting_label` names the meeting in screenshot labels. The meeting runs as `picked_type`, else
+/// the project's default type, else General; with neither picked nor default, the first passes may
+/// suggest a type.
+pub(crate) fn start(
+    app: &AppHandle,
+    project_id: Option<String>,
+    meeting_label: Option<String>,
+    picked_type: Option<String>,
+) {
     crate::context::begin(app, project_id.clone(), meeting_label);
     let emitter = app.clone();
     let state = app.state::<AppState>();
@@ -207,17 +255,33 @@ pub(crate) fn start(app: &AppHandle, project_id: Option<String>, meeting_label: 
     if let Ok(mut slot) = state.intel.project.lock() {
         slot.clone_from(&project_id);
     }
+    let (meeting_type, chosen) = resolve_type(
+        &state,
+        picked_type.as_deref().filter(|t| !t.is_empty()),
+        project_id.as_deref(),
+    );
+    let _ = app.emit(INTEL_EVENT, type_dto(&meeting_type, chosen));
+    let mut config = RuntimeConfig {
+        memory,
+        focus,
+        ..RuntimeConfig::default()
+    };
+    if !chosen {
+        config.type_choices = state
+            .library
+            .lock()
+            .ok()
+            .and_then(|l| l.list_meeting_types().ok())
+            .unwrap_or_default();
+    }
+    apply_type(&mut config, meeting_type);
     let runtime = IntelRuntime::spawn(
         crate::reasoning::backend(&state),
         Box::new(LibraryRetriever {
             app: app.clone(),
             project_id,
         }),
-        RuntimeConfig {
-            memory,
-            focus,
-            ..RuntimeConfig::default()
-        },
+        config,
         Box::new(move |update| {
             match &update {
                 IntelUpdate::Pass {
@@ -233,6 +297,10 @@ pub(crate) fn start(app: &AppHandle, project_id: Option<String>, meeting_label: 
                     "wisp: intel audit via {backend}: {} gaps, {} rejected",
                     report.gaps.len(),
                     report.rejected.len()
+                ),
+                IntelUpdate::TypeSuggested(g) => eprintln!(
+                    "wisp: intel suggests meeting type {} ({:.2})",
+                    g.type_id, g.confidence
                 ),
                 IntelUpdate::NothingNew
                 | IntelUpdate::WrapSuggested(_)
@@ -277,6 +345,29 @@ pub(crate) fn intel_set_project(
             focus,
         });
     })
+}
+
+/// Switches the live meeting to meeting type `type_id` from the next pass on (an empty or missing id
+/// means the project's default, else General). Once switched, no type is suggested. Reports the type
+/// now in effect as an [`INTEL_EVENT`], and returns whether intelligence was running.
+#[tauri::command]
+pub(crate) fn intel_set_meeting_type(
+    app: AppHandle,
+    type_id: Option<String>,
+) -> Result<bool, String> {
+    let state = app.state::<AppState>();
+    let project = state.intel.project.lock().ok().and_then(|p| p.clone());
+    let (meeting_type, chosen) = resolve_type(
+        &state,
+        type_id.as_deref().filter(|t| !t.is_empty()),
+        project.as_deref(),
+    );
+    let dto = type_dto(&meeting_type, chosen);
+    let running = with_runtime(&state, |rt| rt.set_meeting_type(meeting_type))?;
+    if running {
+        let _ = app.emit(INTEL_EVENT, dto);
+    }
+    Ok(running)
 }
 
 /// The speaker label a line carries into the reasoning context: the name the user gave the speaker
@@ -756,14 +847,18 @@ pub(crate) async fn meeting_summarize(
         if meeting.live_items().is_empty() && lines.is_empty() {
             return Err("nothing to summarize: this meeting has no state or transcript".to_owned());
         }
-        let title = state
-            .library
-            .lock()
-            .map_err(|_| "library lock poisoned".to_owned())?
-            .get_note(&id)
-            .map_err(|e| e.to_string())?
-            .map(|(note, _)| note.title)
-            .unwrap_or_default();
+        let (title, sections) = {
+            let library = state
+                .library
+                .lock()
+                .map_err(|_| "library lock poisoned".to_owned())?;
+            let title = library
+                .get_note(&id)
+                .map_err(|e| e.to_string())?
+                .map(|(note, _)| note.title)
+                .unwrap_or_default();
+            (title, saved_type_sections(&library, &id))
+        };
         let meta = SummaryMeta {
             title,
             when: when.unwrap_or_default(),
@@ -773,7 +868,11 @@ pub(crate) async fn meeting_summarize(
         let backend = crate::reasoning::backend_for(&state, Some(id.clone()));
         let response = backend
             .invoke(
-                &summary_request(&context, std::time::Duration::from_secs(180)),
+                &summary_request_with_sections(
+                    &context,
+                    std::time::Duration::from_secs(180),
+                    &sections,
+                ),
                 &CancelToken::new(),
             )
             .map_err(|e| e.to_string())?;
@@ -791,6 +890,17 @@ pub(crate) async fn meeting_summarize(
     })
     .await
     .map_err(|e| format!("summary task failed: {e}"))?
+}
+
+/// The summary sections of the type a saved meeting ran as; none when it has no type.
+fn saved_type_sections(library: &Library, meeting_id: &str) -> Vec<String> {
+    library
+        .meeting_type_id(meeting_id)
+        .ok()
+        .flatten()
+        .and_then(|t| library.get_meeting_type(&t).ok().flatten())
+        .map(|t| t.summary_sections)
+        .unwrap_or_default()
 }
 
 /// A review's follow-ups, and where they came from: `"model"`, or `"state"` when no model was
@@ -1914,6 +2024,27 @@ mod tests {
         assert_eq!(v["kind"], "speakerNames");
         assert_eq!(v["suggestions"][0]["speakerId"], 1);
         assert_eq!(v["suggestions"][0]["name"], "Laurie");
+    }
+
+    #[test]
+    fn meeting_type_updates_reach_the_webview_in_camel_case() {
+        let dto = IntelUpdateDto::from(IntelUpdate::TypeSuggested(TypeGuess {
+            type_id: "builtin-interview".into(),
+            name: "Interview".into(),
+            confidence: 0.8,
+            reason: "Questions about past roles.".into(),
+        }));
+        let v = serde_json::to_value(dto).unwrap();
+        assert_eq!(v["kind"], "typeSuggested");
+        assert_eq!(v["guess"]["typeId"], "builtin-interview");
+        assert_eq!(v["guess"]["name"], "Interview");
+
+        let general =
+            MeetingType::from_builtin(&wisp_core::meeting_types::BUILTIN_MEETING_TYPES[0]);
+        let v = serde_json::to_value(type_dto(&general, false)).unwrap();
+        assert_eq!(v["kind"], "meetingType");
+        assert_eq!(v["typeId"], "builtin-general");
+        assert_eq!(v["chosen"], false);
     }
 
     #[test]
