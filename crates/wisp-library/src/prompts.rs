@@ -212,6 +212,15 @@ impl Library {
             > 0)
     }
 
+    /// Replaces one stored run's output (e.g. after a speaker rename). Returns whether a row
+    /// changed.
+    pub fn set_prompt_run_output(&self, id: i64, output: &str) -> Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE prompt_run SET output = ?2 WHERE id = ?1",
+            rusqlite::params![id, output],
+        )? > 0)
+    }
+
     /// A saved meeting's transcript as `Name: text` lines, in speech order, with the speaker names
     /// the user gave. `None` when there is no such meeting; empty once the transcript is pruned.
     pub fn meeting_transcript(&self, meeting_id: &str) -> Result<Option<String>> {
@@ -411,6 +420,23 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_runs_output_can_be_replaced_in_place() {
+        let lib = library_with_meeting();
+        let id = lib.insert_prompt_run(&run("m1", 10)).unwrap();
+        assert!(lib
+            .set_prompt_run_output(id, "Bob said: Hi there.")
+            .unwrap());
+        assert_eq!(
+            lib.prompt_runs("m1").unwrap()[0].output,
+            "Bob said: Hi there."
+        );
+        assert!(
+            !lib.set_prompt_run_output(id + 99, "x").unwrap(),
+            "no such run"
+        );
+    }
+
+    #[test]
     fn runs_go_with_the_meeting_and_survive_a_resave() {
         let mut lib = library_with_meeting();
         lib.insert_prompt_run(&run("m1", 10)).unwrap();
@@ -461,8 +487,9 @@ pub(crate) mod tests {
             .unwrap();
             lib.conn
                 .execute_batch(&format!(
-                    "{}DROP TABLE prompt_run; DROP TABLE prompt; DROP TABLE project_item;
+                    "{}{}DROP TABLE prompt_run; DROP TABLE prompt; DROP TABLE project_item;
                      PRAGMA user_version = 10;",
+                    crate::store::DROP_V14,
                     crate::store::DROP_V13
                 ))
                 .unwrap();
@@ -472,7 +499,7 @@ pub(crate) mod tests {
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 13);
+        assert_eq!(version, 14);
         assert_eq!(lib.count().unwrap(), 1);
         assert_eq!(lib.list_prompts().unwrap().len(), BUILTIN_PROMPTS.len());
         lib.insert_prompt_run(&run("m1", 1)).unwrap();

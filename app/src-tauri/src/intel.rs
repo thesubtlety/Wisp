@@ -26,7 +26,10 @@ use wisp_intel::{context_packet, meeting_record, memory_ref, state_json, ExportM
 use wisp_intel::{iso_date, project_brief, BriefInput, BriefMeeting};
 use wisp_intel::{parse_summary, participants, summary_context, summary_request_with_sections};
 use wisp_intel::{propose_learning, LearningInput, Proposal};
-use wisp_library::{meeting_ref, Library, RetrievalQuery, Snippet, StoredLogEntry, StoredOp};
+use wisp_intel::{relabel_answer, relabel_op, relabel_text};
+use wisp_library::{
+    meeting_ref, AskTurnRow, Library, RetrievalQuery, Snippet, StoredLogEntry, StoredOp,
+};
 use wisp_library::{MeetingKnowledge, MeetingType, MemoryEntry, Project};
 use wisp_reasoning::CancelToken;
 
@@ -659,6 +662,35 @@ pub(crate) fn intel_analyze_now(state: State<'_, AppState>) -> Result<bool, Stri
     })
 }
 
+/// Answers `input` under the shared ask-cancel slot, so a newer question cancels the one in flight.
+/// Shared by the live ask and the saved-meeting ask.
+fn run_ask(
+    state: &AppState,
+    backend: &dyn wisp_reasoning::ReasoningBackend,
+    input: &AskInput,
+) -> Result<AskAnswerDto, String> {
+    let cancel = CancelToken::new();
+    if let Ok(mut slot) = state.intel.ask_cancel.lock() {
+        if let Some(previous) = slot.replace(cancel.clone()) {
+            previous.cancel();
+        }
+    }
+    let result = ask(backend, &cancel, input)
+        .map(|answer| AskAnswerDto {
+            markdown: answer.to_markdown(),
+            answer,
+        })
+        .map_err(|e| e.to_string());
+    // A newer question cancels this one's token as it takes the slot, so an uncancelled token means
+    // the slot still holds it.
+    if !cancel.is_cancelled() {
+        if let Ok(mut slot) = state.intel.ask_cancel.lock() {
+            *slot = None;
+        }
+    }
+    result
+}
+
 /// Answers a question about the current (or just-finished) live meeting from its transcript and
 /// state, with checked citations. One question at a time; a new one cancels the last.
 #[tauri::command]
@@ -673,12 +705,6 @@ pub(crate) async fn intel_ask(
     }
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
-        let cancel = CancelToken::new();
-        if let Ok(mut slot) = state.intel.ask_cancel.lock() {
-            if let Some(previous) = slot.replace(cancel.clone()) {
-                previous.cancel();
-            }
-        }
         let names = live_speaker_names(&state);
         let transcript = live_lines(
             &state
@@ -702,9 +728,9 @@ pub(crate) async fn intel_ask(
         } else {
             Vec::new()
         };
-        let result = ask(
+        run_ask(
+            &state,
             backend.as_ref(),
-            &cancel,
             &AskInput {
                 question: &question,
                 history: &history,
@@ -716,19 +742,6 @@ pub(crate) async fn intel_ask(
                 timeout: std::time::Duration::from_secs(180),
             },
         )
-        .map(|answer| AskAnswerDto {
-            markdown: answer.to_markdown(),
-            answer,
-        })
-        .map_err(|e| e.to_string());
-        // A newer question cancels this one's token as it takes the slot, so an uncancelled token
-        // means the slot still holds it.
-        if !cancel.is_cancelled() {
-            if let Ok(mut slot) = state.intel.ask_cancel.lock() {
-                *slot = None;
-            }
-        }
-        result
     })
     .await
     .map_err(|e| format!("ask task failed: {e}"))?
@@ -748,6 +761,125 @@ pub(crate) fn intel_ask_cancel(state: State<'_, AppState>) {
     }
 }
 
+/// Answers a question about a saved (past) meeting from its stored transcript and state, with
+/// checked citations, and stores the turn so the thread is there when the meeting is reopened. Like
+/// the live ask, one question at a time; a new one cancels the last. The model call is tagged to the
+/// meeting, so its AI-activity entry follows the same retention as the transcript.
+#[tauri::command]
+pub(crate) async fn intel_ask_saved(
+    app: AppHandle,
+    id: String,
+    question: String,
+    history: Vec<AskTurn>,
+) -> Result<AskAnswerDto, String> {
+    let question = question.trim().to_owned();
+    if question.is_empty() {
+        return Err("empty question".to_owned());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let (meeting, transcript) = saved_meeting(&state, &id)?;
+        let project_id = {
+            let library = state
+                .library
+                .lock()
+                .map_err(|_| "library lock poisoned".to_owned())?;
+            library
+                .get_note(&id)
+                .map_err(|e| e.to_string())?
+                .and_then(|(note, _)| note.project_id)
+        };
+        let memory = project_memory(&state, project_id.as_deref());
+        let retrieved = LibraryRetriever {
+            app: app.clone(),
+            project_id,
+        }
+        .retrieve(&question);
+        let backend = crate::reasoning::backend_for(&state, Some(id.clone()));
+        let answer = run_ask(
+            &state,
+            backend.as_ref(),
+            &AskInput {
+                question: &question,
+                history: &history,
+                transcript: &transcript,
+                state: &meeting,
+                retrieved: &retrieved,
+                memory: &memory,
+                // No live screenshots for a past meeting; retrieved document evidence still applies.
+                images: &[],
+                timeout: std::time::Duration::from_secs(180),
+            },
+        )?;
+        // Store the turn. The insert is a no-op once the transcript is pruned, so a saved thread
+        // never outlives the transcript its answers quote.
+        if let (Ok(library), Ok(encoded)) =
+            (state.library.lock(), serde_json::to_string(&answer.answer))
+        {
+            let _ = library.insert_ask_turn(&AskTurnRow {
+                id: 0,
+                meeting_id: id.clone(),
+                question: question.clone(),
+                answer: encoded,
+                at_ms: now_ms(),
+            });
+        }
+        Ok(answer)
+    })
+    .await
+    .map_err(|e| format!("ask task failed: {e}"))?
+}
+
+/// One stored turn as the webview shows and replays it: the question, the checked answer, and when
+/// it was asked.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SavedAskTurn {
+    question: String,
+    answer: AskAnswerDto,
+    at_ms: i64,
+}
+
+/// A saved meeting's stored ask thread, oldest first. Empty when none was asked or the transcript
+/// has been pruned.
+#[tauri::command]
+pub(crate) fn intel_saved_ask(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Vec<SavedAskTurn>, String> {
+    let rows = state
+        .library
+        .lock()
+        .map_err(|_| "library lock poisoned".to_owned())?
+        .ask_turns(&id)
+        .map_err(|e| e.to_string())?;
+    rows.into_iter()
+        .map(|row| {
+            let answer: AskAnswer = serde_json::from_str(&row.answer).map_err(|e| e.to_string())?;
+            Ok(SavedAskTurn {
+                question: row.question,
+                answer: AskAnswerDto {
+                    markdown: answer.to_markdown(),
+                    answer,
+                },
+                at_ms: row.at_ms,
+            })
+        })
+        .collect()
+}
+
+/// Clears a saved meeting's ask thread.
+#[tauri::command]
+pub(crate) fn intel_clear_saved_ask(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    state
+        .library
+        .lock()
+        .map_err(|_| "library lock poisoned".to_owned())?
+        .clear_ask_turns(&id)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 /// A saved meeting's state log, parsed.
 pub(crate) fn stored_log(library: &Library, id: &str) -> Result<Vec<AppliedOp>, String> {
     library
@@ -762,6 +894,74 @@ pub(crate) fn stored_log(library: &Library, id: &str) -> Result<Vec<AppliedOp>, 
             })
         })
         .collect()
+}
+
+/// Rewrites a renamed speaker's label wherever the model already wrote it into a saved meeting's
+/// artifacts: the summary, the state log, the ask thread and prompt-run outputs. The transcript
+/// relabels itself from the speaker id, so it is not touched here, and neither is quoted evidence.
+/// `before`/`after` are the meeting's names around the rename. A no-op when the label is unchanged
+/// (e.g. the speaker's prose label did not depend on the name). Best-effort: the caller has already
+/// stored the name, so a failure here only leaves stale prose.
+pub(crate) fn relabel_saved_speaker(
+    library: &mut Library,
+    id: &str,
+    speaker: u32,
+    before: &SpeakerNames,
+    after: &SpeakerNames,
+) -> Result<(), String> {
+    let from = speaker_display(SpeakerId(speaker), before);
+    let to = speaker_display(SpeakerId(speaker), after);
+    if from == to {
+        return Ok(());
+    }
+
+    // Summary.
+    if let Some((note, _)) = library.get_note(id).map_err(|e| e.to_string())? {
+        if let Some(summary) = note.summary {
+            let next = relabel_text(&summary, &from, &to);
+            if next != summary {
+                library.set_summary(id, &next).map_err(|e| e.to_string())?;
+            }
+        }
+    }
+
+    // State log: rewrite in place, saving the whole log only if an op changed.
+    let mut log = stored_log(library, id)?;
+    let mut log_changed = false;
+    for applied in &mut log {
+        let before_op = applied.op.clone();
+        relabel_op(&mut applied.op, &from, &to);
+        log_changed |= applied.op != before_op;
+    }
+    if log_changed {
+        save_log(library, id, &log)?;
+    }
+
+    // Ask thread: each stored answer is JSON the app owns.
+    for turn in library.ask_turns(id).map_err(|e| e.to_string())? {
+        let mut answer: AskAnswer =
+            serde_json::from_str(&turn.answer).map_err(|e| e.to_string())?;
+        let before_answer = answer.clone();
+        relabel_answer(&mut answer, &from, &to);
+        if answer != before_answer {
+            let json = serde_json::to_string(&answer).map_err(|e| e.to_string())?;
+            library
+                .set_ask_answer(turn.id, &json)
+                .map_err(|e| e.to_string())?;
+        }
+    }
+
+    // Prompt-run outputs are plain text.
+    for run in library.prompt_runs(id).map_err(|e| e.to_string())? {
+        let next = relabel_text(&run.output, &from, &to);
+        if next != run.output {
+            library
+                .set_prompt_run_output(run.id, &next)
+                .map_err(|e| e.to_string())?;
+        }
+    }
+
+    Ok(())
 }
 
 /// A saved meeting's state and its transcript lines (empty once pruned).
@@ -1949,6 +2149,109 @@ mod tests {
             Some("Them")
         );
         assert_eq!(meeting.item("Q-1").unwrap().created_at_ms, 99);
+    }
+
+    #[test]
+    fn renaming_relabels_saved_artifacts_but_not_quotes() {
+        let mut library = Library::open_in_memory().unwrap();
+        library
+            .save_note(
+                "m",
+                &wisp_core::export::MeetingMeta::default(),
+                0,
+                &[seg(AudioSourceKind::System, 0, "line")],
+            )
+            .unwrap();
+        library
+            .set_summary("m", "Speaker 2 agreed to ship. Speaker 20 abstained.")
+            .unwrap();
+
+        let add = ResolvedOp::Add {
+            id: "COM-1".into(),
+            kind: ItemKind::Commitment,
+            text: "Speaker 2 to send numbers".into(),
+            status: EpistemicStatus::Stated,
+            confidence: 0.8,
+            source_refs: vec![],
+            related_items: vec![],
+            owner: Some("Speaker 2".into()),
+            due: None,
+        };
+        library
+            .save_state_ops(
+                "m",
+                &[StoredOp {
+                    seq: 0,
+                    at_ms: 1,
+                    op: serde_json::to_string(&add).unwrap(),
+                }],
+            )
+            .unwrap();
+
+        let answer = AskAnswer {
+            short: String::new(),
+            answer: "Speaker 2 will ship it.".into(),
+            citations: vec![wisp_intel::Citation {
+                id: "T0".into(),
+                label: "Speaker 2 · 00:00".into(),
+                text: "I, Speaker 2, will ship it.".into(),
+                source_ref: None,
+                item_id: None,
+            }],
+            unknown_citations: vec![],
+            grounded: true,
+        };
+        library
+            .insert_ask_turn(&AskTurnRow {
+                id: 0,
+                meeting_id: "m".into(),
+                question: "Who ships?".into(),
+                answer: serde_json::to_string(&answer).unwrap(),
+                at_ms: 2,
+            })
+            .unwrap();
+
+        library
+            .insert_prompt_run(&wisp_library::PromptRun {
+                id: 0,
+                meeting_id: "m".into(),
+                prompt_name: "Recap".into(),
+                speaker: None,
+                output: "Speaker 2 led the call.".into(),
+                backend: "claude".into(),
+                at_ms: 3,
+            })
+            .unwrap();
+
+        let before = SpeakerNames::new();
+        let after: SpeakerNames = [(1, "Bob".to_owned())].into_iter().collect();
+        relabel_saved_speaker(&mut library, "m", 1, &before, &after).unwrap();
+
+        // A different-numbered speaker is left alone.
+        assert_eq!(
+            library.get_note("m").unwrap().unwrap().0.summary.as_deref(),
+            Some("Bob agreed to ship. Speaker 20 abstained.")
+        );
+        let op: ResolvedOp = serde_json::from_str(&library.state_ops("m").unwrap()[0].op).unwrap();
+        let ResolvedOp::Add { text, owner, .. } = op else {
+            panic!("kind changed");
+        };
+        assert_eq!(text, "Bob to send numbers");
+        assert_eq!(owner.as_deref(), Some("Bob"));
+
+        let stored: AskAnswer =
+            serde_json::from_str(&library.ask_turns("m").unwrap()[0].answer).unwrap();
+        assert_eq!(stored.answer, "Bob will ship it.");
+        assert_eq!(stored.citations[0].label, "Bob · 00:00");
+        assert_eq!(
+            stored.citations[0].text, "I, Speaker 2, will ship it.",
+            "quoted evidence is left as spoken"
+        );
+
+        assert_eq!(
+            library.prompt_runs("m").unwrap()[0].output,
+            "Bob led the call."
+        );
     }
 
     #[test]

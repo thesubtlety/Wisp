@@ -11,6 +11,9 @@
   import MeetingExports from "$lib/MeetingExports.svelte";
   import SummaryView from "$lib/SummaryView.svelte";
   import PromptRunner from "$lib/PromptRunner.svelte";
+  import AskThread from "$lib/AskThread.svelte";
+  import ReviewPanel from "$lib/ReviewPanel.svelte";
+  import AiActivity from "$lib/AiActivity.svelte";
 
   let {
     id,
@@ -75,7 +78,8 @@
 
   // The tabs: its transcript, its structured state, its summary and prompts. A state item's
   // evidence chip jumps to (and highlights) its transcript line.
-  let detailTab = $state<"transcript" | "state" | "summary" | "prompts">("transcript");
+  let detailTab = $state<"transcript" | "state" | "ask" | "review" | "summary" | "prompts">("transcript");
+  let activityOpen = $state(false);
   // Who spoke, as the prompt library names them ("You", a given name, "Speaker 2", "Them").
   const meetingSpeakers = $derived.by(() => {
     const seen = new Set<string>();
@@ -88,6 +92,9 @@
   });
   let stateItems = $state<StateItem[]>([]);
   let highlightIdx = $state<number | null>(null);
+  // Bumped after a speaker rename to remount the self-loading tabs (Ask, Prompts) so they show the
+  // relabeled text without reopening the meeting.
+  let reloadKey = $state(0);
 
   $effect(() => {
     const want = id;
@@ -169,9 +176,27 @@
       if (name) next[speaker] = name;
       else delete next[speaker];
       detail.speakerNames = next;
+      // The backend rewrote the old label in the stored summary, state, ask thread and prompt runs;
+      // reload them so the open tabs reflect it.
+      await refreshArtifacts();
     } catch (e) {
       error = String(e);
     }
+  }
+
+  // Reload a meeting's derived artifacts in place (after a speaker rename). Leaves the active tab as
+  // it is; the transcript already relabeled itself from `speakerNames`.
+  async function refreshArtifacts() {
+    const want = detail?.meeting.id;
+    if (!want) return;
+    await openNote(want);
+    try {
+      const items = await invoke<StateItem[]>("intel_saved_state", { id: want });
+      if (detail?.meeting.id === want) stateItems = items;
+    } catch {
+      // keep the items already shown
+    }
+    reloadKey++;
   }
 
   function askMerge(into: string) {
@@ -481,11 +506,13 @@
   </div>
 
   <div class="detail-tabs" role="tablist">
-    {#each [["transcript", i18n.t.library.tabTranscript], ["state", i18n.t.library.tabState], ["summary", i18n.t.library.tabSummary], ["prompts", i18n.t.prompts.tab]] as const as [tab, label] (tab)}
+    {#each [["transcript", i18n.t.library.tabTranscript], ["state", i18n.t.library.tabState], ["ask", i18n.t.intel.tabAsk], ["review", i18n.t.intel.tabReview], ["summary", i18n.t.library.tabSummary], ["prompts", i18n.t.prompts.tab]] as const as [tab, label] (tab)}
       <button role="tab" aria-selected={detailTab === tab} class:on={detailTab === tab} onclick={() => (detailTab = tab)}
         >{label}{#if tab === "state" && stateItems.length}<span class="tab-count">{stateItems.length}</span>{/if}</button
       >
     {/each}
+    <span class="grow"></span>
+    <button class="activity" onclick={() => (activityOpen = true)}>{i18n.t.audit.title}</button>
   </div>
 
   {#if detailTab === "state"}
@@ -494,14 +521,26 @@
     {:else}
       <p class="move-note">{i18n.t.library.stateNone}</p>
     {/if}
-  {:else if detailTab === "prompts"}
-    <PromptRunner
+  {:else if detailTab === "ask"}
+    {#key reloadKey}
+      <AskThread meetingId={detail.meeting.id} />
+    {/key}
+  {:else if detailTab === "review"}
+    <ReviewPanel
       meetingId={detail.meeting.id}
-      suggested={intel.meetingTypes.find((t) => t.id === detail?.meetingType?.id)?.suggestedPrompts ?? []}
-      speakers={meetingSpeakers}
-      title={detail.meeting.title}
-      date={fmtDate(detail.meeting.started_at_ms)}
+      projectId={detail.meeting.project_id ?? ""}
+      projectName={projectName(detail.meeting.project_id)}
     />
+  {:else if detailTab === "prompts"}
+    {#key reloadKey}
+      <PromptRunner
+        meetingId={detail.meeting.id}
+        suggested={intel.meetingTypes.find((t) => t.id === detail?.meetingType?.id)?.suggestedPrompts ?? []}
+        speakers={meetingSpeakers}
+        title={detail.meeting.title}
+        date={fmtDate(detail.meeting.started_at_ms)}
+      />
+    {/key}
   {:else if detailTab === "summary"}
     <SummaryView
       meetingId={detail.meeting.id}
@@ -532,6 +571,10 @@
       {/each}
     </div>
   {/if}
+
+  <Modal bind:open={activityOpen} title={i18n.t.audit.title}>
+    <AiActivity meetingId={detail.meeting.id} />
+  </Modal>
   {:else if error}
     <div class="err">{error}</div>
   {/if}
@@ -686,8 +729,13 @@
 
   .detail-tabs {
     display: flex;
+    align-items: center;
     gap: 4px;
     border-bottom: 1px solid var(--border);
+  }
+
+  .detail-tabs .grow {
+    flex: 1;
   }
 
   .detail-tabs button {

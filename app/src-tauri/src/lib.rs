@@ -3924,7 +3924,9 @@ fn set_live_speaker_name(
     Ok(())
 }
 
-/// Names (or with a blank `name`, un-names) a speaker of a stored meeting.
+/// Names (or with a blank `name`, un-names) a speaker of a stored meeting. The transcript relabels
+/// itself from the speaker id; the derived artifacts (summary, state, ask thread, prompt runs) are
+/// frozen model prose, so the old label is rewritten in them to match (best-effort).
 #[tauri::command]
 fn set_library_speaker_name(
     state: State<'_, AppState>,
@@ -3932,12 +3934,19 @@ fn set_library_speaker_name(
     speaker: u32,
     name: String,
 ) -> Result<(), String> {
-    state
+    let mut library = state
         .library
         .lock()
-        .map_err(|_| "library lock poisoned".to_owned())?
+        .map_err(|_| "library lock poisoned".to_owned())?;
+    let before = library.speaker_names(&id).map_err(|e| e.to_string())?;
+    library
         .set_speaker_name(&id, speaker, &name)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    let after = library.speaker_names(&id).map_err(|e| e.to_string())?;
+    if let Err(e) = intel::relabel_saved_speaker(&mut library, &id, speaker, &before, &after) {
+        eprintln!("wisp: relabeling a renamed speaker in the meeting's artifacts failed: {e}");
+    }
+    Ok(())
 }
 
 /// Folds speaker `from` into `into` in a stored meeting (diarization split one person in two).
@@ -4632,6 +4641,9 @@ pub fn run() {
             intel::intel_export_save,
             intel::intel_ask,
             intel::intel_ask_cancel,
+            intel::intel_ask_saved,
+            intel::intel_saved_ask,
+            intel::intel_clear_saved_ask,
             intel::intel_dismiss_card,
             intel::intel_dismiss_speaker_name,
             intel::intel_wrap_up,

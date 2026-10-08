@@ -46,6 +46,7 @@ pub mod meeting_type;
 pub mod model;
 pub mod ops;
 pub mod reducer;
+pub mod relabel;
 pub mod review;
 pub mod runtime;
 pub mod screenshot;
@@ -84,6 +85,7 @@ pub use meeting_type::{
 pub use model::{EpistemicStatus, ItemKind, Lifecycle, MeetingState, SourceRef, StateItem};
 pub use ops::{output_schema, AppliedOp, ModelOp, OpBatch, OpKind, ReplayError, ResolvedOp};
 pub use reducer::{reduce, ApplyReport, RejectReason, Rejection};
+pub use relabel::{relabel_answer, relabel_op, relabel_text};
 pub use review::{
     apply_edits, fallback_followups, generate_followups, interpret_reply, parse_reply, review_ops,
     FollowUp, FollowUpClass, ReviewEdit,

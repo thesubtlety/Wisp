@@ -13,7 +13,7 @@ use crate::retention::RetentionPolicy;
 use crate::Result;
 
 /// On-disk schema version, bumped on schema changes (drives migration via `PRAGMA user_version`).
-const SCHEMA_VERSION: i64 = 13;
+const SCHEMA_VERSION: i64 = 14;
 
 /// Characters of transcript kept as a list preview.
 const PREVIEW_CHARS: usize = 160;
@@ -323,6 +323,20 @@ ALTER TABLE meeting ADD COLUMN type_id TEXT;
 ALTER TABLE project ADD COLUMN default_type_id TEXT;
 ";
 
+/// Schema v14 — ask threads over a saved meeting: each question the user asked about a past meeting
+/// and the answer. An answer quotes the transcript, so a thread is short-lived like a transcript: it
+/// goes when the meeting is deleted (`ON DELETE CASCADE`) and is pruned when the transcript expires.
+pub(crate) const SCHEMA_V14: &str = "\
+CREATE TABLE ask_turn (
+    id         INTEGER PRIMARY KEY,
+    meeting_id TEXT NOT NULL REFERENCES meeting (id) ON DELETE CASCADE,
+    question   TEXT NOT NULL,
+    answer     TEXT NOT NULL,
+    at_ms      INTEGER NOT NULL
+);
+CREATE INDEX ask_turn_meeting ON ask_turn (meeting_id);
+";
+
 /// Undoes [`SCHEMA_V13`], for tests that rebuild an older database from a current one.
 #[cfg(test)]
 pub(crate) const DROP_V13: &str = "\
@@ -330,6 +344,11 @@ DROP TABLE meeting_type;
 ALTER TABLE meeting DROP COLUMN type_id;
 ALTER TABLE project DROP COLUMN default_type_id;
 ";
+
+/// Undoes [`SCHEMA_V14`], for tests that rebuild an older database from a current one. Drop it
+/// before [`DROP_V13`] when stepping further back, newest schema first.
+#[cfg(test)]
+pub(crate) const DROP_V14: &str = "DROP TABLE ask_turn;\n";
 
 /// A handle to the meeting knowledge base. Open once and reuse across queries. With no embedder it
 /// is full-text only; configure one via [`Library::set_embedder`] to enable semantic and hybrid
@@ -397,7 +416,7 @@ impl Library {
             .pragma_query_value(None, "user_version", |r| r.get(0))?;
         // Each step commits with its version, so a failed step leaves the database at the previous
         // version rather than half-migrated (a re-run ALTER TABLE would fail on the duplicate column).
-        let steps: [(i64, &str); 13] = [
+        let steps: [(i64, &str); 14] = [
             (1, SCHEMA_V1),
             (2, SCHEMA_V2),
             (3, SCHEMA_V3),
@@ -411,6 +430,7 @@ impl Library {
             (11, SCHEMA_V11),
             (12, SCHEMA_V12),
             (13, SCHEMA_V13),
+            (14, SCHEMA_V14),
         ];
         for (step, sql) in steps {
             if version >= step {

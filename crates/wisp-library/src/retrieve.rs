@@ -804,7 +804,7 @@ mod tests {
             assert_eq!(before, [(0, 0), (1, 2)]);
             lib.conn
                 .execute_batch(&format!(
-                    "{}ALTER TABLE chunk DROP COLUMN seg_start;
+                    "{}{}ALTER TABLE chunk DROP COLUMN seg_start;
                      ALTER TABLE chunk DROP COLUMN seg_end;
                      ALTER TABLE source_chunk DROP COLUMN line_start;
                      DROP TABLE state_op;
@@ -817,6 +817,7 @@ mod tests {
                      DROP TABLE project_item;
                      ALTER TABLE project DROP COLUMN instructions;
                      PRAGMA user_version = 3;",
+                    crate::store::DROP_V14,
                     crate::store::DROP_V13
                 ))
                 .unwrap();

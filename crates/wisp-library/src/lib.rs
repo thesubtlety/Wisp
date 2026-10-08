@@ -9,6 +9,7 @@
 //! an [`Embedder`]. [`Library::retrieve`] returns small, addressable snippets from a project's
 //! sources and meetings for reasoning.
 
+mod ask;
 mod embed;
 mod llm_log;
 mod meeting_types;
@@ -22,6 +23,7 @@ mod speakers;
 mod state_log;
 mod store;
 
+pub use ask::AskTurnRow;
 pub use embed::Embedder;
 pub use llm_log::{LlmCall, LlmTotals};
 pub use meeting_types::MeetingType;

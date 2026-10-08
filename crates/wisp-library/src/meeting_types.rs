@@ -493,7 +493,8 @@ mod tests {
             lib.create_project("p", "Acme", 0).unwrap();
             lib.conn
                 .execute_batch(&format!(
-                    "{}PRAGMA user_version = 12;",
+                    "{}{}PRAGMA user_version = 12;",
+                    crate::store::DROP_V14,
                     crate::store::DROP_V13
                 ))
                 .unwrap();
@@ -503,7 +504,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 13);
+        assert_eq!(version, 14);
         assert_eq!(lib.count().unwrap(), 1);
         assert_eq!(
             lib.list_meeting_types().unwrap().len(),

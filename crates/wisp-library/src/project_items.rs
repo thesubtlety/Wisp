@@ -229,7 +229,8 @@ mod tests {
             lib.create_project("p", "Acme", 0).unwrap();
             lib.conn
                 .execute_batch(&format!(
-                    "{}DROP TABLE project_item; PRAGMA user_version = 11;",
+                    "{}{}DROP TABLE project_item; PRAGMA user_version = 11;",
+                    crate::store::DROP_V14,
                     crate::store::DROP_V13
                 ))
                 .unwrap();
@@ -239,7 +240,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 13);
+        assert_eq!(version, 14);
         assert_eq!(lib.list_projects().unwrap().len(), 1);
         lib.add_project_item("p", "pi-a", &input("risk", "Budget"), 0)
             .unwrap();
