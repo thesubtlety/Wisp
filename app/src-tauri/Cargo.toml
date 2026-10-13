@@ -48,7 +48,8 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 # tray-icon: the macOS menu bar icon (start/stop, meeting status).
-tauri = { version = "2", features = ["tray-icon"] }
+# macos-private-api: the transparent push-to-talk indicator overlay (paired with app.macOSPrivateApi).
+tauri = { version = "2", features = ["tray-icon", "macos-private-api"] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 # Global push-to-talk hotkey for dictation (fires on key press AND release).

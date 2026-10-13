@@ -127,6 +127,8 @@ struct AppState {
     /// The configured dictation hotkey, and whether it's currently registered.
     dictation_hotkey: Mutex<String>,
     dictation_enabled: Mutex<bool>,
+    /// Where the dictation hotkey + on/off state persist, so the choice survives a restart.
+    dictation_settings_path: PathBuf,
     active: Mutex<Option<ModelId>>,
     mic_device: Mutex<Option<String>>,
     system_device: Mutex<Option<String>>,
@@ -4430,6 +4432,9 @@ pub fn run() {
             let cloud_custom_models = load_cloud_custom_models(&cloud_custom_models_path);
             let cloud_custom_endpoints_path = data_dir.join("cloud-custom-endpoints.json");
             let cloud_custom_endpoints = load_cloud_endpoints(&cloud_custom_endpoints_path);
+            let dictation_settings_path = data_dir.join("dictation.json");
+            let dictation_settings = dictation::DictationSettings::load(&dictation_settings_path);
+
             let download_settings_path = data_dir.join("download-settings.json");
             let download_config = load_download_settings(&download_settings_path)
                 .to_config()
@@ -4511,8 +4516,11 @@ pub fn run() {
                 sessions: Mutex::new(Vec::new()),
                 dictation: Mutex::new(None),
                 dictation_engine: Mutex::new(None),
-                dictation_hotkey: Mutex::new(dictation::DEFAULT_DICTATION_HOTKEY.to_owned()),
+                dictation_hotkey: Mutex::new(dictation_settings.hotkey.clone()),
+                // Starts off; `dictation::init` below flips it on only if the shortcut registers, so
+                // the reported state stays honest when no engine is available.
                 dictation_enabled: Mutex::new(false),
+                dictation_settings_path,
                 active: Mutex::new(active),
                 mic_device: Mutex::new(None),
                 // Default to capturing everything: mic (you) + system audio (all scenarios).
@@ -4555,6 +4563,8 @@ pub fn run() {
 
             audit::spawn_writer(app.handle());
             tray::build(app)?;
+            // Build the push-to-talk indicator overlay and restore the saved hotkey/on-off state.
+            dictation::init(app.handle(), &dictation_settings);
             meeting::spawn_poller(app.handle());
 
             // Restore the persisted embedding model in the background — loading may download and be

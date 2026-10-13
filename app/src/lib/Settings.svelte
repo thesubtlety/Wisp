@@ -89,6 +89,78 @@
     }
   }
 
+  // ── Hotkey recorder ───────────────────────────────────────────────────────────────────────────
+  // Click the field, press any combo; we turn the keypress into a Tauri accelerator the backend
+  // parses, validates, and checks for conflicts. Escape cancels; a refused combo keeps the old one.
+  //
+  // We listen on `window` while recording rather than on the button: WebKit (the macOS webview)
+  // doesn't focus a <button> on click, so a button-level keydown handler would never fire.
+  let recordingHotkey = $state(false);
+  let hotkeyButton = $state<HTMLButtonElement | null>(null);
+
+  $effect(() => {
+    if (!recordingHotkey) return;
+    const onKey = (e: KeyboardEvent) => onHotkeyKeydown(e);
+    // A click anywhere but the field cancels recording.
+    const onPointer = (e: PointerEvent) => {
+      if (e.target !== hotkeyButton) recordingHotkey = false;
+    };
+    window.addEventListener("keydown", onKey, true);
+    window.addEventListener("pointerdown", onPointer, true);
+    return () => {
+      window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("pointerdown", onPointer, true);
+    };
+  });
+
+  // event.code values that are modifiers, not a "main" key — they only set the flags below.
+  const MODIFIER_CODES = new Set([
+    "MetaLeft", "MetaRight", "ControlLeft", "ControlRight",
+    "AltLeft", "AltRight", "ShiftLeft", "ShiftRight",
+  ]);
+
+  function onHotkeyKeydown(e: KeyboardEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.key === "Escape") {
+      recordingHotkey = false;
+      return;
+    }
+    // Wait for a non-modifier key; the main key completes the combo.
+    if (MODIFIER_CODES.has(e.code)) return;
+
+    const parts: string[] = [];
+    if (e.metaKey) parts.push("CmdOrCtrl");
+    if (e.ctrlKey) parts.push("Ctrl");
+    if (e.altKey) parts.push("Alt");
+    if (e.shiftKey) parts.push("Shift");
+    parts.push(e.code); // W3C code names (KeyD, Digit3, F5, …) are what the backend parser accepts.
+
+    recordingHotkey = false;
+    setDictation(dictation?.enabled ?? false, parts.join("+"));
+  }
+
+  const MOD_SYMBOLS: Record<string, string> = {
+    CmdOrCtrl: "⌘", CommandOrControl: "⌘", Cmd: "⌘", Command: "⌘", Super: "⌘", Meta: "⌘",
+    Ctrl: "⌃", Control: "⌃", Alt: "⌥", Option: "⌥", Shift: "⇧",
+  };
+  const KEY_SYMBOLS: Record<string, string> = {
+    Space: "␣", Enter: "⏎", Tab: "⇥", Backspace: "⌫", Delete: "⌦", Escape: "⎋",
+    ArrowUp: "↑", ArrowDown: "↓", ArrowLeft: "←", ArrowRight: "→",
+  };
+
+  /** Turns a stored accelerator ("CmdOrCtrl+Shift+D") into readable key caps ("⌘ ⇧ D"). */
+  function formatHotkey(accel: string): string {
+    return accel
+      .split("+")
+      .map((token) => {
+        if (MOD_SYMBOLS[token]) return MOD_SYMBOLS[token];
+        if (KEY_SYMBOLS[token]) return KEY_SYMBOLS[token];
+        return token.replace(/^Key/, "").replace(/^Digit/, "").replace(/^Numpad/, "Num ");
+      })
+      .join(" ");
+  }
+
   // ── Regional downloads ─────────────────────────────────────────────────────────────────────────
   type DownloadSettings = {
     source: "auto" | "official" | "mirror";
@@ -498,15 +570,17 @@
                 </button>
               </div>
 
-              <label class="set-row">
+              <div class="set-row">
                 <span class="set-label">{i18n.t.settings.hotkey}</span>
-                <input
+                <button
                   class="hotkey-input"
-                  value={dictation.hotkey}
-                  placeholder="CmdOrCtrl+Shift+D"
-                  onchange={(e) => setDictation(dictation?.enabled ?? false, e.currentTarget.value)}
-                />
-              </label>
+                  class:recording={recordingHotkey}
+                  bind:this={hotkeyButton}
+                  onclick={() => (recordingHotkey = true)}
+                >
+                  {recordingHotkey ? i18n.t.settings.pressKeys : formatHotkey(dictation.hotkey)}
+                </button>
+              </div>
 
               {#if !dictation.accessibilityOk}
                 <div class="set-perm">
@@ -1047,6 +1121,15 @@
     border-radius: 7px;
     padding: 4px 8px;
     width: 190px;
+    text-align: center;
+    letter-spacing: 1px;
+    cursor: pointer;
+  }
+
+  .hotkey-input.recording {
+    color: var(--accent);
+    border-color: var(--accent);
+    letter-spacing: normal;
   }
 
   .set-perm {

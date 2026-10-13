@@ -539,6 +539,7 @@ export const zhHans: Messages = {
     on: "开",
     off: "关",
     hotkey: "快捷键",
+    pressKeys: "请按下按键…",
     accessibilityNote: "⚠ 需要「辅助功能」权限才能输入到其他 app。",
     openSettings: "打开系统设置",
     storage: "存储空间",

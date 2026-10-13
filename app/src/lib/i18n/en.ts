@@ -586,6 +586,7 @@ export const en = {
     on: "On",
     off: "Off",
     hotkey: "Hotkey",
+    pressKeys: "Press keys…",
     accessibilityNote: "⚠ Needs Accessibility permission to type into other apps.",
     openSettings: "Open Settings",
     storage: "Storage",

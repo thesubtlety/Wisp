@@ -9,11 +9,13 @@
 //!
 //! Either way the text is inserted via `wisp-textinject`, which needs Accessibility permission.
 
+use std::fs;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
@@ -31,6 +33,11 @@ use crate::{
 
 /// Default push-to-talk hotkey — hold to dictate, release to insert. The user can change it.
 pub(crate) const DEFAULT_DICTATION_HOTKEY: &str = "CmdOrCtrl+Shift+D";
+
+/// Label of the floating "listening" indicator window. It's created once at startup, kept
+/// transparent and click-through, and only shows the pill while the hotkey is held (see
+/// [`show_indicator`]). A fixed label so [`AppHandle::get_webview_window`] can find it.
+const INDICATOR_LABEL: &str = "dictation-indicator";
 
 /// The local model dictation prefers when it is installed and the active model isn't a batch model.
 const PREFERRED_BATCH_MODEL: &str = "parakeet-v3";
@@ -56,6 +63,90 @@ static LOADING: Mutex<()> = Mutex::new(());
 
 /// Bumped on every drop. A load that started before a drop does not install its engine.
 static GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Checks a push-to-talk hotkey string before it's registered, returning the parsed shortcut or a
+/// user-facing reason it can't be used:
+/// - it doesn't parse as a shortcut,
+/// - it's Wisp's Capture Context shortcut (that combination is already taken),
+/// - it has no modifier and isn't a function key — a bare printable key, registered *globally*,
+///   would be swallowed in every app, so the user could no longer type it anywhere.
+///
+/// Comparison against Capture Context is done on the parsed shortcut, so spelling (`Cmd` vs `Super`,
+/// token order) doesn't matter.
+pub(crate) fn validate_hotkey(hotkey: &str) -> Result<Shortcut, String> {
+    let shortcut: Shortcut = hotkey.trim().parse().map_err(|_| {
+        format!(
+            "“{}” isn't a usable shortcut — try another combination",
+            hotkey.trim()
+        )
+    })?;
+
+    if let Ok(capture) = crate::context::CAPTURE_SHORTCUT.parse::<Shortcut>() {
+        if shortcut == capture {
+            return Err(
+                "That combination is reserved for Capture Context. Pick a different one."
+                    .to_owned(),
+            );
+        }
+    }
+
+    if shortcut.mods.is_empty() && !is_function_key(&shortcut.key.to_string()) {
+        return Err(
+            "Add a modifier (⌘, ⌥, ⌃ or ⇧). A plain key would be captured in every app.".to_owned(),
+        );
+    }
+
+    Ok(shortcut)
+}
+
+/// Whether a key's W3C code name (`shortcut.key.to_string()`, e.g. `"F5"`, `"KeyD"`) is a function
+/// key — the only keys safe to use bare, since they don't type a character.
+fn is_function_key(code_name: &str) -> bool {
+    code_name.len() > 1
+        && code_name.starts_with('F')
+        && code_name[1..].bytes().all(|b| b.is_ascii_digit())
+}
+
+/// The persisted dictation settings: the chosen hotkey and whether push-to-talk is on. Saved to
+/// local app data so the choice survives a restart (the dictated text itself is never stored —
+/// it's pasted into the focused app and gone).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DictationSettings {
+    pub enabled: bool,
+    pub hotkey: String,
+}
+
+impl Default for DictationSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            hotkey: DEFAULT_DICTATION_HOTKEY.to_owned(),
+        }
+    }
+}
+
+impl DictationSettings {
+    /// Loads the settings, falling back to defaults when the file is missing or unreadable. A saved
+    /// hotkey that no longer validates (e.g. it now collides with Capture Context) is reset to the
+    /// default so a bad value can't wedge dictation.
+    pub(crate) fn load(path: &Path) -> Self {
+        let mut settings = fs::read_to_string(path)
+            .ok()
+            .and_then(|json| serde_json::from_str::<DictationSettings>(&json).ok())
+            .unwrap_or_default();
+        if validate_hotkey(&settings.hotkey).is_err() {
+            settings.hotkey = DEFAULT_DICTATION_HOTKEY.to_owned();
+        }
+        settings
+    }
+
+    /// Persists the settings. Best-effort; the error names where the write failed.
+    fn save(&self, path: &Path) -> Result<(), String> {
+        let json = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
+        fs::write(path, json).map_err(|e| format!("save dictation settings: {e}"))
+    }
+}
 
 /// Which engine push-to-talk dictation runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -419,12 +510,14 @@ fn start_dictation(app: &AppHandle) -> Result<(), String> {
         .dictation
         .lock()
         .map_err(|_| "state lock poisoned".to_owned())? = Some(dictation);
+    show_indicator(app);
     Ok(())
 }
 
 /// Stops capturing on key-up and pastes the text into the frontmost app. The batch decode runs on its
 /// own thread so the shortcut handler returns at once.
 fn finish_dictation(app: &AppHandle) {
+    hide_indicator(app);
     let state = app.state::<AppState>();
     let Some(dictation) = state.dictation.lock().ok().and_then(|mut d| d.take()) else {
         return;
@@ -498,6 +591,89 @@ fn on_shortcut(app: &AppHandle, state: ShortcutState) {
         }
         ShortcutState::Released => finish_dictation(app),
     }
+}
+
+/// Fades the "listening" pill in (key pressed) by toggling a class in the overlay page. Best-effort:
+/// a missing or not-yet-loaded window just means no pill this time — never an error that reaches the
+/// user. The `&&` guard keeps the eval harmless before the page has defined the function.
+fn show_indicator(app: &AppHandle) {
+    set_indicator(app, true);
+}
+
+/// Fades the "listening" pill out (key released).
+fn hide_indicator(app: &AppHandle) {
+    set_indicator(app, false);
+}
+
+fn set_indicator(app: &AppHandle, on: bool) {
+    if let Some(window) = app.get_webview_window(INDICATOR_LABEL) {
+        let _ = window.eval(format!("window.wispIndicator && window.wispIndicator({on})"));
+    }
+}
+
+/// Builds the floating indicator overlay and restores the persisted on/off state. Called once from
+/// the app's setup hook. The overlay is macOS-only (dictation's paste path is, and the transparent
+/// window needs the macOS private API); restoring the shortcut just reuses [`set_dictation_enabled`].
+pub(crate) fn init(app: &AppHandle, settings: &DictationSettings) {
+    #[cfg(target_os = "macos")]
+    if let Err(e) = build_indicator(app) {
+        eprintln!("wisp: dictation indicator window failed to build: {e}");
+    }
+
+    if settings.enabled {
+        // Reuse the command so registration, engine warm-up, and persistence stay in one place. On
+        // failure (no engine, hotkey refused) it leaves dictation off, keeping the reported state honest.
+        if let Err(e) = set_dictation_enabled(app.clone(), true, Some(settings.hotkey.clone())) {
+            eprintln!("wisp: restoring dictation on launch failed: {e}");
+        }
+    }
+}
+
+/// Creates the always-on-top, transparent, click-through overlay that hosts the pill. It stays
+/// "visible" to the OS the whole time but renders nothing until [`show_indicator`] fades the pill in,
+/// so it never steals focus from the app you're dictating into (which would misdirect the paste).
+#[cfg(target_os = "macos")]
+fn build_indicator(app: &AppHandle) -> tauri::Result<()> {
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+
+    if app.get_webview_window(INDICATOR_LABEL).is_some() {
+        return Ok(());
+    }
+
+    const WIDTH: f64 = 188.0;
+    const HEIGHT: f64 = 46.0;
+    /// Gap above the bottom edge of the screen.
+    const BOTTOM_MARGIN: f64 = 96.0;
+
+    let window = WebviewWindowBuilder::new(
+        app,
+        INDICATOR_LABEL,
+        WebviewUrl::App("dictation.html".into()),
+    )
+    .title("")
+    .inner_size(WIDTH, HEIGHT)
+    .decorations(false)
+    .transparent(true)
+    .always_on_top(true)
+    .focused(false)
+    .skip_taskbar(true)
+    .resizable(false)
+    .shadow(false)
+    .visible_on_all_workspaces(true)
+    .build()?;
+
+    // Let every click pass through to whatever is underneath — the pill is purely informational.
+    let _ = window.set_ignore_cursor_events(true);
+
+    // Park it near the bottom-centre of the primary display.
+    if let Ok(Some(monitor)) = window.primary_monitor() {
+        let size = monitor.size().to_logical::<f64>(monitor.scale_factor());
+        let x = ((size.width - WIDTH) / 2.0).max(0.0);
+        let y = (size.height - HEIGHT - BOTTOM_MARGIN).max(0.0);
+        let _ = window.set_position(tauri::LogicalPosition::new(x, y));
+    }
+
+    Ok(())
 }
 
 /// The global-shortcut plugin: the Capture Context shortcut (registered only during a meeting
@@ -593,7 +769,13 @@ pub(crate) fn set_dictation_enabled(
         .map_err(|_| "state lock poisoned".to_owned())?
         .clone();
 
-    if let Some(hotkey) = hotkey.filter(|h| !h.trim().is_empty()) {
+    // Validate a new hotkey before storing it, so a bad or conflicting combination never becomes the
+    // saved setting. An empty/omitted value keeps the current hotkey.
+    if let Some(hotkey) = hotkey
+        .map(|h| h.trim().to_owned())
+        .filter(|h| !h.is_empty())
+    {
+        validate_hotkey(&hotkey)?;
         *state
             .dictation_hotkey
             .lock()
@@ -621,9 +803,8 @@ pub(crate) fn set_dictation_enabled(
                     .to_owned(),
             );
         }
-        let shortcut: Shortcut = hotkey
-            .parse()
-            .map_err(|_| format!("invalid hotkey: {hotkey}"))?;
+        // Re-validate: guards a hotkey persisted before a rule changed, as well as the stored default.
+        let shortcut = validate_hotkey(&hotkey)?;
         shortcuts
             .register(shortcut)
             .map_err(|e| format!("could not register the hotkey: {e}"))?;
@@ -637,7 +818,13 @@ pub(crate) fn set_dictation_enabled(
         .lock()
         .map_err(|_| "state lock poisoned".to_owned())? = enabled;
 
-    status(&state)
+    // Persist the choice so it survives a restart. Best-effort — a write failure is logged, not fatal.
+    let result = status(&state);
+    if let Err(e) = (DictationSettings { enabled, hotkey }).save(&state.dictation_settings_path) {
+        eprintln!("wisp: could not persist dictation settings: {e}");
+    }
+
+    result
 }
 
 /// Opens System Settings → Privacy → Accessibility so the user can grant the paste permission.
@@ -649,6 +836,87 @@ pub(crate) fn open_accessibility_settings() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_hotkey_is_valid() {
+        assert!(validate_hotkey(DEFAULT_DICTATION_HOTKEY).is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_a_modified_combo_regardless_of_spelling() {
+        assert!(validate_hotkey("CmdOrCtrl+Shift+D").is_ok());
+        // The browser recorder sends W3C code names; the parser accepts them too.
+        assert!(validate_hotkey("Control+Alt+KeyK").is_ok());
+        assert!(validate_hotkey("Shift+Digit5").is_ok());
+    }
+
+    #[test]
+    fn validate_allows_a_bare_function_key_but_not_a_bare_printable_key() {
+        // Function keys don't type a character, so they're safe to grab globally with no modifier.
+        assert!(validate_hotkey("F5").is_ok());
+        // A bare letter/digit/space would be swallowed everywhere — refused.
+        assert!(validate_hotkey("KeyD").is_err());
+        assert!(validate_hotkey("D").is_err());
+        assert!(validate_hotkey("Space").is_err());
+        assert!(validate_hotkey("Digit1").is_err());
+    }
+
+    #[test]
+    fn validate_rejects_the_capture_context_shortcut() {
+        // Exact string, and an equivalent spelling of the same chord, both collide.
+        assert!(validate_hotkey(crate::context::CAPTURE_SHORTCUT).is_err());
+        assert!(validate_hotkey("Cmd+Alt+Shift+KeyC").is_err());
+    }
+
+    #[test]
+    fn validate_rejects_unparseable_input() {
+        assert!(validate_hotkey("").is_err());
+        assert!(validate_hotkey("not a hotkey").is_err());
+        assert!(validate_hotkey("Shift+").is_err());
+    }
+
+    #[test]
+    fn is_function_key_matches_only_f_plus_digits() {
+        assert!(is_function_key("F1"));
+        assert!(is_function_key("F12"));
+        assert!(!is_function_key("F"));
+        assert!(!is_function_key("KeyF"));
+        assert!(!is_function_key("Find"));
+    }
+
+    #[test]
+    fn settings_round_trip_and_fall_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dictation.json");
+
+        // Missing file → defaults.
+        let loaded = DictationSettings::load(&path);
+        assert!(!loaded.enabled);
+        assert_eq!(loaded.hotkey, DEFAULT_DICTATION_HOTKEY);
+
+        // A saved value round-trips.
+        let saved = DictationSettings {
+            enabled: true,
+            hotkey: "Control+Alt+KeyK".to_owned(),
+        };
+        saved.save(&path).unwrap();
+        assert_eq!(DictationSettings::load(&path), saved);
+
+        // A persisted hotkey that no longer validates is reset, but the enabled flag is kept.
+        DictationSettings {
+            enabled: true,
+            hotkey: crate::context::CAPTURE_SHORTCUT.to_owned(),
+        }
+        .save(&path)
+        .unwrap();
+        let loaded = DictationSettings::load(&path);
+        assert!(loaded.enabled);
+        assert_eq!(loaded.hotkey, DEFAULT_DICTATION_HOTKEY);
+
+        // Garbage file → defaults.
+        fs::write(&path, "}{ not json").unwrap();
+        assert_eq!(DictationSettings::load(&path), DictationSettings::default());
+    }
 
     #[test]
     fn join_pieces_spaces_ascii_but_runs_cjk_together() {

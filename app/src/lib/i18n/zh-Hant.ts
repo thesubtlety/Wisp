@@ -539,6 +539,7 @@ export const zhHant: Messages = {
     on: "開",
     off: "關",
     hotkey: "快捷鍵",
+    pressKeys: "請按下按鍵…",
     accessibilityNote: "⚠ 需要「輔助使用」權限才能輸入到其他 app。",
     openSettings: "打開系統設定",
     storage: "儲存空間",
