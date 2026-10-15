@@ -232,6 +232,42 @@ pub const BUILTIN_MEETING_TYPES: &[BuiltinMeetingType] = &[
         ],
         suggested_prompts: &["Action items", "Follow-up email draft"],
     },
+    BuiltinMeetingType {
+        id: "builtin-decision-debrief",
+        name: "Decision debrief",
+        description: "A debrief of a finished engagement: the cues, expectations and judgment \
+                      behind the expert's key decisions.",
+        watch_for: "- A decision, surprise or moment of uncertainty not yet probed: suggest a \
+                    follow-up.\n\
+                    - Hindsight talk (\"obviously\", \"I knew\"): ask whether it was that clear at \
+                    the time.\n\
+                    - A cue named without what set it apart: ask what would have looked different \
+                    if the situation were something else.\n\
+                    - A key decision missing an angle: the cues noticed, what was expected, the \
+                    goal, the action weighed, what a novice would miss.\n\
+                    - An option considered and dropped, or action taken despite missing \
+                    information — worth digging into.\n\
+                    Prefer short, ready-to-ask questions over observations.",
+        card_style: CardStyle::Questions,
+        cadence: Cadence::Fast,
+        wrap_checklist: &[
+            "Full narrative captured end to end",
+            "3 to 5 critical decisions chosen",
+            "Each decision covers cues, expectations, goal, action and novice contrast",
+            "The cues that set each situation apart are identified",
+            "Open questions and missing information noted",
+            "Expert confirmed the synthesis is accurate",
+        ],
+        summary_sections: &[
+            "Case summary",
+            "Decision points",
+            "Decision logic",
+            "Lessons",
+            "Actionable guidance",
+            "Open questions",
+        ],
+        suggested_prompts: &["Decision debrief report", "Decisions & rationale"],
+    },
 ];
 
 /// The built-in meeting type with this id.

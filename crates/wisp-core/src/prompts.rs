@@ -125,6 +125,26 @@ pub const BUILTIN_PROMPTS: &[BuiltinPrompt] = &[
                meeting's main language.",
         scope: PromptScope::Speaker,
     },
+    BuiltinPrompt {
+        id: "builtin-decision-debrief-report",
+        name: "Decision debrief report",
+        body: "Write a decision debrief report from \"{title}\" ({date}), in the style of a \
+               Recognition-Primed Decision debrief. Use only what was said; label any inference, \
+               and name what is missing rather than filling it in. Use Markdown with these \
+               sections: \"Case summary\" — context, objective, constraints and outcome; \
+               \"Decision points\" — the key decisions, and for each what happened, what the \
+               expert noticed, what they expected, what they chose, and why; \"Decision logic\" — \
+               the patterns, the cues that set each situation apart, the outcomes they played out \
+               in their head, and the trade-offs; \"Lessons\" — what a less experienced colleague \
+               would likely miss, and how to recognise and handle a similar situation; \
+               \"Actionable guidance\" — concrete steps, decision triggers, checks and cautions a \
+               colleague can apply; and \"Open questions\" — important uncertainties or missing \
+               information, omitted if there are none. Prefer transferable decision-making \
+               knowledge over retelling the meeting in order. Keep each point specific enough to \
+               act on without more explanation, and avoid generic advice or filler. Reply in the \
+               meeting's main language.",
+        scope: PromptScope::Meeting,
+    },
 ];
 
 /// The built-in prompt with this id.
