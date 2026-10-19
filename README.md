@@ -184,7 +184,7 @@ Grab the latest build from **[Releases](https://github.com/ppXD/Wisp/releases)**
    ```sh
    git clone --recurse-submodules <this repo> && cd Wisp/app && npm install
    ```
-3. Create a code-signing certificate named **Wisp Local Dev**, once. In Keychain Access, choose Certificate Assistant › Create a Certificate, and set Certificate Type to Code Signing. macOS ties Mic and Screen Recording grants to the signature. An ad-hoc build loses them on every rebuild.
+3. Create a code-signing certificate named **Wisp Local Dev**, once. In Keychain Access, choose Certificate Assistant › Create a Certificate, and set Certificate Type to Code Signing. macOS ties Mic and Screen Recording grants to the signature. An ad-hoc build loses them on every rebuild. Once this certificate exists, `npm run tauri build` (and `dev`) sign with it automatically, so grants survive rebuilds; set `WISP_SIGNING_IDENTITY` to use a different name, or `APPLE_SIGNING_IDENTITY=-` to force an ad-hoc build.
 4. Build. The first command stages the speech runtime libraries the bundle expects.
    ```sh
    cargo build --release --manifest-path src-tauri/Cargo.toml -p wisp-engine-sherpa
@@ -197,7 +197,7 @@ Grab the latest build from **[Releases](https://github.com/ppXD/Wisp/releases)**
    - **Notifications**
 6. Download a model when the app asks (Parakeet v3 is the default). For AI, log in to `codex` or `claude` in a terminal. For a local model, add it in Settings › AI models (for example Ollama at `http://127.0.0.1:11434/v1`) and select it in Settings › Storage › Reasoning.
 
-`npm run tauri dev` works for UI work, but the permissions reset whenever the binary changes.
+With the **Wisp Local Dev** certificate in place (step 3), rebuilds keep their permission grants, since the signature stays stable. Without it, an ad-hoc build resets the grants whenever the binary changes. `npm run tauri dev` is best for UI work.
 
 ## 🛠️ Build from source
 
