@@ -1063,6 +1063,7 @@ pub(crate) async fn meeting_summarize(
             title,
             when: when.unwrap_or_default(),
             participants: participants(&lines),
+            about: summary_about(&state, meeting_project(&state, &id).as_deref()),
         };
         let context = summary_context(&meta, &meeting, &lines);
         let backend = crate::reasoning::backend_for(&state, Some(id.clone()));
@@ -1307,6 +1308,17 @@ fn about_you(state: &AppState, project_id: Option<&str>) -> Option<String> {
         })
         .unwrap_or_default();
     wisp_intel::about_you(&about_me, name.as_deref(), &instructions)
+}
+
+/// The about block a summary is anchored on: [`about_you`] for `project_id`, or just the project's
+/// name when neither "About me" nor the instructions say anything. A meeting moved to another
+/// project while it ran is then summarized for the project it was saved under, even though its
+/// earlier items were recorded against the first one.
+fn summary_about(state: &AppState, project_id: Option<&str>) -> Option<String> {
+    about_you(state, project_id).or_else(|| {
+        let library = state.library.lock().ok()?;
+        project_name(&library, project_id).map(|name| format!("Project: {name}"))
+    })
 }
 
 /// The project a saved meeting belongs to, if any.

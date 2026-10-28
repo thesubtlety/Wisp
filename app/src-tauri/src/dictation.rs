@@ -607,7 +607,9 @@ fn hide_indicator(app: &AppHandle) {
 
 fn set_indicator(app: &AppHandle, on: bool) {
     if let Some(window) = app.get_webview_window(INDICATOR_LABEL) {
-        let _ = window.eval(format!("window.wispIndicator && window.wispIndicator({on})"));
+        let _ = window.eval(format!(
+            "window.wispIndicator && window.wispIndicator({on})"
+        ));
     }
 }
 

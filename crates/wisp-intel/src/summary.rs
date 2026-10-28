@@ -50,6 +50,15 @@ does what, and when if said (empty string if not). next_steps: the concrete acti
 at most six. Leave a list empty when there is nothing for it. Write in the language of the \
 transcript.";
 
+/// Added to both instructions: the meeting belongs to the project of its "About You and this
+/// project" block. Items recorded before a mid-meeting project switch were written against the
+/// earlier project, so the model is told not to carry that project's name forward.
+const INSTRUCTIONS_PROJECT: &str =
+    " If the context has \"About You and this project\", the meeting \
+belongs to the project it names: summarize for that project. Where the items or transcript name a \
+different project, organization or customer, the meeting was moved while it ran; do not carry \
+that name into the summary.";
+
 /// What the summary says about the meeting itself.
 #[derive(Debug, Clone, Default)]
 pub struct SummaryMeta {
@@ -57,6 +66,10 @@ pub struct SummaryMeta {
     /// When it happened, already formatted.
     pub when: String,
     pub participants: Vec<String>,
+    /// The "About You and this project" block (see [`crate::about_you`]) for the project the
+    /// meeting is saved under. It anchors the summary on that project, not on one the meeting
+    /// started in.
+    pub about: Option<String>,
 }
 
 /// The context for a summary call, and whether it had to use the transcript.
@@ -158,15 +171,16 @@ fn header(meta: &SummaryMeta, state: &MeetingState) -> String {
     out
 }
 
-/// The context for a summary: the header (title, date, participants), then the live state items
-/// most summary-worthy first, capped at [`STATE_CHARS`]. With no state items, the last
-/// [`TRANSCRIPT_CHARS`] of the transcript instead.
+/// The context for a summary: the project's about block when there is one, the header (title,
+/// date, participants), then the live state items most summary-worthy first, capped at
+/// [`STATE_CHARS`]. With no state items, the last [`TRANSCRIPT_CHARS`] of the transcript instead.
 pub fn summary_context(
     meta: &SummaryMeta,
     state: &MeetingState,
     transcript: &[TranscriptLine],
 ) -> SummaryContext {
-    let mut text = header(meta, state);
+    let mut text = crate::about::render_about(meta.about.as_deref());
+    text.push_str(&header(meta, state));
     let live = state.live_items();
     let mut items: Vec<&StateItem> = live
         .iter()
@@ -275,11 +289,14 @@ pub fn summary_request_with_sections(
     timeout: Duration,
     sections: &[String],
 ) -> ReasoningRequest {
-    let base = if context.from_transcript {
-        INSTRUCTIONS_TRANSCRIPT
-    } else {
-        INSTRUCTIONS_STATE
-    };
+    let base = format!(
+        "{}{INSTRUCTIONS_PROJECT}",
+        if context.from_transcript {
+            INSTRUCTIONS_TRANSCRIPT
+        } else {
+            INSTRUCTIONS_STATE
+        }
+    );
     let headings: Vec<String> = sections
         .iter()
         .map(|h| one_line(h))
@@ -287,7 +304,7 @@ pub fn summary_request_with_sections(
         .collect();
     let mut schema = summary_schema();
     let instructions = if headings.is_empty() {
-        base.to_owned()
+        base
     } else {
         schema["properties"]["sections"] = json!({
             "type": "array",
@@ -438,7 +455,49 @@ mod tests {
             title: "Acme scoping".into(),
             when: "Sept 26, 2026".into(),
             participants: vec!["You".into(), "Laurie".into()],
+            about: None,
         }
+    }
+
+    #[test]
+    fn the_context_opens_with_the_saved_projects_about_block() {
+        let state =
+            MeetingState::replay("m", &[add(0, ItemKind::Decision, "Use OIDC", None, None)])
+                .unwrap();
+        let meta = SummaryMeta {
+            about: Some("Project: Beta\nYour instructions for this project:\nWatch dates.".into()),
+            ..meta()
+        };
+        let ctx = summary_context(&meta, &state, &[]);
+        assert_eq!(
+            ctx.text,
+            "## About You and this project\n\nProject: Beta\nYour instructions for this project:\n\
+             Watch dates.\n\n\
+             Meeting: Acme scoping\nWhen: Sept 26, 2026\nParticipants: You, Laurie\n\
+             \nMeeting state:\n\
+             - [decision] Use OIDC\n"
+        );
+    }
+
+    #[test]
+    fn the_instructions_make_the_saved_project_win_over_one_named_in_the_items() {
+        let state = MeetingState::replay("m", &[]).unwrap();
+        for transcript in [vec![], vec![line(0, "You", "hello")]] {
+            let ctx = summary_context(&meta(), &state, &transcript);
+            let request = summary_request(&ctx, Duration::from_secs(1));
+            assert!(request
+                .instructions
+                .contains("If the context has \"About You and this project\""));
+            assert!(request
+                .instructions
+                .contains("do not carry that name into the summary"));
+        }
+        let ctx = summary_context(&meta(), &state, &[]);
+        let with_sections =
+            summary_request_with_sections(&ctx, Duration::from_secs(1), &["Risks".into()]);
+        assert!(with_sections
+            .instructions
+            .contains("do not carry that name into the summary"));
     }
 
     #[test]
