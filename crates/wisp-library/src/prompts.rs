@@ -487,8 +487,9 @@ pub(crate) mod tests {
             .unwrap();
             lib.conn
                 .execute_batch(&format!(
-                    "{}{}DROP TABLE prompt_run; DROP TABLE prompt; DROP TABLE project_item;
+                    "{}{}{}DROP TABLE prompt_run; DROP TABLE prompt; DROP TABLE project_item;
                      PRAGMA user_version = 10;",
+                    crate::store::DROP_V15,
                     crate::store::DROP_V14,
                     crate::store::DROP_V13
                 ))
@@ -499,7 +500,7 @@ pub(crate) mod tests {
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 14);
+        assert_eq!(version, 15);
         assert_eq!(lib.count().unwrap(), 1);
         assert_eq!(lib.list_prompts().unwrap().len(), BUILTIN_PROMPTS.len());
         lib.insert_prompt_run(&run("m1", 1)).unwrap();

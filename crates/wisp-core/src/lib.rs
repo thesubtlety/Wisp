@@ -18,6 +18,7 @@ pub mod diarize;
 pub mod engine;
 pub mod error;
 pub mod export;
+pub mod localtime;
 pub mod meeting;
 pub mod meeting_types;
 pub mod model;

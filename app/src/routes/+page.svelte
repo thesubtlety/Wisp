@@ -1741,6 +1741,8 @@
     // unchanged.
     let readyFrame = requestAnimationFrame(() => {
       readyFrame = requestAnimationFrame(() => {
+        // The webview knows the user's time zone; folder export names files by local date and time.
+        void invoke("set_utc_offset", { offsetMinutes: -new Date().getTimezoneOffset() }).catch(() => {});
         void invoke("frontend_ready").catch(() => {
           /* diagnostic-only handshake; never disrupt the real UI */
         });

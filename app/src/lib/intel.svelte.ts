@@ -100,7 +100,7 @@ export type FollowUp = {
   itemId: string | null;
 };
 
-export type Project = { id: string; name: string; created_at_ms: number };
+export type Project = { id: string; name: string; created_at_ms: number; export_dir: string | null };
 
 /** A hand change to an item: fields left out stay; an empty owner or due clears it. */
 export type ItemChange = {

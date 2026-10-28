@@ -32,6 +32,9 @@ pub struct Project {
     pub id: String,
     pub name: String,
     pub created_at_ms: i64,
+    /// The folder the project's meetings are written to as files (see
+    /// [`crate::Library::sync_export_file`]), once the user picked one.
+    pub export_dir: Option<String>,
 }
 
 /// A project source document (one `source` row).

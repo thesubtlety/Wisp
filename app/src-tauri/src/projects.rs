@@ -49,6 +49,7 @@ pub(crate) fn edit_meeting_item(
     change: ItemChange,
 ) -> Result<Vec<StateItem>, String> {
     let meeting = edit_saved_item(&mut *library(&state)?, &id, &item_id, &change, now_ms())?;
+    crate::folder_export::after_change(&state, &id);
     Ok(all_items(meeting))
 }
 

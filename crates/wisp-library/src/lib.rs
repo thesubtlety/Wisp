@@ -11,6 +11,7 @@
 
 mod ask;
 mod embed;
+mod folder_export;
 mod llm_log;
 mod meeting_types;
 mod memory;
@@ -25,6 +26,9 @@ mod store;
 
 pub use ask::AskTurnRow;
 pub use embed::Embedder;
+pub use folder_export::{
+    export_file_name, file_stem, front_matter, ExportFile, ExportTarget, SyncReport, EXPORT_KINDS,
+};
 pub use llm_log::{LlmCall, LlmTotals};
 pub use meeting_types::MeetingType;
 pub use memory::{MeetingKnowledge, MemoryEntry, MemoryInput, ProvenanceRef};
@@ -50,6 +54,9 @@ pub enum LibraryError {
     /// An [`Embedder`] failed to produce vectors (model load or inference error).
     #[error("embedding error: {0}")]
     Embed(String),
+    /// A file in an export folder could not be read, written or removed.
+    #[error("export file error: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 /// Result of a library operation.

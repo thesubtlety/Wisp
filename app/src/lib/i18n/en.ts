@@ -167,6 +167,16 @@ export const en = {
     keep: "Keep",
     keepTitle: "Save as project knowledge",
     kept: "Kept",
+    exportFolder: "Export folder",
+    exportFolderHelp:
+      "Wisp writes this project's meetings here as files, for other apps to read, and keeps them up to date. Which files is set under Settings › Storage.",
+    exportFolderNone: "No folder picked.",
+    exportFolderChoose: "Choose…",
+    exportFolderClear: "Clear",
+    exportSyncNow: "Sync now",
+    exportSyncing: "Syncing…",
+    exportSynced: (s: { written: number; unchanged: number; removed: number; skipped: string[] }): string =>
+      `${s.written} written, ${s.unchanged} up to date, ${s.removed} removed, ${s.skipped.length} left alone (changed outside Wisp).`,
     name: "Name",
   },
 
@@ -643,6 +653,24 @@ export const en = {
     storageNotes: "Notes",
     storageData: "App data",
     openFolder: "Open",
+    folderExport: "Export to project folders",
+    folderExportIntro:
+      "Writes each saved meeting into its project's folder as files other apps can read, and keeps them up to date. Pick a folder per project under Projects › Settings. Files changed outside Wisp are left alone.",
+    folderExportKinds: {
+      summary: "Summary",
+      transcript: "Transcript",
+      record: "Record",
+      packet: "AI context",
+      json: "State JSON",
+    },
+    folderExportSyncLabel: "Write every project's files now",
+    folderExportSync: "Sync all",
+    folderExportSyncing: "Syncing…",
+    folderExportStatus: (
+      when: string,
+      s: { written: number; unchanged: number; removed: number; skipped: string[] },
+    ): string =>
+      `Last sync ${when}: ${s.written} written, ${s.unchanged} up to date, ${s.removed} removed, ${s.skipped.length} left alone (changed outside Wisp).`,
   },
 
   // AI assist / notes panel (AiNotes.svelte). "✦ Models" / "AI" / "API" / provider names stay

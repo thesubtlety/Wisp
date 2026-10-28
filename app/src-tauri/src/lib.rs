@@ -64,6 +64,7 @@ mod assist;
 mod audit;
 mod context;
 mod dictation;
+mod folder_export;
 mod intel;
 mod meeting;
 mod meeting_types;
@@ -210,6 +211,7 @@ struct AppState {
     custom_models: Mutex<Vec<CustomModel>>,
     /// Directory holding each imported model's files, and the registry JSON beside it.
     custom_models_dir: PathBuf,
+    folder_export: folder_export::FolderExportState,
 }
 
 /// Serializable transcript segment delivered to the UI.
@@ -3897,6 +3899,8 @@ fn save_note(
             eprintln!("wisp: saving meeting intelligence failed: {e}");
         }
     }
+    drop(library);
+    folder_export::after_change(&state, &id);
     Ok(())
 }
 
@@ -3948,6 +3952,8 @@ fn set_library_speaker_name(
     if let Err(e) = intel::relabel_saved_speaker(&mut library, &id, speaker, &before, &after) {
         eprintln!("wisp: relabeling a renamed speaker in the meeting's artifacts failed: {e}");
     }
+    drop(library);
+    folder_export::after_change(&state, &id);
     Ok(())
 }
 
@@ -3960,12 +3966,14 @@ fn merge_library_speaker(
     from: u32,
     into: u32,
 ) -> Result<usize, String> {
-    state
+    let moved = state
         .library
         .lock()
         .map_err(|_| "library lock poisoned".to_owned())?
         .merge_speaker(&id, from, into)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    folder_export::after_change(&state, &id);
+    Ok(moved)
 }
 
 /// Every stored meeting, newest first, for the Library list.
@@ -4040,6 +4048,7 @@ fn search_library(
 /// Deletes a stored meeting; returns whether it existed.
 #[tauri::command]
 fn delete_library_note(state: State<'_, AppState>, id: String) -> Result<bool, String> {
+    folder_export::before_delete(&state, &id);
     state
         .library
         .lock()
@@ -4559,6 +4568,9 @@ pub fn run() {
                 cloud_custom_endpoints_path,
                 custom_models: Mutex::new(custom_models),
                 custom_models_dir,
+                folder_export: folder_export::FolderExportState::load(
+                    data_dir.join("folder-export.json"),
+                ),
             });
 
             audit::spawn_writer(app.handle());
@@ -4704,6 +4716,13 @@ pub fn run() {
             retention::get_retention,
             retention::preview_retention,
             retention::set_retention,
+            folder_export::get_folder_export,
+            folder_export::set_folder_export_kinds,
+            folder_export::set_utc_offset,
+            folder_export::pick_project_export_dir,
+            folder_export::clear_project_export_dir,
+            folder_export::sync_project_export,
+            folder_export::sync_all_exports,
             retention::prune_now,
             retention::delete_project_completely,
             assist::realtime::stop_assist_realtime,

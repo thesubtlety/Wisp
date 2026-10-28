@@ -1084,6 +1084,7 @@ pub(crate) async fn meeting_summarize(
             .map_err(|_| "library lock poisoned".to_owned())?
             .set_summary(&id, &markdown)
             .map_err(|e| e.to_string())?;
+        crate::folder_export::after_change(&state, &id);
         Ok(SummaryDto {
             markdown,
             from_transcript: context.from_transcript,
@@ -1241,6 +1242,8 @@ pub(crate) fn intel_review_apply(state: State<'_, AppState>) -> Result<usize, St
     if let Ok(mut slot) = state.intel.review.lock() {
         *slot = None;
     }
+    drop(library);
+    crate::folder_export::after_change(&state, &id);
     Ok(count)
 }
 
@@ -1429,15 +1432,21 @@ pub(crate) fn rename_note(
     if title.is_empty() {
         return Err("a meeting needs a title".to_owned());
     }
-    let library = state
-        .library
-        .lock()
-        .map_err(|_| "library lock poisoned".to_owned())?;
-    match if_title {
-        Some(expected) => library.rename_meeting_if(&id, title, &expected),
-        None => library.rename_meeting(&id, title),
+    let renamed = {
+        let library = state
+            .library
+            .lock()
+            .map_err(|_| "library lock poisoned".to_owned())?;
+        match if_title {
+            Some(expected) => library.rename_meeting_if(&id, title, &expected),
+            None => library.rename_meeting(&id, title),
+        }
+        .map_err(|e| e.to_string())?
+    };
+    if renamed {
+        crate::folder_export::after_change(&state, &id);
     }
-    .map_err(|e| e.to_string())
+    Ok(renamed)
 }
 
 /// Files a saved meeting under `project_id`, or under no project when it's empty or absent. Project
@@ -1449,7 +1458,7 @@ pub(crate) fn set_note_project(
     project_id: Option<String>,
 ) -> Result<bool, String> {
     let project = project_id.as_deref().filter(|p| !p.is_empty());
-    state
+    let moved = state
         .library
         .lock()
         .map_err(|_| "library lock poisoned".to_owned())?
@@ -1460,7 +1469,11 @@ pub(crate) fn set_note_project(
             } else {
                 e.to_string()
             }
-        })
+        })?;
+    if moved {
+        crate::folder_export::after_change(&state, &id);
+    }
+    Ok(moved)
 }
 
 /// How `project_id`'s knowledge relates to the saved meeting `id`: entries learned only from it
@@ -1700,7 +1713,7 @@ impl ExportSource {
     }
 }
 
-fn project_name(library: &Library, id: Option<&str>) -> Option<String> {
+pub(crate) fn project_name(library: &Library, id: Option<&str>) -> Option<String> {
     let id = id?;
     let name = library
         .list_projects()
@@ -1907,7 +1920,7 @@ fn render_summary(
 }
 
 /// `kind` is `summary`, `record`, `transcript`, `packet` or `json`.
-fn render_export(
+pub(crate) fn render_export(
     state: &AppState,
     id: Option<&str>,
     kind: &str,

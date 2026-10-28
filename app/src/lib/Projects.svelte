@@ -273,6 +273,38 @@
     if (!settingsError) renaming = false;
   }
 
+  // The project's export folder: the backend shows the folder dialog and stores the choice, then
+  // writes the project's meetings there. The folder shows from the refreshed project list.
+  let exportBusy = $state(false);
+  let exportNote = $state("");
+  type SyncStatus = { written: number; unchanged: number; removed: number; skipped: string[]; error: string | null };
+  async function exportAction(run: () => Promise<SyncStatus | null>) {
+    exportBusy = true;
+    exportNote = "";
+    try {
+      const status = await run();
+      if (status) exportNote = i18n.t.projects.exportSynced(status);
+      settingsError = "";
+    } catch (e) {
+      settingsError = String(e);
+    } finally {
+      // The folder is stored before its first sync, so refresh even when that sync failed.
+      await loadProjects();
+      exportBusy = false;
+    }
+  }
+  const pickExportDir = () =>
+    exportAction(async () =>
+      project?.id ? invoke<SyncStatus | null>("pick_project_export_dir", { projectId: project.id }) : null,
+    );
+  const clearExportDir = () =>
+    exportAction(async () => {
+      if (project?.id) await invoke("clear_project_export_dir", { projectId: project.id });
+      return null;
+    });
+  const syncExport = () =>
+    exportAction(async () => (project?.id ? invoke<SyncStatus>("sync_project_export", { projectId: project.id }) : null));
+
   async function saveInstructions() {
     const id = project?.id;
     if (!id) return;
@@ -643,6 +675,20 @@
               {#each intel.meetingTypes as t (t.id)}<option value={t.id}>{t.name}</option>{/each}
             </select>
           </div>
+
+          <span class="label">{i18n.t.projects.exportFolder}</span>
+          <p class="quiet small">{i18n.t.projects.exportFolderHelp}</p>
+          <p class="instructions">{project.export_dir ?? i18n.t.projects.exportFolderNone}</p>
+          <div class="row-btns">
+            <button class="btn" disabled={exportBusy} onclick={pickExportDir}>{i18n.t.projects.exportFolderChoose}</button>
+            {#if project.export_dir}
+              <button class="btn" disabled={exportBusy} onclick={syncExport}
+                >{exportBusy ? i18n.t.projects.exportSyncing : i18n.t.projects.exportSyncNow}</button
+              >
+              <button class="btn" disabled={exportBusy} onclick={clearExportDir}>{i18n.t.projects.exportFolderClear}</button>
+            {/if}
+          </div>
+          {#if exportNote}<p class="quiet small">{exportNote}</p>{/if}
 
           <div class="danger-zone">
             <button class="btn danger-outline" onclick={() => (deleteOpen = true)}>{i18n.t.projects.deleteProject}</button>

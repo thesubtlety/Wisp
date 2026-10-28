@@ -191,20 +191,22 @@ impl Library {
             id: id.to_owned(),
             name: name.to_owned(),
             created_at_ms,
+            export_dir: None,
         })
     }
 
     /// Every project, by name.
     pub fn list_projects(&self) -> Result<Vec<Project>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id, name, created_at_ms FROM project ORDER BY name COLLATE NOCASE")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, created_at_ms, export_dir FROM project ORDER BY name COLLATE NOCASE",
+        )?;
         let rows = stmt
             .query_map([], |r| {
                 Ok(Project {
                     id: r.get(0)?,
                     name: r.get(1)?,
                     created_at_ms: r.get(2)?,
+                    export_dir: r.get(3)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -605,7 +607,7 @@ fn delete_managed(paths: impl IntoIterator<Item = PathBuf>, root: &Path, report:
     }
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 

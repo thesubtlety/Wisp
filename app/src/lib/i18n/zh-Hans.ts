@@ -130,6 +130,15 @@ export const zhHans: Messages = {
     tabKnowledge: "知识",
     tabBrief: "简报",
     tabSettings: "设置",
+    exportFolder: "导出文件夹",
+    exportFolderHelp: "Wisp 会把该项目的会议以文件形式写到这里供其他 app 读取，并保持更新。要写入哪些文件，在「设置 › 存储空间」中选择。",
+    exportFolderNone: "尚未选择文件夹。",
+    exportFolderChoose: "选择…",
+    exportFolderClear: "清除",
+    exportSyncNow: "立即同步",
+    exportSyncing: "同步中…",
+    exportSynced: (s: { written: number; unchanged: number; removed: number; skipped: string[] }): string =>
+      `写入 ${s.written} 个，${s.unchanged} 个已是最新，删除 ${s.removed} 个，${s.skipped.length} 个未改动（在 Wisp 之外修改过）。`,
     openCommitments: "未完成的承诺",
     openQuestions: "未解决的问题",
     recentDecisions: "近期决定",
@@ -592,6 +601,24 @@ export const zhHans: Messages = {
     storageModels: "模型",
     storageNotes: "笔记",
     storageData: "App 数据",
+    folderExport: "导出到项目文件夹",
+    folderExportIntro:
+      "把每场已保存的会议以文件形式写入其项目的文件夹，供其他 app 读取，并保持更新。请在「项目 › 设置」中为每个项目选择文件夹。在 Wisp 之外修改过的文件不会被改动。",
+    folderExportKinds: {
+      summary: "摘要",
+      transcript: "转写稿",
+      record: "会议记录",
+      packet: "AI 上下文",
+      json: "状态 JSON",
+    },
+    folderExportSyncLabel: "立即写入所有项目的文件",
+    folderExportSync: "全部同步",
+    folderExportSyncing: "同步中…",
+    folderExportStatus: (
+      when: string,
+      s: { written: number; unchanged: number; removed: number; skipped: string[] },
+    ): string =>
+      `上次同步 ${when}：写入 ${s.written} 个，${s.unchanged} 个已是最新，删除 ${s.removed} 个，${s.skipped.length} 个未改动（在 Wisp 之外修改过）。`,
     openFolder: "打开",
   },
 

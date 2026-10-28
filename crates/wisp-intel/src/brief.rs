@@ -133,18 +133,7 @@ pub const MAX_DONE: usize = 50;
 /// `YYYY-MM-DD` for epoch ms `ms`, shifted by `offset_minutes` east of UTC (so local dates match
 /// the user's calendar).
 pub fn iso_date(ms: i64, offset_minutes: i32) -> String {
-    let days = (ms + i64::from(offset_minutes) * 60_000).div_euclid(DAY_MS);
-    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + i64::from(month <= 2);
-    format!("{year:04}-{month:02}-{day:02}")
+    wisp_core::localtime::LocalTime::from_epoch_ms(ms, offset_minutes).iso_date()
 }
 
 /// Knowledge kinds in the order the brief lists them, with their headings.

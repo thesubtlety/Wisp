@@ -217,6 +217,61 @@
     }
   }
 
+  // Folder export: which artifacts every project's folder gets (the folders themselves are picked
+  // per project under Projects). Changing a kind rewrites every folder; "Sync all" does it on demand.
+  type FolderExportStatus = {
+    lastSyncMs: number | null;
+    written: number;
+    unchanged: number;
+    removed: number;
+    skipped: string[];
+    error: string | null;
+  };
+  type FolderExport = { kinds: string[]; status: FolderExportStatus };
+  const FOLDER_EXPORT_KINDS = ["summary", "transcript", "record", "packet", "json"] as const;
+  let folderExport = $state<FolderExport | null>(null);
+  let folderExportBusy = $state(false);
+  let folderExportError = $state("");
+
+  async function loadFolderExport() {
+    try {
+      folderExport = await invoke<FolderExport>("get_folder_export");
+    } catch (e) {
+      folderExportError = String(e);
+    }
+  }
+
+  async function folderExportAction(run: () => Promise<FolderExport>) {
+    folderExportBusy = true;
+    try {
+      folderExport = await run();
+      folderExportError = "";
+    } catch (e) {
+      folderExportError = String(e);
+      // A kind change is saved before the sync that can fail: show what is actually set.
+      await loadFolderExport();
+    } finally {
+      folderExportBusy = false;
+    }
+  }
+
+  function toggleFolderExportKind(kind: string) {
+    const current = folderExport?.kinds ?? [];
+    const kinds = current.includes(kind) ? current.filter((k) => k !== kind) : [...current, kind];
+    void folderExportAction(() => invoke<FolderExport>("set_folder_export_kinds", { kinds }));
+  }
+
+  function syncAllExports() {
+    void folderExportAction(async () => {
+      const status = await invoke<FolderExportStatus>("sync_all_exports");
+      return { kinds: folderExport?.kinds ?? [], status };
+    });
+  }
+
+  function fmtSyncTime(ms: number): string {
+    return new Date(ms).toLocaleString(i18n.locale, { dateStyle: "medium", timeStyle: "short" });
+  }
+
   // Reveal a file in its folder, or open a folder directly — both surface it in the OS file manager.
   async function openLocation(path: string, reveal: boolean) {
     try {
@@ -409,6 +464,7 @@
       loadDictation();
       loadDownloadSettings();
       loadPaths();
+      loadFolderExport();
       loadInstalledModels();
       loadRetention();
       loadReasoning();
@@ -600,6 +656,35 @@
                 {autoSave ? i18n.t.settings.on : i18n.t.settings.off}
               </button>
             </div>
+
+            <p class="set-label models-head">{i18n.t.settings.folderExport}</p>
+            <p class="set-intro">{i18n.t.settings.folderExportIntro}</p>
+            {#if folderExport}
+              {#each FOLDER_EXPORT_KINDS as kind (kind)}
+                <div class="set-row">
+                  <span class="set-label">{i18n.t.settings.folderExportKinds[kind]}</span>
+                  <button
+                    class="set-btn"
+                    class:on={folderExport.kinds.includes(kind)}
+                    disabled={folderExportBusy}
+                    onclick={() => toggleFolderExportKind(kind)}
+                  >
+                    {folderExport.kinds.includes(kind) ? i18n.t.settings.on : i18n.t.settings.off}
+                  </button>
+                </div>
+              {/each}
+              <div class="set-row">
+                <span class="set-label">{i18n.t.settings.folderExportSyncLabel}</span>
+                <button class="set-btn" disabled={folderExportBusy} onclick={syncAllExports}>
+                  {folderExportBusy ? i18n.t.settings.folderExportSyncing : i18n.t.settings.folderExportSync}
+                </button>
+              </div>
+              {#if folderExport.status.lastSyncMs}
+                <p class="set-note">{i18n.t.settings.folderExportStatus(fmtSyncTime(folderExport.status.lastSyncMs), folderExport.status)}</p>
+              {/if}
+              {#if folderExport.status.error}<p class="set-error">{folderExport.status.error}</p>{/if}
+            {/if}
+            {#if folderExportError}<p class="set-error">{folderExportError}</p>{/if}
 
             <div class="set-row">
               <span class="set-label">{i18n.t.settings.meetingIntel}</span>

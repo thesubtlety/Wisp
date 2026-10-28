@@ -13,7 +13,7 @@ use crate::retention::RetentionPolicy;
 use crate::Result;
 
 /// On-disk schema version, bumped on schema changes (drives migration via `PRAGMA user_version`).
-const SCHEMA_VERSION: i64 = 14;
+const SCHEMA_VERSION: i64 = 15;
 
 /// Characters of transcript kept as a list preview.
 const PREVIEW_CHARS: usize = 160;
@@ -337,6 +337,30 @@ CREATE TABLE ask_turn (
 CREATE INDEX ask_turn_meeting ON ask_turn (meeting_id);
 ";
 
+/// Schema v15 — folder export: a project may name a folder its meetings are written to as files,
+/// and `export_file` records what was written where (one row per meeting and kind, with the content
+/// hash), so a later write can tell Wisp's own unchanged file from one edited outside Wisp. The rows
+/// go with the meeting; the files, in the user's folder, are handled by the caller.
+pub(crate) const SCHEMA_V15: &str = "\
+ALTER TABLE project ADD COLUMN export_dir TEXT;
+CREATE TABLE export_file (
+    meeting_id    TEXT NOT NULL REFERENCES meeting (id) ON DELETE CASCADE,
+    kind          TEXT NOT NULL,
+    path          TEXT NOT NULL,
+    sha256        TEXT NOT NULL,
+    written_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (meeting_id, kind)
+);
+";
+
+/// Undoes [`SCHEMA_V15`], for tests that rebuild an older database from a current one. Drop it
+/// first when stepping further back, newest schema first.
+#[cfg(test)]
+pub(crate) const DROP_V15: &str = "\
+DROP TABLE export_file;
+ALTER TABLE project DROP COLUMN export_dir;
+";
+
 /// Undoes [`SCHEMA_V13`], for tests that rebuild an older database from a current one.
 #[cfg(test)]
 pub(crate) const DROP_V13: &str = "\
@@ -416,7 +440,7 @@ impl Library {
             .pragma_query_value(None, "user_version", |r| r.get(0))?;
         // Each step commits with its version, so a failed step leaves the database at the previous
         // version rather than half-migrated (a re-run ALTER TABLE would fail on the duplicate column).
-        let steps: [(i64, &str); 14] = [
+        let steps: [(i64, &str); 15] = [
             (1, SCHEMA_V1),
             (2, SCHEMA_V2),
             (3, SCHEMA_V3),
@@ -431,6 +455,7 @@ impl Library {
             (12, SCHEMA_V12),
             (13, SCHEMA_V13),
             (14, SCHEMA_V14),
+            (15, SCHEMA_V15),
         ];
         for (step, sql) in steps {
             if version >= step {
