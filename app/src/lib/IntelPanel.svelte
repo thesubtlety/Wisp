@@ -9,6 +9,7 @@
   import MeetingState from "$lib/MeetingState.svelte";
   import MeetingExports from "$lib/MeetingExports.svelte";
   import SummaryView from "$lib/SummaryView.svelte";
+  import PromptRunner from "$lib/PromptRunner.svelte";
   import {
     intel,
     askQuestion,
@@ -36,7 +37,20 @@
     type AskAnswer,
   } from "$lib/intel.svelte";
 
-  let { running }: { running: boolean } = $props();
+  let {
+    running,
+    promptTranscript = "",
+    promptSpeakers = [],
+    promptTitle,
+  }: {
+    running: boolean;
+    /** The live transcript, one "Name: text" line per turn, for the Prompts tab before the meeting is saved. */
+    promptTranscript?: string;
+    /** Speaker labels or names to offer for a speaker prompt. */
+    promptSpeakers?: string[];
+    /** The live meeting's title, filling {title} before the meeting is saved. */
+    promptTitle?: string;
+  } = $props();
 
   // Opening Insights marks what's new there seen.
   $effect(() => {
@@ -53,6 +67,10 @@
   let draft = $state("");
   let reviewDraft = $state("");
   const canReview = $derived(!running && !!intel.savedMeetingId);
+  // The meeting type's suggested prompts, listed first in the Prompts tab.
+  const suggestedPrompts = $derived(
+    intel.meetingTypes.find((t) => t.id === intel.liveType?.typeId)?.suggestedPrompts ?? [],
+  );
   const projectName = $derived(intel.projects.find((p) => p.id === intel.savedProjectId)?.name ?? "");
   // The State view shows the selected project's knowledge.
   $effect(() => {
@@ -131,6 +149,9 @@
         {i18n.t.intel.tabSummary}
       </button>
     {/if}
+    <button role="tab" aria-selected={intel.tab === "prompts"} class:on={intel.tab === "prompts"} onclick={() => (intel.tab = "prompts")}>
+      {i18n.t.prompts.tab}
+    </button>
     <button class="activity" onclick={() => (activityOpen = true)}>{i18n.t.audit.title}</button>
   </div>
 
@@ -362,6 +383,18 @@
         >
       </div>
     {/if}
+  {:else if intel.tab === "prompts"}
+    <!-- Over the saved meeting once there is one (runs are kept, as in the Library); until then over
+         the live transcript, where runs are not kept. -->
+    <div class="feed">
+      {#key canReview ? intel.savedMeetingId : "live"}
+        {#if canReview && intel.savedMeetingId}
+          <PromptRunner meetingId={intel.savedMeetingId} suggested={suggestedPrompts} speakers={promptSpeakers} />
+        {:else}
+          <PromptRunner live transcript={promptTranscript} suggested={suggestedPrompts} speakers={promptSpeakers} title={promptTitle} />
+        {/if}
+      {/key}
+    </div>
   {:else if intel.tab === "ask"}
     <div class="feed" bind:this={feedEl}>
       {#if !intel.turns.length}

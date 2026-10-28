@@ -241,7 +241,7 @@ export const intel = $state({
   cards: [] as Card[],
   /** Cards shown since the Insights view was last open. */
   unseen: 0,
-  tab: "insights" as "insights" | "ask" | "state" | "review" | "summary",
+  tab: "insights" as "insights" | "ask" | "state" | "review" | "summary" | "prompts",
   /** The just-saved meeting a post-call review can run on. */
   savedMeetingId: "",
   /** When the current live meeting started (epoch ms), for exports. */

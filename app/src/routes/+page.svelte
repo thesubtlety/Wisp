@@ -1286,6 +1286,18 @@
   let moreOpen = $state(false);
   // The saved-prompt runner, opened from the "⋯" menu over the current Live or File transcript.
   let promptsOpen = $state(false);
+  // "Run a saved prompt…" goes to the intelligence panel's Prompts tab when that panel can show (a
+  // live meeting with intelligence on); otherwise, as for a file transcription, it opens the modal.
+  function openPrompts() {
+    moreOpen = false;
+    if (mode === "live" && intelEnabled && (running || segments.length)) {
+      liveIntelOpen = true;
+      liveAssistOpen = false;
+      intel.tab = "prompts";
+    } else {
+      promptsOpen = true;
+    }
+  }
   // Whether the transcript's compact "Export ▾" menu is open (collapses MD/TXT/SRT into one control).
   let exportMenuOpen = $state(false);
   let liveBodyEl = $state<HTMLElement | null>(null);
@@ -2044,12 +2056,7 @@
               moreOpen = false;
             }}>{assistOn ? i18n.t.live.hideAssist : i18n.t.live.openAssist}</button
           >
-          <button
-            role="menuitem"
-            onclick={() => {
-              promptsOpen = true;
-              moreOpen = false;
-            }}>{i18n.t.prompts.runSaved}</button
+          <button role="menuitem" onclick={openPrompts}>{i18n.t.prompts.runSaved}</button
           >
         </div>
       {/if}
@@ -2646,7 +2653,7 @@
             container={liveBodyEl}
             onclose={() => (liveIntelOpen = false)}
           >
-            <IntelPanel {running} />
+            <IntelPanel {running} promptTranscript={liveTranscriptText} {promptSpeakers} promptTitle={meetingTitle.trim() || undefined} />
           </AssistPanel>
         {/if}
       </div>
