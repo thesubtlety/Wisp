@@ -5,6 +5,7 @@
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { open } from "@tauri-apps/plugin-dialog";
+  import { getVersion } from "@tauri-apps/api/app";
   import { onDestroy, onMount } from "svelte";
   import { fly } from "svelte/transition";
   import Modal from "$lib/Modal.svelte";
@@ -798,6 +799,8 @@
   let intelEnabled = $state(localStorage.getItem("wisp.intel") === "true");
   // The intelligence panel shares the assist panel's slot; opening one closes the other.
   let liveIntelOpen = $state(false);
+  // The app version from tauri.conf.json, shown small in the bottom-right corner.
+  let appVersion = $state("");
   // An optional title for the live meeting; empty saves it under the date.
   let meetingTitle = $state("");
   // The local model suggests a title ~3 minutes in and again after save, but only while the user
@@ -1743,6 +1746,9 @@
       readyFrame = requestAnimationFrame(() => {
         // The webview knows the user's time zone; folder export names files by local date and time.
         void invoke("set_utc_offset", { offsetMinutes: -new Date().getTimezoneOffset() }).catch(() => {});
+        void getVersion()
+          .then((v) => (appVersion = v))
+          .catch(() => {});
         void invoke("frontend_ready").catch(() => {
           /* diagnostic-only handshake; never disrupt the real UI */
         });
@@ -3214,9 +3220,25 @@
       }}
     />
   {/if}
+  {#if appVersion}<span class="app-version" aria-hidden="true">v{appVersion}</span>{/if}
 </main>
 
 <style>
+  /* The version, tiny in the bottom-right corner, out of the way of every control. */
+  .app-version {
+    position: fixed;
+    right: 8px;
+    bottom: 5px;
+    z-index: 5;
+    font-size: 10px;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+    color: var(--muted);
+    opacity: 0.6;
+    pointer-events: none;
+    user-select: none;
+  }
+
   :global(:root) {
     --bg: #f7f4ee;
     --surface: #fdfcfa;
